@@ -36,7 +36,7 @@ const fixture = JSON.parse(await readFile(new URL("../fixtures/demo-portfolio.js
 assert.equal(parsePriceNumber("€1.234,56"), 1234.56);
 assert.equal(parsePriceNumber("1234.56"), 1234.56);
 
-assert.deepEqual(parsePriceCsv("ticker;price\nBTC;52650,25\nVWCE;162.36"), {
+assert.deepEqual(JSON.parse(JSON.stringify(parsePriceCsv("ticker;price\nBTC;52650,25\nVWCE;162.36"))), {
   BTC: 52650.25,
   VWCE: 162.36
 });
@@ -57,7 +57,7 @@ const yahooQuote = parseYahooChartQuote({
     }]
   }
 });
-assert.deepEqual(yahooQuote, {
+assert.deepEqual(JSON.parse(JSON.stringify(yahooQuote)), {
   symbol: "TSLA",
   price: 406.43,
   currency: "USD",
@@ -68,7 +68,7 @@ assert.equal(Number(convertQuoteToEur(yahooQuote, { USD_EUR: 0.86453 }).priceEur
 assert.equal(convertQuoteToEur({ ...yahooQuote, currency: "GBP" }, { USD_EUR: 0.86453 }), null);
 assert.equal(parseYahooChartQuote({ chart: { result: [{ meta: { symbol: "BAD", regularMarketPrice: 0, currency: "USD" } }] } }), null);
 
-assert.deepEqual(dcaDates("2026-01-01", "monthly", "2026-03-01"), [
+assert.deepEqual(JSON.parse(JSON.stringify(dcaDates("2026-01-01", "monthly", "2026-03-01"))), [
   "2026-01-01",
   "2026-02-01",
   "2026-03-01"

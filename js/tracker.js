@@ -483,6 +483,8 @@ function upgradedBundledImport(parsed) {
   const currentVersion = parsed.meta?.sourceVersion || "";
   const bundledVersion = bundled.meta?.sourceVersion || "";
   const hasExcelHistory = Array.isArray(parsed.transactions) && parsed.transactions.some((item) => item.source === "Bitvavo Excel");
+  const restoredCrypto = restoreBundledCryptoIfMissing(parsed, bundled);
+  if (restoredCrypto) return restoredCrypto;
   if (currentVersion === bundledVersion) return null;
   if (hasExcelHistory) {
     const bundledAvg = bundled.avgPrices && typeof bundled.avgPrices === "object" ? bundled.avgPrices : {};
@@ -511,6 +513,34 @@ function upgradedBundledImport(parsed) {
   const upgraded = normalizeState(structuredClone(bundled));
   localStorage.setItem(STORAGE_KEY, JSON.stringify(upgraded));
   return upgraded;
+}
+
+function restoreBundledCryptoIfMissing(parsed, bundled) {
+  const bundledTransactions = Array.isArray(bundled.transactions) ? bundled.transactions : [];
+  const parsedTransactions = Array.isArray(parsed.transactions) ? parsed.transactions : [];
+  const bundledCrypto = bundledTransactions.filter((item) => item.type === "Crypto");
+  if (!bundledCrypto.length) return null;
+  const parsedCryptoTickers = new Set(parsedTransactions.filter((item) => item.type === "Crypto").map((item) => item.ticker));
+  const missingCrypto = bundledCrypto.some((item) => !parsedCryptoTickers.has(item.ticker));
+  if (!missingCrypto) return null;
+  const cryptoTickers = new Set(bundledCrypto.map((item) => item.ticker));
+  const restored = normalizeState({
+    ...parsed,
+    transactions: [
+      ...parsedTransactions.filter((item) => item.type !== "Crypto"),
+      ...bundledCrypto
+    ],
+    prices: { ...(parsed.prices || {}) },
+    priceMeta: { ...(parsed.priceMeta || {}) },
+    avgPrices: { ...(parsed.avgPrices || {}) }
+  });
+  cryptoTickers.forEach((ticker) => {
+    if (bundled.prices && ticker in bundled.prices) restored.prices[ticker] = bundled.prices[ticker];
+    if (bundled.priceMeta && ticker in bundled.priceMeta) restored.priceMeta[ticker] = bundled.priceMeta[ticker];
+    if (bundled.avgPrices && ticker in bundled.avgPrices) restored.avgPrices[ticker] = bundled.avgPrices[ticker];
+  });
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(restored));
+  return restored;
 }
 
 function emptyState() {
@@ -717,6 +747,7 @@ function restoreBackup() {
 }
 
 function sanitizeCryptoAdjustments() {
+  if (!hasCryptoSnapshotTargets()) return;
   const visibleCryptoTickers = new Set(Object.keys(CRYPTO_SNAPSHOT_QUANTITIES));
   state.transactions = state.transactions.filter((item) => {
     if (item.source !== "Crypto screenshot reconciliation") return true;
@@ -725,7 +756,12 @@ function sanitizeCryptoAdjustments() {
   removeZeroCryptoTargets();
 }
 
+function hasCryptoSnapshotTargets() {
+  return Object.keys(CRYPTO_SNAPSHOT_QUANTITIES).length > 0;
+}
+
 function removeZeroCryptoTargets() {
+  if (!hasCryptoSnapshotTargets()) return;
   const visibleCryptoTickers = new Set(Object.keys(CRYPTO_SNAPSHOT_QUANTITIES));
   state.transactions = state.transactions.filter((item) => item.type !== "Crypto" || visibleCryptoTickers.has(item.ticker));
   Object.keys(state.prices || {}).forEach((ticker) => {
@@ -3500,6 +3536,10 @@ async function refreshAssetPrices() {
 }
 
 function autoFixCryptoIfNeeded() {
+  if (!hasCryptoSnapshotTargets()) {
+    markCryptoSnapshotPrices();
+    return;
+  }
   const current = positions();
   const staleSnapshotCrypto = Object.entries(CRYPTO_SNAPSHOT_QUANTITIES).some(([ticker, targetQuantity]) => {
     const item = current.find((pos) => pos.ticker === ticker);
@@ -3620,6 +3660,7 @@ function fixDegiroSnapshot(options = {}) {
 }
 
 function fixCryptoSnapshot(options = {}) {
+  if (!hasCryptoSnapshotTargets()) return;
   state.transactions = state.transactions.filter((item) => item.source !== "Crypto screenshot reconciliation");
   removeZeroCryptoTargets();
   state.prices = { ...(state.prices || {}), ...CRYPTO_SNAPSHOT_PRICES };
@@ -3664,6 +3705,7 @@ function fixCryptoSnapshot(options = {}) {
 }
 
 function replaceCryptoWithSnapshot(options = {}) {
+  if (!hasCryptoSnapshotTargets()) return;
   state.transactions = state.transactions.filter((item) => item.type !== "Crypto");
   state.prices = { ...(state.prices || {}), ...CRYPTO_SNAPSHOT_PRICES };
   state.avgPrices = state.avgPrices || {};
