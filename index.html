@@ -3452,7 +3452,7 @@
             <input name="ticker" required placeholder="AAPL, VWCE, BTC">
           </label>
           <label>Naam
-            <input name="name" required placeholder="Apple, Vanguard FTSE All-World">
+            <input name="name" required placeholder="Naam van asset">
           </label>
           <label>Categorie
             <select name="type">
@@ -3545,57 +3545,7 @@
     };
     const DEFAULT_PURCHASE_PLANS = [];
 
-    const demoState = {
-      settings: {
-        defaultHideSmallPositions: false,
-        defaultHideSmallTransactions: false
-      },
-      avgPrices: {},
-      avgPriceCorrections: {},
-      priceMeta: {
-        VWCE: { source: "demo", updatedAt: "2026-06-07T00:00:00.000Z" },
-        ASML: { source: "demo", updatedAt: "2026-06-07T00:00:00.000Z" },
-        BTC: { source: "demo", updatedAt: "2026-06-07T00:00:00.000Z" },
-        ETH: { source: "demo", updatedAt: "2026-06-07T00:00:00.000Z" }
-      },
-      prices: {
-        VWCE: 113.4,
-        ASML: 705,
-        BTC: 68500,
-        ETH: 3220
-      },
-      transactions: [
-        tx("VWCE", "Vanguard FTSE All-World", "ETF", "buy", "2025-01-15", 8, 99.2, 113.4, false),
-        tx("VWCE", "Vanguard FTSE All-World", "ETF", "buy", "2025-04-15", 6, 104.8, 113.4, false),
-        tx("ASML", "ASML Holding", "Aandeel", "buy", "2025-03-04", 2, 640, 705, false),
-        tx("BTC", "Bitcoin", "Crypto", "buy", "2025-02-01", 0.035, 62000, 68500, false),
-        tx("ETH", "Ethereum", "Crypto", "buy", "2025-05-10", 0.7, 2850, 3220, false)
-      ],
-      dcas: [
-        {
-          id: uid(),
-          name: "VWCE maandelijks",
-          ticker: "VWCE",
-          type: "ETF",
-          quantity: 2.2,
-          price: 113.4,
-          frequency: "monthly",
-          startDate: "2025-08-01",
-          active: true
-        }
-      ],
-      purchasePlans: structuredClone(DEFAULT_PURCHASE_PLANS),
-      watchlist: [],
-      targetAllocation: { ETF: 55, Aandeel: 25, Crypto: 20, Gemengd: 0 },
-      incomeItems: [],
-      alerts: [],
-      tags: {},
-      salePlans: {},
-      snapshots: [],
-      processedMonths: [],
-      ui: { ...DEFAULT_UI },
-      chartRange: 12
-    };
+    const demoState = null;
 
     let state = loadState();
     let valueChartHoverIndex = null;
@@ -5399,7 +5349,7 @@
     function renderRebalancePlan(diagnostics) {
       const rows = [
         { tone: "info", title: "Nieuwe inleg", text: rebalanceSuggestionText(diagnostics) },
-        { tone: diagnostics.cryptoWeight > .35 ? "warn" : "good", title: "Crypto-bandbreedte", text: diagnostics.cryptoWeight > .35 ? "Stuur nieuwe DEGIRO-inleg naar ETF/aandelen tot crypto onder 35% komt." : "Crypto zit rond of onder de waarschuwingsgrens." },
+        { tone: diagnostics.cryptoWeight > .35 ? "warn" : "good", title: "Crypto-bandbreedte", text: diagnostics.cryptoWeight > .35 ? "Stuur nieuwe inleg naar onderwogen categorieen tot crypto onder 35% komt." : "Crypto zit rond of onder de waarschuwingsgrens." },
         { tone: diagnostics.top?.ticker === "VWCE" && diagnostics.top.value / Math.max(diagnostics.visibleValue, 1) > .5 ? "warn" : "info", title: "Toppositie", text: diagnostics.top ? `${diagnostics.top.ticker} is de grootste positie; nieuwe inleg kan onderwogen posities versterken.` : "Nog geen positie." }
       ];
       document.getElementById("rebalancePlan").innerHTML = rows.map(signalCard).join("");
@@ -5410,7 +5360,7 @@
     }
 
     function rebalanceSuggestionText(diagnostics) {
-      if (diagnostics.cryptoWeight > .35) return `Laat BTC-DCA op €500 staan, maar stuur de DEGIRO-pot tijdelijk vooral naar ETF/IONQ/GOOGL om crypto-weging te dempen.`;
+      if (diagnostics.cryptoWeight > .35) return "Stuur nieuwe inleg tijdelijk naar onderwogen categorieen om de crypto-weging te dempen.";
       if (diagnostics.top && diagnostics.top.value / Math.max(diagnostics.visibleValue, 1) > .45) return `Gebruik nieuwe inleg voor assets buiten ${diagnostics.top.ticker} om concentratie te verlagen zonder verkoop.`;
       return "Houd de huidige maandplannen aan en gebruik afwijkingen alleen om onderwogen categorieën bij te sturen.";
     }
