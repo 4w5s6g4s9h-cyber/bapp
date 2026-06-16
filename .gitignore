@@ -5,6 +5,7 @@ __pycache__/
 # Local portfolio data and broker exports can contain sensitive financial data.
 portfolio-import*.json
 portfolio-import-data.js
+portfolio-import-data*.zip
 herstel-portfolio*.html
 exports/
 backups/
