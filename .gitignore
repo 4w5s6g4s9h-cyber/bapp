@@ -1,0 +1,19 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Local portfolio data and broker exports can contain sensitive financial data.
+portfolio-import*.json
+portfolio-import-data.js
+portfolio-import-data*.zip
+herstel-portfolio*.html
+exports/
+backups/
+source/
+*.csv
+*.pdf
+*.xlsx
+
+# Keep anonymized fixtures and source code versioned.
+!fixtures/*.json
+!fixtures/*.csv
