@@ -1,0 +1,46 @@
+{
+  "avgPrices": {},
+  "prices": {
+    "VWCE": 120,
+    "BTC": 65000
+  },
+  "transactions": [
+    {
+      "ticker": "VWCE",
+      "name": "Vanguard FTSE All-World",
+      "type": "ETF",
+      "side": "buy",
+      "date": "2026-01-01",
+      "quantity": 10,
+      "price": 100,
+      "currentPrice": 120
+    },
+    {
+      "ticker": "VWCE",
+      "name": "Vanguard FTSE All-World",
+      "type": "ETF",
+      "side": "sell",
+      "date": "2026-02-01",
+      "quantity": 2,
+      "price": 110,
+      "currentPrice": 120
+    },
+    {
+      "ticker": "BTC",
+      "name": "Bitcoin",
+      "type": "Crypto",
+      "side": "buy",
+      "date": "2026-01-15",
+      "quantity": 0.1,
+      "price": 50000,
+      "currentPrice": 65000
+    }
+  ],
+  "dcas": [
+    {
+      "active": true,
+      "amount": 300,
+      "frequency": "monthly"
+    }
+  ]
+}

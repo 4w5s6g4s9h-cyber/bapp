@@ -1,0 +1,8 @@
+{
+  "name": "beleggingen-tracker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node tests/portfolioMath.test.mjs && python3 -m unittest discover -s tests -p '*_test.py'"
+  }
+}
