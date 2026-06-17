@@ -3485,7 +3485,7 @@
     </div>
   </div>
 
-  <input id="fileInput" type="file" accept="application/json" hidden>
+  <input id="fileInput" type="file" accept=".json,.js,application/json,text/javascript,application/javascript" hidden>
   <input id="priceFileInput" type="file" accept=".csv,.txt" hidden>
 
   <script>
@@ -3670,7 +3670,7 @@
       const data = Object.fromEntries(new FormData(event.target));
       const assets = parseDcaAssets(data.assets, data.type);
       if (!assets.length) {
-        alert("Voeg minimaal één assetregel toe, bijvoorbeeld: VWCE,1,ETF");
+        alert("Voeg minimaal één assetregel toe, bijvoorbeeld: TICKER,1,ETF");
         return;
       }
       state.dcas.push({
@@ -3738,16 +3738,21 @@
     document.getElementById("fileInput").addEventListener("change", async (event) => {
       const file = event.target.files[0];
       if (!file) return;
-      const imported = JSON.parse(await file.text());
-      createBackup(`voor import ${file.name}`);
-      state = normalizeState(imported);
-      state.meta = { ...(state.meta || {}), lastImportAt: new Date().toISOString(), lastImportFile: file.name };
-      sanitizeCryptoAdjustments();
-      applyDcaPlans();
-      persist();
-      render();
-      showImportStatus(file.name);
-      event.target.value = "";
+      try {
+        const imported = parseImportFile(await file.text());
+        createBackup(`voor import ${file.name}`);
+        state = normalizeState(imported);
+        state.meta = { ...(state.meta || {}), lastImportAt: new Date().toISOString(), lastImportFile: file.name };
+        sanitizeCryptoAdjustments();
+        applyDcaPlans();
+        persist();
+        render();
+        showImportStatus(file.name);
+      } catch (error) {
+        showImportStatus(`${file.name}: ${error.message || "import mislukt"}`);
+      } finally {
+        event.target.value = "";
+      }
     });
     document.getElementById("priceFileInput").addEventListener("change", async (event) => {
       const file = event.target.files[0];
@@ -3888,6 +3893,15 @@
       } catch {
         return emptyState();
       }
+    }
+
+    function parseImportFile(text) {
+      const trimmed = text.trim();
+      if (!trimmed) throw new Error("bestand is leeg");
+      if (trimmed.startsWith("{") || trimmed.startsWith("[")) return JSON.parse(trimmed);
+      const match = trimmed.match(/^window\.DEFAULT_IMPORT_STATE\s*=\s*([\s\S]*?)\s*;?\s*$/);
+      if (!match) throw new Error("gebruik een JSON-export of portfolio-import-data.js");
+      return JSON.parse(match[1]);
     }
 
     function defaultImportState() {
