@@ -3485,7 +3485,7 @@
     </div>
   </div>
 
-  <input id="fileInput" type="file" accept=".json,.js,application/json,text/javascript,application/javascript" hidden>
+  <input id="fileInput" type="file" accept=".json,application/json" hidden>
   <input id="priceFileInput" type="file" accept=".csv,.txt" hidden>
 
   <script>
@@ -3729,7 +3729,7 @@
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `portfolio-tracker-${todayISO()}.json`;
+      link.download = `portfolio-private-${todayISO()}.json`;
       link.click();
       URL.revokeObjectURL(url);
     });
@@ -3739,7 +3739,7 @@
       const file = event.target.files[0];
       if (!file) return;
       try {
-        const imported = parseImportFile(await file.text());
+        const imported = JSON.parse(await file.text());
         createBackup(`voor import ${file.name}`);
         state = normalizeState(imported);
         state.meta = { ...(state.meta || {}), lastImportAt: new Date().toISOString(), lastImportFile: file.name };
@@ -3893,15 +3893,6 @@
       } catch {
         return emptyState();
       }
-    }
-
-    function parseImportFile(text) {
-      const trimmed = text.trim();
-      if (!trimmed) throw new Error("bestand is leeg");
-      if (trimmed.startsWith("{") || trimmed.startsWith("[")) return JSON.parse(trimmed);
-      const match = trimmed.match(/^window\.DEFAULT_IMPORT_STATE\s*=\s*([\s\S]*?)\s*;?\s*$/);
-      if (!match) throw new Error("gebruik een JSON-export of portfolio-import-data.js");
-      return JSON.parse(match[1]);
     }
 
     function defaultImportState() {
