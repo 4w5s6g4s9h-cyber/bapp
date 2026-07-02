@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://api.coingecko.com https://open.er-api.com https://query1.finance.yahoo.com https://api.allorigins.win">
   <title>Portfolio Tracker</title>
   <link rel="stylesheet" href="css/styles.css">
-
 </head>
 <body>
   <div class="app">
@@ -190,7 +190,7 @@
                   <option value="all">Alles</option>
                 </select>
               </label>
-              <button class="ghost-btn toolbar-btn" type="button" onclick="resetTransactionFilters()">Reset filters</button>
+              <button class="ghost-btn toolbar-btn" type="button" data-action="resetTransactionFilters">Reset filters</button>
             </div>
             <div class="chip-row" id="transactionChips"></div>
             <div class="table-wrap" id="transactionsTable"></div>
@@ -375,7 +375,7 @@
                   <h3>Maandplan</h3>
                   <p>Gepland, werkelijk gekocht en status per aankoopplan.</p>
                 </div>
-                <button class="ghost-btn" type="button" onclick="markCurrentMonthProcessed()">Markeer maand als verwerkt</button>
+                <button class="ghost-btn" type="button" data-action="markCurrentMonthProcessed">Markeer maand als verwerkt</button>
               </div>
               <div class="monthly-plan-grid" id="monthlyPlanCards"></div>
             </article>
@@ -662,7 +662,7 @@
             <article class="panel">
               <div class="panel-head">
                 <div><h3>Snapshots</h3><p>Bewaar waardemomenten voor betrouwbaardere historie.</p></div>
-                <button class="ghost-btn" type="button" onclick="captureSnapshot()">Snapshot maken</button>
+                <button class="ghost-btn" type="button" data-action="captureSnapshot">Snapshot maken</button>
               </div>
               <div class="table-wrap" id="snapshotTable"></div>
             </article>
@@ -688,7 +688,7 @@
                   Prijzen
                 </button>
                 <button class="ghost-btn danger" id="resetAllDataBtn">Alle app-data wissen</button>
-                <button class="ghost-btn" type="button" onclick="restoreBackup()">Herstel laatste backup</button>
+                <button class="ghost-btn" type="button" data-action="restoreBackup">Herstel laatste backup</button>
               </div>
               <div class="empty" id="importStatus">Nog geen import uitgevoerd in deze sessie.</div>
             </article>
@@ -814,6 +814,7 @@
   <input id="fileInput" type="file" accept=".json,application/json" hidden>
   <input id="priceFileInput" type="file" accept=".csv,.txt" hidden>
 
+  <script src="js/portfolioMath.js" defer></script>
   <script src="js/tracker.js" defer></script>
 </body>
 </html>

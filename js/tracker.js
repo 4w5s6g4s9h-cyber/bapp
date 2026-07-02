@@ -1,13 +1,24 @@
     const STORAGE_KEY = "portfolio-tracker-v1";
+    // Stateless helpers komen uit de gedeelde bibliotheek (js/portfolioMath.js).
+    const {
+      parsePriceNumber,
+      parsePriceCsv,
+      parseYahooChartQuote,
+      convertQuoteToEur,
+      resolveEquityQuoteSymbol,
+      normalizeDcaAssets,
+      dcaPlanQuantity,
+      dcaDates,
+      dateToISO,
+      EQUITY_QUOTE_SYMBOLS
+    } = PortfolioMath;
     const currency = new Intl.NumberFormat("nl-NL", { style: "currency", currency: "EUR" });
     const number = new Intl.NumberFormat("nl-NL", { maximumFractionDigits: 6 });
     const pct = new Intl.NumberFormat("nl-NL", { style: "percent", maximumFractionDigits: 2 });
     const todayISO = () => new Date().toISOString().slice(0, 10);
-    const CRYPTO_SNAPSHOT_DATE = "";
-    const CRYPTO_SNAPSHOT_QUANTITIES = {};
-    const CRYPTO_SNAPSHOT_PRICES = {};
-    const DEGIRO_SNAPSHOT_DATE = "";
-    const DEGIRO_SNAPSHOT_POSITIONS = [];
+    const SCHEMA_VERSION = 2;
+    const BACKUP_KEY_PREFIX = "portfolio-tracker-backup-";
+    const MAX_BACKUPS = 5;
     const COINGECKO_IDS = {
       BTC: "bitcoin",
       ETH: "ethereum",
@@ -29,12 +40,6 @@
       MATIC: "matic-network",
       POL: "polygon-ecosystem-token"
     };
-    const EQUITY_QUOTE_SYMBOLS = {
-      VWCE: "VWCE.DE",
-      VWRL: "VWRL.AS",
-      ISPA: "ISPA.DE",
-      WTAI: "WTAI.MI"
-    };
     const YAHOO_CHART_PROXY = "https://api.allorigins.win/raw?url=";
     const USD_EUR_RATE_URL = "https://open.er-api.com/v6/latest/USD";
     const DEFAULT_UI = {
@@ -54,57 +59,36 @@
     };
     const DEFAULT_PURCHASE_PLANS = [];
 
-    const demoState = {
-      settings: {
-        defaultHideSmallPositions: false,
-        defaultHideSmallTransactions: false
+    let stateCache = { positions: null, totals: null, history: null };
+    const VIEW_RENDERERS = {
+      dashboard: (total) => {
+        renderMetrics(total);
+        renderPriceStatusCards(total);
+        renderInsights(total);
+        renderValueChartSummary(total);
+        renderAllocationLegend(total.list);
       },
-      avgPrices: {},
-      avgPriceCorrections: {},
-      priceMeta: {
-        VWCE: { source: "demo", updatedAt: "2026-06-07T00:00:00.000Z" },
-        ASML: { source: "demo", updatedAt: "2026-06-07T00:00:00.000Z" },
-        BTC: { source: "demo", updatedAt: "2026-06-07T00:00:00.000Z" },
-        ETH: { source: "demo", updatedAt: "2026-06-07T00:00:00.000Z" }
+      positions: (total) => {
+        renderPriceStatusCards(total);
+        renderPositions(total.list);
       },
-      prices: {
-        VWCE: 113.4,
-        ASML: 705,
-        BTC: 68500,
-        ETH: 3220
+      transactions: () => renderTransactions(),
+      analysis: (total) => renderAnalysis(total),
+      plans: (total) => renderPlans(total),
+      dca: (total) => {
+        renderDcaCards();
+        renderDcaSuggestions(total);
       },
-      transactions: [
-        tx("VWCE", "Vanguard FTSE All-World", "ETF", "buy", "2025-01-15", 8, 99.2, 113.4, false),
-        tx("VWCE", "Vanguard FTSE All-World", "ETF", "buy", "2025-04-15", 6, 104.8, 113.4, false),
-        tx("ASML", "ASML Holding", "Aandeel", "buy", "2025-03-04", 2, 640, 705, false),
-        tx("BTC", "Bitcoin", "Crypto", "buy", "2025-02-01", 0.035, 62000, 68500, false),
-        tx("ETH", "Ethereum", "Crypto", "buy", "2025-05-10", 0.7, 2850, 3220, false)
-      ],
-      dcas: [
-        {
-          id: uid(),
-          name: "VWCE maandelijks",
-          ticker: "VWCE",
-          type: "ETF",
-          quantity: 2.2,
-          price: 113.4,
-          frequency: "monthly",
-          startDate: "2025-08-01",
-          active: true
-        }
-      ],
-      purchasePlans: structuredClone(DEFAULT_PURCHASE_PLANS),
-      watchlist: [],
-      targetAllocation: { ETF: 55, Aandeel: 25, Crypto: 20, Gemengd: 0 },
-      incomeItems: [],
-      alerts: [],
-      tags: {},
-      salePlans: {},
-      snapshots: [],
-      processedMonths: [],
-      ui: { ...DEFAULT_UI },
-      chartRange: 12
+      watchlist: (total) => renderWatchlist(total),
+      allocation: (total) => renderAllocation(total),
+      income: (total) => renderIncome(total),
+      strategy: (total) => renderStrategy(total),
+      settings: (total) => {
+        renderAudit(total);
+        renderSettings();
+      }
     };
+    const dirtyViews = new Set();
 
     let state = loadState();
     let valueChartHoverIndex = null;
@@ -112,9 +96,8 @@
     let allocationSegments = [];
     let activeModal = null;
     let activeModalOpener = null;
-    autoFixDegiroIfNeeded();
-    autoFixCryptoIfNeeded();
-    applyDcaPlans();
+    if (applyDcaPlans()) persist();
+    if (captureDailySnapshot()) persist();
     applySidebarState();
     render();
     renderDcaAssetDraft();
@@ -154,6 +137,61 @@
 
     window.addEventListener("scroll", updateAnalysisJumpNav, { passive: true });
     document.addEventListener("keydown", handleModalKeydown);
+
+    // Gedelegeerde klik-acties voor dynamisch gerenderde knoppen; vervangt
+    // inline onclick-handlers zodat een strikte CSP mogelijk is.
+    const UI_ACTIONS = {
+      openPosition: (el) => openPositionDetail(el.dataset.ticker),
+      removeDcaAssetDraft: (el) => removeDcaAssetDraft(el.dataset.ticker),
+      filterPositionsByType: (el) => filterPositionsByType(el.dataset.type),
+      sortPositionsBy: (el) => sortPositionsBy(el.dataset.key),
+      clearPositionFilters: () => clearPositionFilters(),
+      showSmallPositions: () => showSmallPositions(),
+      showMoreTransactions: () => showMoreTransactions(),
+      setTransactionSide: (el) => setTransactionSide(el.dataset.side),
+      setTransactionSearch: (el) => setTransactionSearch(el.dataset.query),
+      setTransactionCorrections: () => setTransactionCorrections(),
+      resetTransactionFilters: () => resetTransactionFilters(),
+      removeTransaction: (el) => removeTransaction(el.dataset.id),
+      removeWatchlistItem: (el) => removeWatchlistItem(el.dataset.id),
+      removeIncomeItem: (el) => removeIncomeItem(el.dataset.id),
+      removeSalePlan: (el) => removeSalePlan(el.dataset.ticker),
+      removeAlert: (el) => removeAlert(el.dataset.id),
+      removeSnapshot: (el) => removeSnapshot(el.dataset.id),
+      toggleDca: (el) => toggleDca(el.dataset.id),
+      removeDca: (el) => removeDca(el.dataset.id),
+      resetAveragePrice: (el) => resetAveragePrice(el.dataset.ticker),
+      prefillWatchlist: (el) => {
+        const payload = parseActionPayload(el);
+        if (payload) prefillWatchlist(payload.ticker, payload.name, payload.type, payload.currentPrice, payload.targetPrice, payload.note);
+      },
+      prefillDca: (el) => {
+        const payload = parseActionPayload(el);
+        if (payload) prefillDca(payload.ticker, payload.name, payload.type, payload.quantity, payload.price);
+      },
+      updateCryptoPrices: () => updateCryptoPrices(),
+      updateEquityPrices: () => updateEquityPrices(),
+      exportPriceTemplate: () => exportPriceTemplate(),
+      importPriceCsv: () => document.getElementById("priceFileInput").click(),
+      markCurrentMonthProcessed: () => markCurrentMonthProcessed(),
+      captureSnapshot: () => captureSnapshot(),
+      restoreBackup: () => restoreBackup()
+    };
+
+    function parseActionPayload(el) {
+      try {
+        return JSON.parse(el.dataset.payload || "null");
+      } catch {
+        return null;
+      }
+    }
+
+    document.addEventListener("click", (event) => {
+      const target = event.target.closest("[data-action]");
+      if (!target) return;
+      const action = UI_ACTIONS[target.dataset.action];
+      if (action) action(target);
+    });
 
     document.getElementById("addTxBtn").addEventListener("click", openModal);
     document.getElementById("refreshPricesBtn").addEventListener("click", refreshAssetPrices);
@@ -245,7 +283,8 @@
         assets,
         frequency: data.frequency,
         startDate: data.startDate,
-        active: data.active === "true"
+        active: data.active === "true",
+        lastGeneratedDate: null
       });
       state.prices = state.prices || {};
       state.priceMeta = state.priceMeta || {};
@@ -302,14 +341,15 @@
       if (!file) return;
       try {
         const imported = JSON.parse(await file.text());
+        const issues = validateImportedState(imported);
         createBackup(`voor import ${file.name}`);
         state = normalizeState(imported);
         state.meta = { ...(state.meta || {}), lastImportAt: new Date().toISOString(), lastImportFile: file.name };
-        sanitizeCryptoAdjustments();
+        invalidateStateCache();
         applyDcaPlans();
         persist();
         render();
-        showImportStatus(file.name);
+        showImportStatus(file.name, issues);
       } catch (error) {
         showImportStatus(`${file.name}: ${error.message || "import mislukt"}`);
       } finally {
@@ -474,83 +514,30 @@
         return copy;
       }
       try {
-        const parsed = JSON.parse(raw);
-        const upgraded = upgradedBundledImport(parsed);
-        if (upgraded) return upgraded;
-        return normalizeState(parsed);
+        return normalizeState(JSON.parse(raw));
       } catch {
         return emptyState();
       }
     }
 
-    function defaultImportState() {
-      return window.DEFAULT_IMPORT_STATE ? normalizeState(structuredClone(window.DEFAULT_IMPORT_STATE)) : null;
-    }
-
-    function upgradedBundledImport(parsed) {
-      const bundled = window.DEFAULT_IMPORT_STATE;
-      if (!bundled || !parsed || typeof parsed !== "object") return null;
-      const currentVersion = parsed.meta?.sourceVersion || "";
-      const bundledVersion = bundled.meta?.sourceVersion || "";
-      const hasExcelHistory = Array.isArray(parsed.transactions) && parsed.transactions.some((item) => item.source === "Bitvavo Excel");
-      const restoredCrypto = restoreBundledCryptoIfMissing(parsed, bundled);
-      if (restoredCrypto) return restoredCrypto;
-      if (currentVersion === bundledVersion) return null;
-      if (hasExcelHistory) {
-        const bundledAvg = bundled.avgPrices && typeof bundled.avgPrices === "object" ? bundled.avgPrices : {};
-        const parsedAvg = parsed.avgPrices && typeof parsed.avgPrices === "object" ? parsed.avgPrices : {};
-        const missingAvg = Object.keys(bundledAvg).some((ticker) => !Number(parsedAvg[ticker]));
-        if (!missingAvg) return null;
-        const upgraded = normalizeState({
-          ...parsed,
-          avgPrices: { ...bundledAvg, ...parsedAvg },
-          meta: { ...(parsed.meta || {}), sourceVersion: bundledVersion }
-        });
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(upgraded));
-        return upgraded;
+    function validateImportedState(input) {
+      if (!input || typeof input !== "object" || Array.isArray(input)) {
+        throw new Error("het bestand bevat geen geldig portfolio-object");
       }
-      const looksLikeOldSnapshot = Array.isArray(parsed.transactions) && parsed.transactions.some((item) => /Bitvavo screenshot|Crypto screenshot reconciliation/i.test(item.source || ""));
-      if (!looksLikeOldSnapshot) return null;
-      try {
-        localStorage.setItem("portfolio-tracker-backup-before-excel-upgrade", JSON.stringify({
-          reason: "voor automatische Bitvavo Excel upgrade",
-          createdAt: new Date().toISOString(),
-          state: parsed
-        }));
-      } catch {
-        // Best effort backup; failing here should not block the corrected import.
+      if (input.transactions !== undefined && !Array.isArray(input.transactions)) {
+        throw new Error("het veld transactions is geen lijst");
       }
-      const upgraded = normalizeState(structuredClone(bundled));
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(upgraded));
-      return upgraded;
-    }
-
-    function restoreBundledCryptoIfMissing(parsed, bundled) {
-      const bundledTransactions = Array.isArray(bundled.transactions) ? bundled.transactions : [];
-      const parsedTransactions = Array.isArray(parsed.transactions) ? parsed.transactions : [];
-      const bundledCrypto = bundledTransactions.filter((item) => item.type === "Crypto");
-      if (!bundledCrypto.length) return null;
-      const parsedCryptoTickers = new Set(parsedTransactions.filter((item) => item.type === "Crypto").map((item) => item.ticker));
-      const missingCrypto = bundledCrypto.some((item) => !parsedCryptoTickers.has(item.ticker));
-      if (!missingCrypto) return null;
-      const cryptoTickers = new Set(bundledCrypto.map((item) => item.ticker));
-      const restored = normalizeState({
-        ...parsed,
-        transactions: [
-          ...parsedTransactions.filter((item) => item.type !== "Crypto"),
-          ...bundledCrypto
-        ],
-        prices: { ...(parsed.prices || {}) },
-        priceMeta: { ...(parsed.priceMeta || {}) },
-        avgPrices: { ...(parsed.avgPrices || {}) }
-      });
-      cryptoTickers.forEach((ticker) => {
-        if (bundled.prices && ticker in bundled.prices) restored.prices[ticker] = bundled.prices[ticker];
-        if (bundled.priceMeta && ticker in bundled.priceMeta) restored.priceMeta[ticker] = bundled.priceMeta[ticker];
-        if (bundled.avgPrices && ticker in bundled.avgPrices) restored.avgPrices[ticker] = bundled.avgPrices[ticker];
-      });
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(restored));
-      return restored;
+      const issues = [];
+      const transactions = Array.isArray(input.transactions) ? input.transactions : [];
+      const invalidDates = transactions.filter((item) => !/^\d{4}-\d{2}-\d{2}/.test(String(item?.date || ""))).length;
+      const invalidQuantities = transactions.filter((item) => !Number.isFinite(Number(item?.quantity)) || Number(item?.quantity) <= 0).length;
+      const negativePrices = transactions.filter((item) => Number(item?.price) < 0).length;
+      const unknownSides = transactions.filter((item) => item?.side && !["buy", "sell"].includes(item.side)).length;
+      if (invalidDates) issues.push(`${invalidDates} transacties met ongeldige datum`);
+      if (invalidQuantities) issues.push(`${invalidQuantities} transacties met ongeldig aantal`);
+      if (negativePrices) issues.push(`${negativePrices} transacties met negatieve prijs`);
+      if (unknownSides) issues.push(`${unknownSides} transacties met onbekende actie`);
+      return issues;
     }
 
     function emptyState() {
@@ -586,14 +573,25 @@
       Object.keys(prices).forEach((ticker) => {
         if (!priceMeta[ticker]) priceMeta[ticker] = { source: "Import", updatedAt: fallbackUpdatedAt };
       });
+      const transactions = Array.isArray(input.transactions) ? input.transactions : [];
+      const dcas = Array.isArray(input.dcas)
+        ? input.dcas.map((plan) => ({ ...plan, assets: normalizeDcaAssets(plan), lastGeneratedDate: plan.lastGeneratedDate || null }))
+        : [];
+      // Migratie van oudere data: bestaande automatische transacties bepalen tot
+      // waar een plan al gegenereerd is, zodat er geen duplicaten bijkomen.
+      dcas.forEach((plan) => {
+        if (plan.lastGeneratedDate) return;
+        const generated = transactions.filter((item) => item.auto && item.dcaId === plan.id).map((item) => item.date);
+        if (generated.length) plan.lastGeneratedDate = generated.sort().pop();
+      });
       return {
         settings,
         avgPrices: input.avgPrices && typeof input.avgPrices === "object" ? input.avgPrices : {},
         avgPriceCorrections: input.avgPriceCorrections && typeof input.avgPriceCorrections === "object" ? input.avgPriceCorrections : {},
         priceMeta,
         prices,
-        transactions: Array.isArray(input.transactions) ? input.transactions : [],
-        dcas: Array.isArray(input.dcas) ? input.dcas.map((plan) => ({ ...plan, assets: normalizeDcaAssets(plan) })) : [],
+        transactions,
+        dcas,
         purchasePlans: normalizePurchasePlans(input.purchasePlans),
         watchlist: Array.isArray(input.watchlist) ? input.watchlist : [],
         targetAllocation: normalizeTargetAllocation(input.targetAllocation),
@@ -611,7 +609,7 @@
         },
         chartRange: Number(input.chartRange) || 12,
         notes: Array.isArray(input.notes) ? input.notes : [],
-        meta: input.meta && typeof input.meta === "object" ? input.meta : {}
+        meta: { ...(input.meta && typeof input.meta === "object" ? input.meta : {}), schemaVersion: SCHEMA_VERSION }
       };
     }
 
@@ -627,20 +625,6 @@
         frequency: plan.frequency || "monthly",
         active: plan.active !== false
       }));
-    }
-
-    function normalizeDcaAssets(plan) {
-      if (Array.isArray(plan.assets) && plan.assets.length) {
-        return plan.assets.map((asset) => ({
-          ticker: String(asset.ticker || "").toUpperCase(),
-          name: asset.name || "",
-          type: asset.type || plan.type || "ETF",
-          quantity: Number(asset.quantity) || 0
-        })).filter((asset) => asset.ticker && asset.quantity > 0);
-      }
-      const ticker = String(plan.ticker || "").toUpperCase();
-      const quantity = dcaPlanQuantity(plan);
-      return ticker && quantity > 0 ? [{ ticker, name: plan.name || ticker, type: plan.type || "ETF", quantity }] : [];
     }
 
     function parseDcaAssets(text, fallbackType) {
@@ -699,7 +683,7 @@
           <strong>${esc(asset.ticker)}</strong>
           <span>${number.format(asset.quantity)} stuks</span>
           <span>${esc(asset.type)} · ${currency.format(currentAssetPrice(asset.ticker, 0))}</span>
-          <button class="icon-btn danger" type="button" title="Verwijder" onclick="removeDcaAssetDraft('${escAttr(asset.ticker)}')">×</button>
+          <button class="icon-btn danger" type="button" title="Verwijder" data-action="removeDcaAssetDraft" data-ticker="${escAttr(asset.ticker)}">×</button>
         </div>`).join("")
         : `<div class="empty">Nog geen assets toegevoegd.</div>`;
     }
@@ -710,8 +694,41 @@
       return Object.fromEntries(Object.entries(defaults).map(([key, value]) => [key, Number(source[key] ?? value) || 0]));
     }
 
+    function invalidateStateCache() {
+      stateCache.positions = null;
+      stateCache.totals = null;
+      stateCache.history = null;
+    }
+
+    function positions() {
+      if (!stateCache.positions) stateCache.positions = PortfolioMath.positions(state);
+      return stateCache.positions;
+    }
+
+    function totals() {
+      if (!stateCache.totals) stateCache.totals = PortfolioMath.totals(state);
+      return stateCache.totals;
+    }
+
+    function priceOf(ticker, fallback) {
+      return PortfolioMath.priceOf(state, ticker, fallback);
+    }
+
+    function averagePriceFor(pos) {
+      return PortfolioMath.averagePriceFor(state, pos);
+    }
+
+    function dcaPlanValue(plan) {
+      return PortfolioMath.dcaPlanValue(state, plan);
+    }
+
     function persist() {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      invalidateStateCache();
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      } catch (error) {
+        showImportStatus(`opslaan mislukt: ${error.message || "opslag vol of niet beschikbaar"}. Maak een export als backup.`);
+      }
     }
 
     function resetAllData() {
@@ -729,6 +746,18 @@
       showImportStatus("alle lokale app-data gewist");
     }
 
+    function backupKeys() {
+      return Object.keys(localStorage)
+        .filter((key) => key.startsWith(BACKUP_KEY_PREFIX))
+        .sort((a, b) => backupKeyTime(a) - backupKeyTime(b));
+    }
+
+    function backupKeyTime(key) {
+      // Legacy keys zonder timestamp ("-latest") gelden als oudste.
+      const time = Number(key.slice(BACKUP_KEY_PREFIX.length));
+      return Number.isFinite(time) ? time : 0;
+    }
+
     function createBackup(reason) {
       try {
         const payload = {
@@ -736,65 +765,49 @@
           createdAt: new Date().toISOString(),
           state
         };
-        localStorage.setItem("portfolio-tracker-backup-latest", JSON.stringify(payload));
+        localStorage.setItem(`${BACKUP_KEY_PREFIX}${Date.now()}`, JSON.stringify(payload));
+        const keys = backupKeys();
+        keys.slice(0, Math.max(0, keys.length - MAX_BACKUPS)).forEach((key) => localStorage.removeItem(key));
       } catch {
         // Backups are best-effort because localStorage can be full or unavailable.
       }
     }
 
     function restoreBackup() {
-      const raw = localStorage.getItem("portfolio-tracker-backup-latest");
+      const key = backupKeys().pop();
+      const raw = key ? localStorage.getItem(key) : null;
       if (!raw) {
         showImportStatus("geen backup gevonden");
         return;
       }
-      const backup = JSON.parse(raw);
-      state = normalizeState(backup.state || {});
-      persist();
-      render();
-      switchView("settings");
-      showImportStatus(`backup hersteld (${backup.reason || "onbekend"})`);
-    }
-
-    function sanitizeCryptoAdjustments() {
-      if (!hasCryptoSnapshotTargets()) return;
-      const visibleCryptoTickers = new Set(Object.keys(CRYPTO_SNAPSHOT_QUANTITIES));
-      state.transactions = state.transactions.filter((item) => {
-        if (item.source !== "Crypto screenshot reconciliation") return true;
-        return visibleCryptoTickers.has(item.ticker);
-      });
-      removeZeroCryptoTargets();
-    }
-
-    function hasCryptoSnapshotTargets() {
-      return Object.keys(CRYPTO_SNAPSHOT_QUANTITIES).length > 0;
-    }
-
-    function removeZeroCryptoTargets() {
-      if (!hasCryptoSnapshotTargets()) return;
-      const visibleCryptoTickers = new Set(Object.keys(CRYPTO_SNAPSHOT_QUANTITIES));
-      state.transactions = state.transactions.filter((item) => item.type !== "Crypto" || visibleCryptoTickers.has(item.ticker));
-      Object.keys(state.prices || {}).forEach((ticker) => {
-        if (!visibleCryptoTickers.has(ticker) && COINGECKO_IDS[ticker]) delete state.prices[ticker];
-      });
-      Object.keys(state.priceMeta || {}).forEach((ticker) => {
-        if (!visibleCryptoTickers.has(ticker) && COINGECKO_IDS[ticker]) delete state.priceMeta[ticker];
-      });
-      Object.keys(state.avgPrices || {}).forEach((ticker) => {
-        if (!visibleCryptoTickers.has(ticker) && COINGECKO_IDS[ticker]) delete state.avgPrices[ticker];
-      });
+      try {
+        const backup = JSON.parse(raw);
+        state = normalizeState(backup.state || {});
+        invalidateStateCache();
+        persist();
+        render();
+        switchView("settings");
+        showImportStatus(`backup hersteld (${backup.reason || "onbekend"}, ${dateTimeNl(backup.createdAt)})`);
+      } catch (error) {
+        showImportStatus(`backup herstellen mislukt: ${error.message || "bestand onleesbaar"}`);
+      }
     }
 
     function applyDcaPlans() {
-      const manual = state.transactions.filter((item) => !item.auto);
-      const generated = [];
+      // Genereert alleen nog niet eerder aangemaakte DCA-aankopen en zet de prijs
+      // vast op het generatiemoment, zodat de kostbasis stabiel blijft.
+      const today = todayISO();
+      let changed = false;
       state.dcas.filter((plan) => plan.active).forEach((plan) => {
-        const dates = dcaDates(plan.startDate, plan.frequency, todayISO());
         const assets = normalizeDcaAssets(plan);
+        if (!assets.length) return;
+        const dates = dcaDates(plan.startDate, plan.frequency, today)
+          .filter((date) => !plan.lastGeneratedDate || date > plan.lastGeneratedDate);
+        if (!dates.length) return;
         dates.forEach((date) => {
           assets.forEach((asset) => {
-            const price = priceOf(asset.ticker, currentAssetPrice(asset.ticker, Number(plan.price) || 0));
-            generated.push(tx(
+            const price = priceOf(asset.ticker, Number(plan.price) || 0);
+            state.transactions.push(tx(
               asset.ticker,
               asset.name || asset.ticker,
               asset.type || plan.type,
@@ -808,129 +821,38 @@
             ));
           });
         });
+        plan.lastGeneratedDate = dates[dates.length - 1];
+        changed = true;
       });
-      state.transactions = [...manual, ...generated].sort((a, b) => new Date(b.date) - new Date(a.date));
-    }
-
-    function dcaDates(start, frequency, end) {
-      const dates = [];
-      const cursor = new Date(`${start}T00:00:00`);
-      const last = new Date(`${end}T00:00:00`);
-      while (cursor <= last) {
-        dates.push(dateToISO(cursor));
-        if (frequency === "weekly") cursor.setDate(cursor.getDate() + 7);
-        if (frequency === "monthly") cursor.setMonth(cursor.getMonth() + 1);
-        if (frequency === "quarterly") cursor.setMonth(cursor.getMonth() + 3);
+      if (changed) {
+        state.transactions.sort((a, b) => new Date(b.date) - new Date(a.date));
+        invalidateStateCache();
       }
-      return dates;
+      return changed;
     }
 
-    function dateToISO(date) {
-      const year = date.getFullYear();
-      const month = String(date.getMonth() + 1).padStart(2, "0");
-      const day = String(date.getDate()).padStart(2, "0");
-      return `${year}-${month}-${day}`;
-    }
-
-    function positions() {
-      const map = new Map();
-      const correctionEvents = Object.entries(state.avgPriceCorrections || {}).map(([ticker, correction]) => ({
-        ticker,
-        side: "correction",
-        date: correction.date || todayISO(),
-        avgPrice: Number(correction.avgPrice),
-        order: 1
-      })).filter((item) => Number.isFinite(item.avgPrice) && item.avgPrice >= 0);
-      const transactionEvents = state.transactions.map((item) => ({ ...item, order: 0 }));
-      [...transactionEvents, ...correctionEvents]
-        .sort((a, b) => new Date(a.date) - new Date(b.date) || a.order - b.order)
-        .forEach((item) => {
-        if (!map.has(item.ticker)) {
-          map.set(item.ticker, {
-            ticker: item.ticker,
-            name: item.name,
-            type: item.type,
-            quantity: 0,
-            cost: 0,
-            currentPrice: item.currentPrice,
-            firstDate: item.date,
-            transactions: 0
-          });
-        }
-        const pos = map.get(item.ticker);
-        if (item.side === "correction") {
-          pos.cost = Math.max(0, pos.quantity * item.avgPrice);
-        } else if (item.side === "sell") {
-          const averageCost = pos.quantity > 0 ? pos.cost / pos.quantity : 0;
-          const soldQuantity = Math.min(item.quantity, pos.quantity);
-          pos.quantity -= soldQuantity;
-          pos.cost -= soldQuantity * averageCost;
-        } else {
-          pos.quantity += item.quantity;
-          pos.cost += item.quantity * item.price;
-        }
-        if (item.side !== "correction") {
-          pos.currentPrice = priceOf(item.ticker, item.currentPrice || pos.currentPrice);
-          pos.firstDate = item.date < pos.firstDate ? item.date : pos.firstDate;
-          pos.transactions += 1;
-        }
+    function captureDailySnapshot() {
+      const total = totals();
+      if (!total.list.length) return false;
+      const today = todayISO();
+      state.snapshots = Array.isArray(state.snapshots) ? state.snapshots : [];
+      if (state.snapshots.some((item) => String(item.date || "").slice(0, 10) === today)) return false;
+      state.snapshots.push({
+        id: uid(),
+        date: new Date().toISOString(),
+        value: total.value,
+        cost: total.cost,
+        gain: total.gain,
+        positions: total.list.length,
+        auto: true
       });
-      return [...map.values()]
-        .filter((pos) => pos.quantity > 0)
-        .map((pos) => ({
-          ...pos,
-          avgPrice: averagePriceFor(pos),
-          cost: averagePriceFor(pos) * pos.quantity,
-          value: pos.quantity * pos.currentPrice,
-          gain: pos.quantity * pos.currentPrice - averagePriceFor(pos) * pos.quantity,
-          gainPct: averagePriceFor(pos) * pos.quantity ? (pos.quantity * pos.currentPrice - averagePriceFor(pos) * pos.quantity) / (averagePriceFor(pos) * pos.quantity) : 0
-        }))
-        .sort((a, b) => b.value - a.value);
-    }
-
-    function averagePriceFor(pos) {
-      if (state.avgPriceCorrections?.[pos.ticker]) return pos.cost / pos.quantity;
-      const override = state.avgPrices ? Number(state.avgPrices[pos.ticker]) : 0;
-      return Number.isFinite(override) && override > 0 ? override : pos.cost / pos.quantity;
-    }
-
-    function priceOf(ticker, fallback) {
-      const stored = state && state.prices ? Number(state.prices[ticker]) : 0;
-      return Number.isFinite(stored) && stored > 0 ? stored : fallback;
-    }
-
-    function dcaPlanQuantity(plan) {
-      const assets = Array.isArray(plan.assets) ? plan.assets : [];
-      if (assets.length) return assets.reduce((sum, asset) => sum + Number(asset.quantity || 0), 0);
-      const quantity = Number(plan.quantity);
-      if (Number.isFinite(quantity) && quantity > 0) return quantity;
-      const amount = Number(plan.amount);
-      const price = Number(plan.price);
-      return Number.isFinite(amount) && Number.isFinite(price) && price > 0 ? amount / price : 0;
-    }
-
-    function dcaPlanValue(plan) {
-      const assets = normalizeDcaAssets(plan);
-      if (assets.length) {
-        return assets.reduce((sum, asset) => sum + asset.quantity * currentAssetPrice(asset.ticker, Number(plan.price) || 0), 0);
+      // Bewaar maximaal twee jaar aan automatische dagpunten.
+      const autoSnapshots = state.snapshots.filter((item) => item.auto);
+      if (autoSnapshots.length > 730) {
+        const cutoff = autoSnapshots.sort((a, b) => String(a.date).localeCompare(String(b.date)))[autoSnapshots.length - 731].date;
+        state.snapshots = state.snapshots.filter((item) => !item.auto || String(item.date) > String(cutoff));
       }
-      const amount = Number(plan.amount);
-      if (Number.isFinite(amount) && amount > 0) return amount;
-      return dcaPlanQuantity(plan) * (Number(plan.price) || 0);
-    }
-
-    function totals() {
-      const list = positions();
-      const cost = list.reduce((sum, item) => sum + item.cost, 0);
-      const value = list.reduce((sum, item) => sum + item.value, 0);
-      const gain = value - cost;
-      const dcaMonthly = state.dcas.filter((plan) => plan.active).reduce((sum, plan) => {
-        const valuePerRun = dcaPlanValue(plan);
-        if (plan.frequency === "weekly") return sum + valuePerRun * 52 / 12;
-        if (plan.frequency === "quarterly") return sum + valuePerRun / 3;
-        return sum + valuePerRun;
-      }, 0);
-      return { list, cost, value, gain, gainPct: cost ? gain / cost : 0, dcaMonthly };
+      return true;
     }
 
     function applySidebarState() {
@@ -969,7 +891,8 @@
       document.getElementById("pageTitle").textContent = titles[view][0];
       document.getElementById("pageSubtitle").textContent = titles[view][1];
       requestAnimationFrame(() => {
-        drawChartsForView(view);
+        if (dirtyViews.has(view)) renderView(view);
+        else drawChartsForView(view);
         updateAnalysisJumpNav();
       });
     }
@@ -996,31 +919,22 @@
     }
 
     function render() {
+      // Alleen de actieve view wordt direct getekend; de rest wordt lui
+      // bijgewerkt bij het wisselen van view.
+      Object.keys(VIEW_RENDERERS).forEach((view) => dirtyViews.add(view));
+      renderView(activeView());
+    }
+
+    function renderView(view) {
       const total = totals();
       document.querySelectorAll("[data-range]").forEach((button) => {
         button.classList.toggle("active", Number(button.dataset.range) === Number(state.chartRange || 12));
       });
-      renderMetrics(total);
-      renderPriceStatusCards(total);
-      renderPositions(total.list);
-      renderTransactions();
-      renderDcaCards();
-      renderDcaSuggestions(total);
-      renderInsights(total);
-      renderValueChartSummary(total);
-      renderAllocationLegend(total.list);
-      renderAnalysis(total);
-      renderPlans(total);
-      renderWatchlist(total);
-      renderAllocation(total);
-      renderIncome(total);
-      renderStrategy(total);
-      renderAudit(total);
-      renderSettings();
+      (VIEW_RENDERERS[view] || VIEW_RENDERERS.dashboard)(total);
       syncControls();
       updatePriceRefreshMeta();
-      drawChartsForView(activeView());
-      persist();
+      drawChartsForView(view);
+      dirtyViews.delete(view);
     }
 
     function activeView() {
@@ -1030,7 +944,7 @@
     function drawChartsForView(view) {
       const total = totals();
       if (view === "dashboard") {
-        drawLineChart(document.getElementById("valueChart"), portfolioHistory(Number(state.chartRange || 12)));
+        drawLineChart(document.getElementById("valueChart"), portfolioHistory(Number(state.chartRange || 12)).points);
         drawAllocationChart(document.getElementById("allocationChart"), total.list);
       }
       if (view === "analysis") {
@@ -1089,11 +1003,16 @@
       const list = total.list.filter((item) => item.value >= 1);
       const biggest = list[0];
       const crypto = list.filter((item) => item.type === "Crypto").reduce((sum, item) => sum + item.value, 0);
+      const history = portfolioHistory(Number(state.chartRange || 12));
+      const sourceLabel = history.source === "snapshots"
+        ? `Snapshots (${history.points.length} metingen)`
+        : "Reconstructie · indicatie op huidige koersen";
       document.getElementById("valueChartSummary").innerHTML = [
         `<div><span>Waarde</span><strong>${currency.format(total.value)}</strong></div>`,
         `<div><span>Rendement</span><strong class="${total.gain >= 0 ? "gain" : "loss"}">${currency.format(total.gain)} · ${pct.format(total.gainPct)}</strong></div>`,
         `<div><span>Grootste positie</span><strong>${biggest ? `${esc(biggest.ticker)} · ${pct.format(biggest.value / Math.max(total.value, 1))}` : "Geen"}</strong></div>`,
-        `<div><span>Crypto-weging</span><strong>${pct.format(crypto / Math.max(total.value, 1))}</strong></div>`
+        `<div><span>Crypto-weging</span><strong>${pct.format(crypto / Math.max(total.value, 1))}</strong></div>`,
+        `<div><span>Bron grafiek</span><strong>${esc(sourceLabel)}</strong></div>`
       ].join("");
     }
 
@@ -1102,7 +1021,7 @@
       const total = grouped.reduce((sum, item) => sum + item.value, 0);
       const colors = chartColors();
       document.getElementById("allocationLegend").innerHTML = grouped.map((item, index) => `
-        <button class="legend-btn" onclick="filterPositionsByType('${escAttr(item.type)}')">
+        <button class="legend-btn" data-action="filterPositionsByType" data-type="${escAttr(item.type)}">
           <span class="legend-dot" style="background:${colors[index % colors.length]}"></span>
           <strong>${esc(item.type)}</strong>
           <span>${currency.format(item.value)} · ${pct.format(item.value / Math.max(total, 1))}</span>
@@ -1135,7 +1054,7 @@
           <th class="num-col value-col">${sortHeader("Waarde", "value")}</th>
           <th class="num-col result-col">${sortHeader("Rendement", "gainPct")}</th>
         </tr></thead>
-        <tbody>${filtered.map((item) => `<tr class="clickable-row" onclick="openPosition('${escAttr(item.ticker)}')">
+        <tbody>${filtered.map((item) => `<tr class="clickable-row" data-action="openPosition" data-ticker="${escAttr(item.ticker)}">
           <td class="asset-col">${assetCell(item)}</td>
           <td class="num-col quantity-col">${number.format(item.quantity)}</td>
           <td class="num-col price-col">${currency.format(item.avgPrice)}</td>
@@ -1168,7 +1087,7 @@
           <th class="action-col"></th>
         </tr></thead>
         <tbody>${rows.map((row) => row.group ? `<tr class="group-row"><td colspan="7"><span>${esc(row.label)}</span><small>${esc(row.summary)}</small></td></tr>` : transactionRowHtml(row.item)).join("")}</tbody>
-      </table>${visible.length < filtered.length ? `<div class="load-more"><button class="ghost-btn" onclick="showMoreTransactions()">Toon meer (${filtered.length - visible.length})</button></div>` : ""}`;
+      </table>${visible.length < filtered.length ? `<div class="load-more"><button class="ghost-btn" data-action="showMoreTransactions">Toon meer (${filtered.length - visible.length})</button></div>` : ""}`;
     }
 
     function transactionRowHtml(item) {
@@ -1179,7 +1098,7 @@
         <td class="num-col">${number.format(item.quantity)}</td>
         <td class="num-col">${currency.format(item.price)}</td>
         <td class="num-col">${transactionValueCell(item)}</td>
-        <td class="action-col"><button class="icon-btn danger" title="Verwijderen" onclick="removeTransaction('${escAttr(item.id)}')" ${item.auto ? "disabled" : ""}>
+        <td class="action-col"><button class="icon-btn danger" title="Verwijderen" data-action="removeTransaction" data-id="${escAttr(item.id)}" ${item.auto ? "disabled" : ""}>
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/></svg>
         </button></td>
       </tr>`;
@@ -1270,10 +1189,10 @@
       const small = all.filter((item) => item.value < 1).length;
       const typeRows = analysisByType(filtered.filter((item) => item.value >= 1));
       target.innerHTML = [
-        `<button class="chip ${state.ui.positionSpecialFilter === "all" && !(state.ui.positionSearch || "") ? "active" : ""}" onclick="clearPositionFilters()">${filtered.length} posities · ${currency.format(visibleValue)}</button>`,
+        `<button class="chip ${state.ui.positionSpecialFilter === "all" && !(state.ui.positionSearch || "") ? "active" : ""}" data-action="clearPositionFilters">${filtered.length} posities · ${currency.format(visibleValue)}</button>`,
         `<span class="chip">${winners} positief</span>`,
-        ...typeRows.map((item) => `<button class="chip" onclick="filterPositionsByType('${escAttr(item.type)}')">${esc(item.type)} ${pct.format(item.weight)}</button>`),
-        small ? `<button class="chip ${state.ui.positionSpecialFilter === "small" ? "active" : ""}" onclick="showSmallPositions()">${small} klein</button>` : ""
+        ...typeRows.map((item) => `<button class="chip" data-action="filterPositionsByType" data-type="${escAttr(item.type)}">${esc(item.type)} ${pct.format(item.weight)}</button>`),
+        small ? `<button class="chip ${state.ui.positionSpecialFilter === "small" ? "active" : ""}" data-action="showSmallPositions">${small} klein</button>` : ""
       ].filter(Boolean).join("");
       target.hidden = false;
     }
@@ -1286,19 +1205,19 @@
       const side = state.ui.transactionSideFilter || "all";
       const special = state.ui.transactionSpecialFilter || "all";
       document.getElementById("transactionChips").innerHTML = [
-        `<button class="chip ${side === "all" && special === "all" ? "active" : ""}" onclick="setTransactionSide('all')">${filtered.length} transacties</button>`,
-        `<button class="chip ${side === "buy" && special === "all" ? "active" : ""}" onclick="setTransactionSide('buy')">${buys} aankopen</button>`,
-        `<button class="chip ${side === "sell" && special === "all" ? "active" : ""}" onclick="setTransactionSide('sell')">${sells} verkopen</button>`,
-        corrections ? `<button class="chip ${special === "corrections" ? "active" : ""}" onclick="setTransactionCorrections()">${corrections} correcties</button>` : "",
-        automated ? `<button class="chip" onclick="setTransactionSearch('DCA')">${automated} DCA</button>` : "",
-        `<button class="chip" onclick="resetTransactionFilters()">Reset filters</button>`
+        `<button class="chip ${side === "all" && special === "all" ? "active" : ""}" data-action="setTransactionSide" data-side="all">${filtered.length} transacties</button>`,
+        `<button class="chip ${side === "buy" && special === "all" ? "active" : ""}" data-action="setTransactionSide" data-side="buy">${buys} aankopen</button>`,
+        `<button class="chip ${side === "sell" && special === "all" ? "active" : ""}" data-action="setTransactionSide" data-side="sell">${sells} verkopen</button>`,
+        corrections ? `<button class="chip ${special === "corrections" ? "active" : ""}" data-action="setTransactionCorrections">${corrections} correcties</button>` : "",
+        automated ? `<button class="chip" data-action="setTransactionSearch" data-query="DCA">${automated} DCA</button>` : "",
+        `<button class="chip" data-action="resetTransactionFilters">Reset filters</button>`
       ].filter(Boolean).join("");
     }
 
     function sortHeader(label, key) {
       const active = state.ui.positionSort === key;
       const dir = active && state.ui.positionDir === "asc" ? "↑" : "↓";
-      return `<button class="sort-th ${active ? "active" : ""}" onclick="sortPositionsBy('${key}')">${esc(label)} ${active ? dir : ""}</button>`;
+      return `<button class="sort-th ${active ? "active" : ""}" data-action="sortPositionsBy" data-key="${key}">${esc(label)} ${active ? dir : ""}</button>`;
     }
 
     window.sortPositionsBy = (key) => {
@@ -1462,7 +1381,7 @@
     function moverCard(item, totalValue) {
       const positive = item.gain >= 0;
       const color = typeColor(item.type);
-      return `<button class="mover-card" type="button" onclick="openPosition('${escAttr(item.ticker)}')">
+      return `<button class="mover-card" type="button" data-action="openPosition" data-ticker="${escAttr(item.ticker)}">
         <div class="badge" style="--badge-ink:${color};--badge-bg:color-mix(in srgb, ${color} 16%, white)">${esc(String(item.ticker || "?").slice(0, 2))}</div>
         <div class="mover-main">
           <strong>${esc(item.ticker)}</strong>
@@ -1489,8 +1408,10 @@
         .filter((item) => item.side === "buy")
         .sort((a, b) => new Date(b.date) - new Date(a.date))[0];
       const avgTicket = buys ? buyValue / buys : 0;
+      const realizedTotal = PortfolioMath.realizedGains(state).reduce((sum, row) => sum + row.gain, 0);
       const rows = [
         { tone: "info", label: "Koop/verkoop", value: `${number.format(buys)} / ${number.format(sells)}`, tag: "regels", note: `${currency.format(buyValue)} gekocht · ${currency.format(sellValue)} verkocht` },
+        { tone: realizedTotal >= 0 ? "good" : "bad", label: "Gerealiseerd", value: currency.format(realizedTotal), tag: "verkopen", note: "Resultaat op alle verkopen (gem. kostprijs)" },
         { tone: avgTicket > 0 ? "info" : "warn", label: "Gem. aankoop", value: currency.format(avgTicket), tag: "ticket", note: "Gemiddelde koopregel" },
         { tone: latestBuy ? "good" : "warn", label: "Laatste aankoop", value: latestBuy ? dateNl(latestBuy.date) : "Geen", tag: latestBuy?.ticker || "n.v.t.", note: latestBuy ? `${latestBuy.ticker} · ${currency.format(Math.abs(latestBuy.quantity * latestBuy.price))}` : "Nog geen koopregels" },
         { tone: corrections ? "warn" : "good", label: "Correcties", value: number.format(corrections), tag: corrections ? "check" : "schoon", note: corrections ? "Controleer in Audit" : "Geen correctieregels" }
@@ -1667,7 +1588,7 @@
           const size = 16 + item.value / maxValue * 22;
           const color = item.gain >= 0 ? "var(--good)" : "var(--bad)";
           const labeled = index < 5 || weight > .06;
-          return `<button class="scatter-point ${labeled ? "is-labeled" : "is-dot"}" type="button" aria-label="${escAttr(`${item.ticker}: ${pct.format(weight)} · ${pct.format(item.gainPct)}`)}" title="${escAttr(`${item.ticker}: ${pct.format(weight)} · ${pct.format(item.gainPct)}`)}" onclick="openPosition('${escAttr(item.ticker)}')" style="--x:${x.toFixed(1)}%;--y:${y.toFixed(1)}%;--size:${size.toFixed(0)}px;--point-color:${color}">${labeled ? esc(item.ticker) : ""}</button>`;
+          return `<button class="scatter-point ${labeled ? "is-labeled" : "is-dot"}" type="button" aria-label="${escAttr(`${item.ticker}: ${pct.format(weight)} · ${pct.format(item.gainPct)}`)}" title="${escAttr(`${item.ticker}: ${pct.format(weight)} · ${pct.format(item.gainPct)}`)}" data-action="openPosition" data-ticker="${escAttr(item.ticker)}" style="--x:${x.toFixed(1)}%;--y:${y.toFixed(1)}%;--size:${size.toFixed(0)}px;--point-color:${color}">${labeled ? esc(item.ticker) : ""}</button>`;
         })
       ].join("");
     }
@@ -1746,7 +1667,7 @@
         button.classList.toggle("active", button.dataset.moverMode === mode);
       });
       const rows = moverPerspectiveRows(total, mode).slice(0, 6);
-      document.getElementById("analysisMoverPerspective").innerHTML = rows.length ? rows.map((row) => `<button class="mover-card" type="button" onclick="openPosition('${escAttr(row.item.ticker)}')">
+      document.getElementById("analysisMoverPerspective").innerHTML = rows.length ? rows.map((row) => `<button class="mover-card" type="button" data-action="openPosition" data-ticker="${escAttr(row.item.ticker)}">
         <div class="badge" style="--badge-ink:${typeColor(row.item.type)};--badge-bg:color-mix(in srgb, ${typeColor(row.item.type)} 16%, white)">${esc(row.item.ticker.slice(0, 2))}</div>
         <div class="mover-main"><strong>${esc(row.item.ticker)}</strong><span>${esc(row.label)}</span></div>
         <div class="mover-meta"><strong class="${row.tone === "bad" ? "loss" : "gain"}">${esc(row.value)}</strong><span>${esc(row.meta)}</span></div>
@@ -2179,70 +2100,21 @@
       </table>${rows.length > 80 ? `<div class="empty">${rows.length - 80} extra correcties verborgen.</div>` : ""}`;
     }
 
-    function brokerSnapshotDiagnostics(total = totals()) {
-      const list = total.list || positions();
-      const byTicker = new Map(list.map((item) => [item.ticker, item]));
-      const cryptoExpected = Object.entries(CRYPTO_SNAPSHOT_QUANTITIES).map(([ticker, quantity]) => ({ ticker, expected: quantity, actual: byTicker.get(ticker)?.quantity || 0 }));
-      list
-        .filter((item) => item.type === "Crypto" && !(item.ticker in CRYPTO_SNAPSHOT_QUANTITIES))
-        .forEach((item) => cryptoExpected.push({ ticker: item.ticker, expected: 0, actual: item.quantity }));
-
-      const degiroExpected = DEGIRO_SNAPSHOT_POSITIONS.map(([ticker, _name, _type, _quantity, value]) => ({ ticker, expected: value, actual: byTicker.get(ticker)?.value || 0 }));
-      const degiroTickers = new Set(DEGIRO_SNAPSHOT_POSITIONS.map(([ticker]) => ticker));
-      list
-        .filter((item) => (item.type === "Aandeel" || item.type === "ETF") && !degiroTickers.has(item.ticker))
-        .forEach((item) => degiroExpected.push({ ticker: item.ticker, expected: 0, actual: item.value }));
-
-      return {
-        crypto: snapshotGroup(cryptoExpected, 1e-8),
-        degiro: snapshotGroup(degiroExpected, .05)
-      };
-    }
-
-    function snapshotGroup(rows, tolerance) {
-      const enriched = rows.map((row) => ({ ...row, diff: Math.abs(row.actual - row.expected) })).sort((a, b) => b.diff - a.diff);
-      const expected = rows.reduce((sum, row) => sum + row.expected, 0);
-      const actual = rows.reduce((sum, row) => sum + row.actual, 0);
-      const maxDiff = enriched[0]?.diff || 0;
-      return {
-        rows: enriched,
-        expected,
-        actual,
-        maxDiff,
-        ok: maxDiff <= tolerance && Math.abs(actual - expected) <= tolerance
-      };
-    }
-
     function auditWarnings(total) {
       const warnings = [];
-      const snapshot = brokerSnapshotDiagnostics(total);
       const corrections = correctionTransactions();
       const zeroPrices = state.transactions.filter((item) => Number(item.price) === 0);
       const unsupportedPrices = positions().filter((item) => !state.prices?.[item.ticker] && item.currentPrice <= 0);
       const unknownSources = state.transactions.filter((item) => !item.source && !item.auto);
       const small = total.list.filter((item) => item.value < 1);
-      const cryptoCorrections = state.transactions.filter((item) => item.source === "Crypto screenshot reconciliation");
-      const degiroCorrections = state.transactions.filter((item) => item.source === "DEGIRO positiecorrectie");
 
-      warnings.push(snapshotSignal("Bitvavo aantallen", snapshot.crypto, number.format));
-      warnings.push(snapshotSignal("DEGIRO snapshot", snapshot.degiro, currency.format));
       if (corrections.length) warnings.push({ tone: "info", title: "Correctieregels actief", text: `${corrections.length} regels corrigeren posities na broker-exports of screenshots.` });
-      if (cryptoCorrections.length) warnings.push({ tone: "warn", title: "Crypto-reconciliatie", text: `${cryptoCorrections.length} crypto-regels trekken Bitvavo-historie gelijk met de huidige app-aantallen.` });
-      if (degiroCorrections.length) warnings.push({ tone: "info", title: "DEGIRO-positiecorrectie", text: `${degiroCorrections.length} regels corrigeren corporate actions of gesloten restposities.` });
       if (zeroPrices.length) warnings.push({ tone: "info", title: "Prijs nul", text: `${zeroPrices.length} transacties hebben prijs 0. Dat is normaal voor staking/withdrawals/correcties, maar goed om zichtbaar te houden.` });
       if (unsupportedPrices.length) warnings.push({ tone: "bad", title: "Ontbrekende actuele prijzen", text: `${unsupportedPrices.length} posities hebben geen bruikbare actuele prijs.` });
       if (unknownSources.length) warnings.push({ tone: "warn", title: "Onbekende bron", text: `${unknownSources.length} handmatige transacties hebben geen bronlabel.` });
       if (small.length) warnings.push({ tone: "info", title: "Restposities", text: `${small.length} posities zijn minder dan €1 waard.` });
       if (!warnings.length) warnings.push({ tone: "good", title: "Geen issues", text: "Geen opvallende datakwaliteitsproblemen gevonden." });
       return warnings;
-    }
-
-    function snapshotSignal(title, group, formatValue) {
-      const worst = group.rows[0];
-      if (group.ok) {
-        return { tone: "good", title, text: `${formatValue(group.actual)} actueel, verwacht ${formatValue(group.expected)}. Grootste verschil ${formatValue(group.maxDiff)}.` };
-      }
-      return { tone: "bad", title, text: `${formatValue(group.actual)} actueel, verwacht ${formatValue(group.expected)}. Grootste afwijking: ${worst ? `${worst.ticker} ${formatValue(worst.diff)}` : formatValue(group.maxDiff)}.` };
     }
 
     function renderAuditWarnings(warnings) {
@@ -2280,7 +2152,7 @@
             <td>${currency.format(item.targetPrice)}</td>
             <td><span class="status-pill ${tone}">${price <= item.targetPrice ? "koopzone" : pct.format(distance)}</span></td>
             <td>${esc(item.note || "")}</td>
-            <td><button class="icon-btn" title="Verwijder" onclick="removeWatchlistItem('${escAttr(item.id)}')">×</button></td>
+            <td><button class="icon-btn" title="Verwijder" data-action="removeWatchlistItem" data-id="${escAttr(item.id)}">×</button></td>
           </tr>`;
         }).join("")}</tbody>
       </table>` : `<div class="empty">Nog geen watchlist-items.</div>`;
@@ -2308,7 +2180,7 @@
         ? suggestions.map((item) => `<article class="recommendation-card">
           <strong>${esc(item.title)}</strong>
           <p>${esc(item.text)}</p>
-          <button class="ghost-btn" type="button" onclick="prefillWatchlist('${escAttr(item.ticker)}','${escAttr(item.name)}','${escAttr(item.type)}',${Number(item.currentPrice)},${Number(item.targetPrice)},'${escAttr(item.note)}')">Gebruik suggestie</button>
+          <button class="ghost-btn" type="button" data-action="prefillWatchlist" data-payload="${escAttr(JSON.stringify({ ticker: item.ticker, name: item.name, type: item.type, currentPrice: Number(item.currentPrice) || 0, targetPrice: Number(item.targetPrice) || 0, note: item.note || "" }))}">Gebruik suggestie</button>
         </article>`).join("")
         : `<div class="empty">Geen nieuwe suggesties uit je huidige posities.</div>`;
     }
@@ -2456,7 +2328,7 @@
         <tbody>${rows.map((item) => `<tr>
           <td>${dateNl(item.date)}</td><td><strong>${esc(item.ticker)}</strong></td><td>${typeBadge(item.kind)}</td>
           <td>${currency.format(item.amount)}</td><td>${incomeNetCell(item)}</td>
-          <td><button class="icon-btn" title="Verwijder" onclick="removeIncomeItem('${escAttr(item.id)}')">×</button></td>
+          <td><button class="icon-btn" title="Verwijder" data-action="removeIncomeItem" data-id="${escAttr(item.id)}">×</button></td>
         </tr>`).join("")}</tbody>
       </table>` : `<div class="empty">Nog geen dividend, staking of rente ingevoerd.</div>`;
       renderTaxReport(total, year, yearRows);
@@ -2467,9 +2339,11 @@
       const buys = txRows.filter((item) => item.side === "buy").reduce((sum, item) => sum + item.quantity * item.price, 0);
       const sells = txRows.filter((item) => item.side === "sell").reduce((sum, item) => sum + item.quantity * item.price, 0);
       const netIncome = incomeRows.reduce((sum, item) => sum + Number(item.amount || 0) - Number(item.tax || 0), 0);
+      const realized = PortfolioMath.realizedGainForYear(state, year);
       document.getElementById("taxReport").innerHTML = [
         { tone: "info", title: `Jaar ${year}`, text: `${txRows.length} transacties, ${incomeRows.length} inkomstenregels.` },
         { tone: "info", title: "Transacties", text: `Aankopen ${currency.format(buys)} · verkopen ${currency.format(sells)}.` },
+        { tone: realized >= 0 ? "info" : "warn", title: "Gerealiseerd resultaat", text: `${currency.format(realized)} op verkopen in ${year} (gemiddelde-kostprijsmethode).` },
         { tone: "info", title: "Inkomsten", text: `Netto dividend/staking/rente: ${currency.format(netIncome)}.` },
         { tone: "warn", title: "Controle", text: "Gebruik dit als werkoverzicht; fiscale regels en peildata blijven handmatig te controleren." }
       ].map(signalCard).join("");
@@ -2499,7 +2373,7 @@
         <tbody>${rows.map((item) => `<tr>
           <td>${esc(item.ticker)}</td><td>${currency.format(item.price)}</td>
           <td>${item.targetPrice ? targetDistanceCell(item.price, item.targetPrice, "above") : "-"}</td><td>${item.stopPrice ? targetDistanceCell(item.price, item.stopPrice, "below") : "-"}</td>
-          <td>${esc(item.note || "")}</td><td><button class="icon-btn" onclick="removeSalePlan('${escAttr(item.ticker)}')">×</button></td>
+          <td>${esc(item.note || "")}</td><td><button class="icon-btn" data-action="removeSalePlan" data-ticker="${escAttr(item.ticker)}">×</button></td>
         </tr>`).join("")}</tbody>
       </table>` : `<div class="empty">Nog geen verkoopplannen.</div>`;
     }
@@ -2515,7 +2389,7 @@
         <thead><tr><th>Ticker</th><th>Richting</th><th>Grens</th><th>Notitie</th><th></th></tr></thead>
         <tbody>${evaluated.map((item) => {
           const hit = item.direction === "below" ? item.priceNow <= item.price : item.priceNow >= item.price;
-          return `<tr><td><strong>${esc(item.ticker)}</strong></td><td><span class="status-pill ${hit ? "warn" : "info"}">${item.direction === "below" ? "Onder" : "Boven"}</span></td><td>${targetDistanceCell(item.priceNow, item.price, item.direction === "below" ? "below" : "above")}</td><td>${esc(item.note || "")}</td><td><button class="icon-btn" onclick="removeAlert('${escAttr(item.id)}')">×</button></td></tr>`;
+          return `<tr><td><strong>${esc(item.ticker)}</strong></td><td><span class="status-pill ${hit ? "warn" : "info"}">${item.direction === "below" ? "Onder" : "Boven"}</span></td><td>${targetDistanceCell(item.priceNow, item.price, item.direction === "below" ? "below" : "above")}</td><td>${esc(item.note || "")}</td><td><button class="icon-btn" data-action="removeAlert" data-id="${escAttr(item.id)}">×</button></td></tr>`;
         }).join("")}</tbody>
       </table>` : `<div class="empty">Nog geen alerts.</div>`;
     }
@@ -2526,7 +2400,7 @@
         <thead><tr><th>Datum</th><th>Waarde</th><th>Kostprijs</th><th>Rendement</th><th></th></tr></thead>
         <tbody>${rows.map((item) => `<tr>
           <td>${dateTimeNl(item.date)}</td><td>${currency.format(item.value)}</td><td>${currency.format(item.cost)}</td><td>${currency.format(item.gain)}</td>
-          <td><button class="icon-btn" onclick="removeSnapshot('${escAttr(item.id)}')">×</button></td>
+          <td><button class="icon-btn" data-action="removeSnapshot" data-id="${escAttr(item.id)}">×</button></td>
         </tr>`).join("")}</tbody>
       </table>` : `<div class="empty">Nog geen snapshots.</div>`;
     }
@@ -2562,12 +2436,12 @@
         : "Geen handmatige gemiddelde aankoopkoersen ingesteld.";
     }
 
-    function showImportStatus(fileName) {
+    function showImportStatus(fileName, issues = []) {
       const status = document.getElementById("importStatus");
       if (!status) return;
-      const cryptoAdjustments = state.transactions.filter((item) => item.source === "Crypto screenshot reconciliation").length;
       const visibleCrypto = positions().filter((item) => item.type === "Crypto" && item.value >= 1).map((item) => item.ticker).sort().join(", ");
-      status.innerHTML = `Import gelukt: ${esc(fileName)} · ${state.transactions.length} transacties · ${cryptoAdjustments} crypto-correcties · zichtbaar: ${esc(visibleCrypto || "geen")}`;
+      const issueText = issues.length ? `<br><strong>Let op:</strong> ${esc(issues.join(" · "))}` : "";
+      status.innerHTML = `Import gelukt: ${esc(fileName)} · ${state.transactions.length} transacties · zichtbaar crypto: ${esc(visibleCrypto || "geen")}${issueText}`;
     }
 
     function syncControls() {
@@ -2619,8 +2493,8 @@
             <div><span>Gegenereerd</span><strong>${plan.active ? count : 0}x</strong></div>
           </div>
           <div class="actions-row">
-            <button class="ghost-btn" onclick="toggleDca('${escAttr(plan.id)}')">${plan.active ? "Pauzeer" : "Activeer"}</button>
-            <button class="ghost-btn danger" onclick="removeDca('${escAttr(plan.id)}')">Verwijder</button>
+            <button class="ghost-btn" data-action="toggleDca" data-id="${escAttr(plan.id)}">${plan.active ? "Pauzeer" : "Activeer"}</button>
+            <button class="ghost-btn danger" data-action="removeDca" data-id="${escAttr(plan.id)}">Verwijder</button>
           </div>
         </article>`;
       }).join("");
@@ -2635,7 +2509,7 @@
       target.innerHTML = suggested.map((item) => `<article class="recommendation-card">
         <strong>${esc(item.title)}</strong>
         <p>${esc(item.text)}</p>
-        <button class="ghost-btn" type="button" onclick="prefillDca('${escAttr(item.ticker)}','${escAttr(item.name)}','${escAttr(item.type)}',${Number(item.quantity)},${Number(item.price)})">Gebruik suggestie</button>
+        <button class="ghost-btn" type="button" data-action="prefillDca" data-payload="${escAttr(JSON.stringify({ ticker: item.ticker, name: item.name, type: item.type, quantity: Number(item.quantity) || 0, price: Number(item.price) || 0 }))}">Gebruik suggestie</button>
       </article>`).join("");
     }
 
@@ -2853,6 +2727,29 @@
     }
 
     function portfolioHistory(months) {
+      if (!stateCache.history) stateCache.history = new Map();
+      if (!stateCache.history.has(months)) stateCache.history.set(months, computePortfolioHistory(months));
+      return stateCache.history.get(months);
+    }
+
+    function computePortfolioHistory(months) {
+      const start = new Date(`${todayISO()}T00:00:00`);
+      start.setMonth(start.getMonth() - months);
+      // Snapshots zijn echte waarnemingen; de reconstructie waardeert historische
+      // aantallen tegen de huidige koers en is daarmee slechts een indicatie.
+      const byDay = new Map();
+      [...(state.snapshots || [])]
+        .filter((item) => Number.isFinite(Number(item.value)))
+        .sort((a, b) => String(a.date).localeCompare(String(b.date)))
+        .forEach((item) => byDay.set(String(item.date).slice(0, 10), Number(item.value)));
+      const snapshotPoints = [...byDay.entries()]
+        .map(([date, value]) => ({ date, value }))
+        .filter((point) => new Date(`${point.date}T00:00:00`) >= start);
+      if (snapshotPoints.length >= 2) return { points: snapshotPoints, source: "snapshots" };
+      return { points: reconstructedHistory(months), source: "reconstructie" };
+    }
+
+    function reconstructedHistory(months) {
       const end = new Date(`${todayISO()}T00:00:00`);
       const start = new Date(end);
       start.setMonth(start.getMonth() - months);
@@ -3202,7 +3099,9 @@
     }
 
     function dateNl(date) {
-      return new Intl.DateTimeFormat("nl-NL", { day: "2-digit", month: "short", year: "numeric" }).format(new Date(`${date}T00:00:00`));
+      const parsed = new Date(`${date}T00:00:00`);
+      if (Number.isNaN(parsed.getTime())) return "Onbekend";
+      return new Intl.DateTimeFormat("nl-NL", { day: "2-digit", month: "short", year: "numeric" }).format(parsed);
     }
 
     function dateTimeNl(value) {
@@ -3234,10 +3133,10 @@
             Crypto kan live via CoinGecko. Aandelen en ETF's kunnen live via Yahoo Finance, handmatig, of met een CSV met kolommen <code>ticker,price</code>.
           </div>
           <div class="actions-row start">
-            <button class="ghost-btn" type="button" onclick="updateCryptoPrices()" ${cryptoCount ? "" : "disabled"}>Live crypto-prijzen</button>
-            <button class="ghost-btn" type="button" onclick="updateEquityPrices()" ${equityCount ? "" : "disabled"}>Live aandelen/ETF's</button>
-            <button class="ghost-btn" type="button" onclick="exportPriceTemplate()">Download template</button>
-            <button class="ghost-btn" type="button" onclick="document.getElementById('priceFileInput').click()">Importeer prijs-CSV</button>
+            <button class="ghost-btn" type="button" data-action="updateCryptoPrices" ${cryptoCount ? "" : "disabled"}>Live crypto-prijzen</button>
+            <button class="ghost-btn" type="button" data-action="updateEquityPrices" ${equityCount ? "" : "disabled"}>Live aandelen/ETF's</button>
+            <button class="ghost-btn" type="button" data-action="exportPriceTemplate">Download template</button>
+            <button class="ghost-btn" type="button" data-action="importPriceCsv">Importeer prijs-CSV</button>
           </div>
           <div class="form-grid">${list.map((item) => `
           <label>${esc(item.ticker)} · ${esc(item.name)}
@@ -3281,7 +3180,7 @@
             </label>
           </div>
           <div class="actions-row">
-            <button class="ghost-btn" type="button" onclick="resetAveragePrice('${escAttr(item.ticker)}')">Reset gemiddelde</button>
+            <button class="ghost-btn" type="button" data-action="resetAveragePrice" data-ticker="${escAttr(item.ticker)}">Reset gemiddelde</button>
             <button class="primary-btn" type="submit">Opslaan</button>
           </div>
         </form>
@@ -3502,7 +3401,7 @@
     function inferAssetType(ticker) {
       const normalized = String(ticker || "").trim().toUpperCase();
       if (COINGECKO_IDS[normalized]) return "Crypto";
-      if (["VWCE", "VWRL", "ISPA", "WTAI"].includes(normalized)) return "ETF";
+      if (normalized in EQUITY_QUOTE_SYMBOLS) return "ETF";
       return "Aandeel";
     }
 
@@ -3520,8 +3419,8 @@
       }
 
       const quote = await fetchYahooChartQuote({ ticker: normalized });
-      let converted = convertQuoteToEur(quote, 1);
-      if (quote.currency === "USD") converted = convertQuoteToEur(quote, await fetchUsdEurRate());
+      const rates = quote.currency === "USD" ? { USD_EUR: await fetchUsdEurRate() } : {};
+      const converted = convertQuoteToEur(quote, rates);
       if (!converted || !Number.isFinite(converted.priceEur) || converted.priceEur <= 0) throw new Error("Geen bruikbare koers gevonden.");
       return {
         ticker: normalized,
@@ -3561,41 +3460,6 @@
 
     function isEquityQuotePosition(item) {
       return item.type === "Aandeel" || item.type === "ETF";
-    }
-
-    function resolveEquityQuoteSymbol(ticker) {
-      const normalized = String(ticker || "").trim().toUpperCase();
-      return EQUITY_QUOTE_SYMBOLS[normalized] || normalized;
-    }
-
-    function parseYahooChartQuote(payload) {
-      const result = payload?.chart?.result?.[0];
-      const error = payload?.chart?.error;
-      if (error) throw new Error(error.description || error.code || "Yahoo gaf geen koers terug.");
-
-      const meta = result?.meta || {};
-      const price = Number(meta.regularMarketPrice);
-      const currencyCode = String(meta.currency || "").toUpperCase();
-      const symbol = String(meta.symbol || "").toUpperCase();
-      if (!symbol || !Number.isFinite(price) || price <= 0 || !currencyCode) return null;
-
-      return {
-        symbol,
-        price,
-        currency: currencyCode,
-        regularMarketTime: meta.regularMarketTime || null,
-        name: meta.longName || meta.shortName || ""
-      };
-    }
-
-    function convertQuoteToEur(quote, usdEurRate) {
-      if (!quote || !Number.isFinite(Number(quote.price)) || Number(quote.price) <= 0) return null;
-      if (quote.currency === "EUR") return { ...quote, priceEur: Number(quote.price), fxRate: 1 };
-      if (quote.currency !== "USD") return null;
-
-      const rate = Number(usdEurRate);
-      if (!Number.isFinite(rate) || rate <= 0) return null;
-      return { ...quote, priceEur: Number(quote.price) * rate, fxRate: rate };
     }
 
     async function fetchUsdEurRate() {
@@ -3664,7 +3528,7 @@
       const updates = {};
       let converted = 0;
       quotes.forEach((quote) => {
-        const convertedQuote = convertQuoteToEur(quote, usdEurRate);
+        const convertedQuote = convertQuoteToEur(quote, { USD_EUR: usdEurRate });
         if (!convertedQuote) {
           if (quote.currency !== "USD" || usdEurRate) skipped.push(`${quote.ticker}: valuta ${quote.currency} niet ondersteund`);
           return;
@@ -3714,29 +3578,6 @@
       });
       persist();
       render();
-    }
-
-    function parsePriceCsv(text) {
-      const rows = text.split(/\r?\n/).map((row) => row.trim()).filter(Boolean);
-      if (!rows.length) throw new Error("Het prijsbestand is leeg.");
-      const updates = {};
-      rows.forEach((row, index) => {
-        const separator = row.includes(";") ? ";" : ",";
-        const columns = row.split(separator).map((value) => value.trim().replace(/^"|"$/g, ""));
-        if (index === 0 && /ticker|symbol/i.test(columns[0])) return;
-        const ticker = (columns[0] || "").toUpperCase();
-        const price = parsePriceNumber(columns[1]);
-        if (!ticker || !Number.isFinite(price) || price <= 0) return;
-        updates[ticker] = price;
-      });
-      if (!Object.keys(updates).length) throw new Error("Geen geldige prijzen gevonden. Gebruik bijvoorbeeld: BTC,52650");
-      return updates;
-    }
-
-    function parsePriceNumber(value) {
-      const raw = String(value || "").replace(/[€\s]/g, "");
-      const normalized = raw.includes(",") ? raw.replace(/\./g, "").replace(",", ".") : raw;
-      return Number(normalized);
     }
 
     function formatCsvNumber(value) {
@@ -3850,213 +3691,6 @@
       }
     }
 
-    function autoFixCryptoIfNeeded() {
-      if (!hasCryptoSnapshotTargets()) {
-        markCryptoSnapshotPrices();
-        return;
-      }
-      const current = positions();
-      const staleSnapshotCrypto = Object.entries(CRYPTO_SNAPSHOT_QUANTITIES).some(([ticker, targetQuantity]) => {
-        const item = current.find((pos) => pos.ticker === ticker);
-        return !item || Math.abs(item.quantity - targetQuantity) > 1e-8;
-      });
-      const staleUnknownCrypto = current.some((item) => item.type === "Crypto" && !(item.ticker in CRYPTO_SNAPSHOT_QUANTITIES) && item.quantity > 1e-8);
-      if (staleSnapshotCrypto || staleUnknownCrypto) {
-        fixCryptoSnapshot({ silent: true });
-      } else {
-        removeZeroCryptoTargets();
-        markCryptoSnapshotPrices();
-      }
-    }
-
-    function markCryptoSnapshotPrices() {
-      state.priceMeta = state.priceMeta || {};
-      const updatedAt = new Date().toISOString();
-      Object.entries(CRYPTO_SNAPSHOT_PRICES).forEach(([ticker, price]) => {
-        const stored = Number(state.prices?.[ticker]);
-        if (Number.isFinite(stored) && Math.abs(stored - price) < 1e-8) {
-          state.priceMeta[ticker] = { source: "Bitvavo screenshot", updatedAt };
-        }
-      });
-    }
-
-    function autoFixDegiroIfNeeded() {
-      const hasDegiroSnapshotData = state.transactions.some((item) => /^DEGIRO (positiecorrectie|screenshot snapshot|Account\.csv)$/i.test(item.source || ""));
-      const hasDemoEquities = isDemoEquityState();
-      if (hasDemoEquities) {
-        fixDegiroSnapshot({ silent: true, replaceDemoEquities: true });
-        return;
-      }
-      if (!hasDegiroSnapshotData) return;
-      const current = positions();
-      const stale = DEGIRO_SNAPSHOT_POSITIONS.some(([ticker, _name, _type, _quantity, value]) => {
-        const item = current.find((pos) => pos.ticker === ticker);
-        return !item || Math.abs(item.value - value) > .05;
-      });
-      if (stale) fixDegiroSnapshot({ silent: true });
-    }
-
-    function isDemoEquityState() {
-      const hasDegiroSnapshotData = state.transactions.some((item) => /^DEGIRO /i.test(item.source || ""));
-      if (hasDegiroSnapshotData) return false;
-      const equityPositions = positions().filter((item) => item.type === "Aandeel" || item.type === "ETF");
-      if (!equityPositions.length) return false;
-      const tickers = new Set(equityPositions.map((item) => item.ticker));
-      const onlyDemoTickers = [...tickers].every((ticker) => ["ASML", "VWCE"].includes(ticker));
-      const hasDemoDca = (state.dcas || []).some((plan) => plan.ticker === "VWCE" && /vwce maandelijks/i.test(plan.name || ""));
-      return onlyDemoTickers && tickers.has("ASML") && tickers.has("VWCE") && hasDemoDca;
-    }
-
-    function fixDegiroSnapshot(options = {}) {
-      state.transactions = state.transactions.filter((item) => {
-        if (["DEGIRO positiecorrectie", "DEGIRO screenshot snapshot"].includes(item.source)) return false;
-        if (options.replaceDemoEquities && (item.type === "Aandeel" || item.type === "ETF" || item.type === "Gemengd")) return false;
-        return true;
-      });
-      if (options.replaceDemoEquities) {
-        state.dcas = (state.dcas || []).filter((plan) => !(plan.ticker === "VWCE" && /vwce maandelijks/i.test(plan.name || "")));
-        delete state.prices?.ASML;
-        delete state.avgPrices?.ASML;
-        if (state.priceMeta) delete state.priceMeta.ASML;
-      }
-      state.prices = state.prices || {};
-      state.priceMeta = state.priceMeta || {};
-      const updatedAt = new Date().toISOString();
-      const targets = new Map(DEGIRO_SNAPSHOT_POSITIONS.map(([ticker, name, type, quantity, value]) => {
-        const price = value / quantity;
-        state.prices[ticker] = price;
-        state.priceMeta[ticker] = { source: "DEGIRO screenshot", updatedAt };
-        return [ticker, { ticker, name, type, quantity, price }];
-      }));
-
-      const degiroTickers = new Set([
-        ...targets.keys(),
-        ...state.transactions
-          .filter((item) => /^DEGIRO /i.test(item.source || ""))
-          .map((item) => item.ticker)
-      ]);
-      const quantities = {};
-      state.transactions
-        .filter((item) => degiroTickers.has(item.ticker))
-        .sort((a, b) => new Date(a.date) - new Date(b.date))
-        .forEach((item) => {
-          const sign = item.side === "sell" ? -1 : 1;
-          quantities[item.ticker] = (quantities[item.ticker] || 0) + sign * item.quantity;
-          if (Math.abs(quantities[item.ticker]) < 1e-8) quantities[item.ticker] = 0;
-        });
-
-      [...new Set([...degiroTickers, ...targets.keys()])].forEach((ticker) => {
-        const target = targets.get(ticker);
-        const targetQuantity = target ? target.quantity : 0;
-        const currentQuantity = quantities[ticker] || 0;
-        const difference = targetQuantity - currentQuantity;
-        if (Math.abs(difference) < 1e-8) return;
-        const existing = state.transactions.find((item) => item.ticker === ticker);
-        const price = target?.price || state.prices[ticker] || existing?.currentPrice || 0;
-        state.transactions.push(tx(
-          ticker,
-          target?.name || existing?.name || ticker,
-          target?.type || existing?.type || "Aandeel",
-          difference > 0 ? "buy" : "sell",
-          DEGIRO_SNAPSHOT_DATE,
-          Math.abs(difference),
-          price,
-          price,
-          false
-        ));
-        state.transactions[state.transactions.length - 1].source = existing ? "DEGIRO positiecorrectie" : "DEGIRO screenshot snapshot";
-      });
-
-      persist();
-      if (!options.silent) {
-        render();
-        showImportStatus("DEGIRO snapshot herstel");
-      }
-    }
-
-    function fixCryptoSnapshot(options = {}) {
-      if (!hasCryptoSnapshotTargets()) return;
-      state.transactions = state.transactions.filter((item) => item.source !== "Crypto screenshot reconciliation");
-      removeZeroCryptoTargets();
-      state.prices = { ...(state.prices || {}), ...CRYPTO_SNAPSHOT_PRICES };
-      markCryptoSnapshotPrices();
-
-      const cryptoQuantities = {};
-      state.transactions
-        .filter((item) => item.type === "Crypto")
-        .sort((a, b) => new Date(a.date) - new Date(b.date))
-        .forEach((item) => {
-          const sign = item.side === "sell" ? -1 : 1;
-          cryptoQuantities[item.ticker] = (cryptoQuantities[item.ticker] || 0) + sign * item.quantity;
-          if (Math.abs(cryptoQuantities[item.ticker]) < 1e-8) cryptoQuantities[item.ticker] = 0;
-        });
-
-      Object.entries(CRYPTO_SNAPSHOT_QUANTITIES).forEach(([ticker, targetQuantity]) => {
-        const price = CRYPTO_SNAPSHOT_PRICES[ticker] || state.prices[ticker] || 0;
-        const currentQuantity = cryptoQuantities[ticker] || 0;
-        const difference = targetQuantity - currentQuantity;
-        if (Math.abs(difference) < 1e-8) return;
-        state.transactions.push(tx(
-          ticker,
-          cryptoName(ticker),
-          "Crypto",
-          difference > 0 ? "buy" : "sell",
-          CRYPTO_SNAPSHOT_DATE,
-          Math.abs(difference),
-          price,
-          price,
-          false
-        ));
-        state.transactions[state.transactions.length - 1].source = "Crypto screenshot reconciliation";
-      });
-
-      state.settings.defaultHideSmallPositions = true;
-      state.ui.hideSmallPositions = true;
-      persist();
-      if (!options.silent) {
-        render();
-        showImportStatus("crypto snapshot herstel");
-      }
-    }
-
-    function replaceCryptoWithSnapshot(options = {}) {
-      if (!hasCryptoSnapshotTargets()) return;
-      state.transactions = state.transactions.filter((item) => item.type !== "Crypto");
-      state.prices = { ...(state.prices || {}), ...CRYPTO_SNAPSHOT_PRICES };
-      state.avgPrices = state.avgPrices || {};
-      state.priceMeta = state.priceMeta || {};
-
-      Object.keys(CRYPTO_SNAPSHOT_QUANTITIES).forEach((ticker) => {
-        delete state.avgPrices[ticker];
-      });
-
-      Object.entries(CRYPTO_SNAPSHOT_QUANTITIES).forEach(([ticker, targetQuantity]) => {
-        const price = CRYPTO_SNAPSHOT_PRICES[ticker] || 0;
-        if (!price || targetQuantity <= 0) return;
-        state.transactions.push(tx(
-          ticker,
-          cryptoName(ticker),
-          "Crypto",
-          "buy",
-          CRYPTO_SNAPSHOT_DATE,
-          targetQuantity,
-          price,
-          price,
-          false
-        ));
-        state.transactions[state.transactions.length - 1].source = "Bitvavo screenshot snapshot";
-      });
-
-      markCryptoSnapshotPrices();
-      state.settings.defaultHideSmallPositions = true;
-      state.ui.hideSmallPositions = true;
-      persist();
-      if (!options.silent) {
-        render();
-        showImportStatus("Bitvavo snapshot herstel");
-      }
-    }
-
     function cryptoName(ticker) {
       return {
         BTC: "Bitcoin",
@@ -4079,11 +3713,21 @@
     };
 
     window.toggleDca = (id) => {
-      state.dcas = state.dcas.map((plan) => plan.id === id ? { ...plan, active: !plan.active } : plan);
+      state.dcas = state.dcas.map((plan) => {
+        if (plan.id !== id) return plan;
+        const active = !plan.active;
+        // Bij heractiveren niet met terugwerkende kracht aankopen genereren:
+        // de pauzeperiode is immers niet gekocht.
+        return { ...plan, active, lastGeneratedDate: active ? todayISO() : plan.lastGeneratedDate };
+      });
       applyDcaPlans();
       persist();
       render();
     };
 
-    window.addEventListener("resize", () => render());
+    let resizeTimer = null;
+    window.addEventListener("resize", () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => drawChartsForView(activeView()), 150);
+    });
     document.querySelector("#dcaForm [name=startDate]").value = todayISO();

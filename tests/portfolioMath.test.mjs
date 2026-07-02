@@ -20,6 +20,9 @@ sandbox.window = sandbox;
 
 runInNewContext(code, sandbox);
 
+const { PortfolioMath } = sandbox;
+assert.ok(PortfolioMath && typeof PortfolioMath.positions === "function", "PortfolioMath namespace ontbreekt");
+
 const {
   convertQuoteToEur,
   dcaDates,
@@ -27,14 +30,19 @@ const {
   parsePriceNumber,
   parseYahooChartQuote,
   positions,
+  realizedGains,
+  realizedGainForYear,
   resolveEquityQuoteSymbol,
   totals
-} = sandbox;
+} = PortfolioMath;
 
 const fixture = JSON.parse(await readFile(new URL("../fixtures/demo-portfolio.json", import.meta.url), "utf8"));
 
 assert.equal(parsePriceNumber("€1.234,56"), 1234.56);
 assert.equal(parsePriceNumber("1234.56"), 1234.56);
+assert.equal(parsePriceNumber("1,234.56"), 1234.56);
+assert.equal(parsePriceNumber("1234,56"), 1234.56);
+assert.equal(parsePriceNumber(""), 0);
 
 assert.deepEqual(JSON.parse(JSON.stringify(parsePriceCsv("ticker;price\nBTC;52650,25\nVWCE;162.36"))), {
   BTC: 52650.25,
@@ -74,6 +82,14 @@ assert.deepEqual(JSON.parse(JSON.stringify(dcaDates("2026-01-01", "monthly", "20
   "2026-03-01"
 ]);
 
+// Maandelijkse DCA op de 31e mag niet overlopen naar de volgende maand.
+assert.deepEqual(JSON.parse(JSON.stringify(dcaDates("2026-01-31", "monthly", "2026-04-30"))), [
+  "2026-01-31",
+  "2026-02-28",
+  "2026-03-31",
+  "2026-04-30"
+]);
+
 const list = positions(fixture);
 const vwce = list.find((item) => item.ticker === "VWCE");
 const btc = list.find((item) => item.ticker === "BTC");
@@ -102,6 +118,37 @@ const correctedPosition = positions(correctedState).find((item) => item.ticker =
 assert.equal(correctedPosition.quantity, 12);
 assert.equal(correctedPosition.cost, 1040);
 assert.equal(Number(correctedPosition.avgPrice.toFixed(2)), 86.67);
+
+// Verkopen: gemiddelde kostprijs blijft staan en gerealiseerd resultaat wordt vastgelegd.
+const sellState = {
+  prices: { VWCE: 120 },
+  transactions: [
+    { ticker: "VWCE", name: "Vanguard FTSE All-World", type: "ETF", side: "buy", date: "2025-01-01", quantity: 10, price: 100, currentPrice: 120 },
+    { ticker: "VWCE", name: "Vanguard FTSE All-World", type: "ETF", side: "sell", date: "2025-06-01", quantity: 4, price: 150, currentPrice: 120 }
+  ]
+};
+const sellPosition = positions(sellState).find((item) => item.ticker === "VWCE");
+assert.equal(sellPosition.quantity, 6);
+assert.equal(sellPosition.cost, 600);
+assert.equal(Number(sellPosition.realizedGain.toFixed(2)), 200);
+
+const realizedRows = realizedGains(sellState);
+assert.equal(realizedRows.length, 1);
+assert.equal(Number(realizedRows[0].gain.toFixed(2)), 200);
+assert.equal(realizedRows[0].proceeds, 600);
+assert.equal(realizedGainForYear(sellState, 2025), 200);
+assert.equal(realizedGainForYear(sellState, 2024), 0);
+
+// Oververkopen wordt geklemd op de beschikbare positie.
+const oversellState = {
+  prices: {},
+  transactions: [
+    { ticker: "BTC", name: "Bitcoin", type: "Crypto", side: "buy", date: "2025-01-01", quantity: 1, price: 50000, currentPrice: 60000 },
+    { ticker: "BTC", name: "Bitcoin", type: "Crypto", side: "sell", date: "2025-02-01", quantity: 2, price: 60000, currentPrice: 60000 }
+  ]
+};
+assert.equal(positions(oversellState).length, 0);
+assert.equal(Number(realizedGains(oversellState)[0].gain.toFixed(2)), 10000);
 
 const multiAssetDcaState = {
   prices: { VWCE: 120, BTC: 65000 },

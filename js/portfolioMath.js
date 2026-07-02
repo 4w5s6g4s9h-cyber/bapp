@@ -1,6 +1,18 @@
+(() => {
 function parsePriceNumber(value) {
-  const raw = String(value || "").replace(/[€\s]/g, "");
-  const normalized = raw.includes(",") ? raw.replace(/\./g, "").replace(",", ".") : raw;
+  const raw = String(value ?? "").replace(/[€\s]/g, "");
+  if (!raw) return 0;
+  const hasComma = raw.includes(",");
+  const hasDot = raw.includes(".");
+  let normalized = raw;
+  if (hasComma && hasDot) {
+    // Het laatste scheidingsteken is het decimaalteken (1.234,56 vs 1,234.56).
+    normalized = raw.lastIndexOf(",") > raw.lastIndexOf(".")
+      ? raw.replace(/\./g, "").replace(",", ".")
+      : raw.replace(/,/g, "");
+  } else if (hasComma) {
+    normalized = raw.replace(",", ".");
+  }
   return Number(normalized);
 }
 
@@ -68,16 +80,31 @@ function convertQuoteToEur(quote, rates = {}) {
   return { ...quote, priceEur: Number(quote.price) * usdEur, fxRate: usdEur };
 }
 
+function addMonthsClamped(date, months) {
+  // Voorkomt overflow (31 jan + 1 maand mag niet 3 maart worden).
+  const result = new Date(date.getFullYear(), date.getMonth() + months, 1);
+  const daysInMonth = new Date(result.getFullYear(), result.getMonth() + 1, 0).getDate();
+  result.setDate(Math.min(date.getDate(), daysInMonth));
+  return result;
+}
+
 function dcaDates(start, frequency, end) {
   const dates = [];
-  const cursor = new Date(`${start}T00:00:00`);
+  const startDate = new Date(`${start}T00:00:00`);
   const last = new Date(`${end}T00:00:00`);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(last.getTime())) return dates;
 
+  let step = 0;
+  let cursor = new Date(startDate);
   while (cursor <= last) {
     dates.push(dateToISO(cursor));
-    if (frequency === "weekly") cursor.setDate(cursor.getDate() + 7);
-    if (frequency === "monthly") cursor.setMonth(cursor.getMonth() + 1);
-    if (frequency === "quarterly") cursor.setMonth(cursor.getMonth() + 3);
+    step += 1;
+    if (frequency === "weekly") {
+      cursor = new Date(startDate);
+      cursor.setDate(startDate.getDate() + 7 * step);
+    } else {
+      cursor = addMonthsClamped(startDate, (frequency === "quarterly" ? 3 : 1) * step);
+    }
   }
 
   return dates;
@@ -101,8 +128,7 @@ function averagePriceFor(state, pos) {
   return Number.isFinite(override) && override > 0 ? override : pos.cost / pos.quantity;
 }
 
-function positions(state) {
-  const map = new Map();
+function positionEvents(state) {
   const correctionEvents = Object.entries(state.avgPriceCorrections || {}).map(([ticker, correction]) => ({
     ticker,
     side: "correction",
@@ -111,41 +137,47 @@ function positions(state) {
     order: 1
   })).filter((item) => Number.isFinite(item.avgPrice) && item.avgPrice >= 0);
   const transactionEvents = (state.transactions || []).map((item) => ({ ...item, order: 0 }));
-  [...transactionEvents, ...correctionEvents]
-    .sort((a, b) => new Date(a.date) - new Date(b.date) || a.order - b.order)
-    .forEach((item) => {
-      if (!map.has(item.ticker)) {
-        map.set(item.ticker, {
-          ticker: item.ticker,
-          name: item.name,
-          type: item.type,
-          quantity: 0,
-          cost: 0,
-          currentPrice: item.currentPrice,
-          firstDate: item.date,
-          transactions: 0
-        });
-      }
+  return [...transactionEvents, ...correctionEvents]
+    .sort((a, b) => new Date(a.date) - new Date(b.date) || a.order - b.order);
+}
 
-      const pos = map.get(item.ticker);
-      if (item.side === "correction") {
-        pos.cost = Math.max(0, pos.quantity * item.avgPrice);
-      } else if (item.side === "sell") {
-        const averageCost = pos.quantity > 0 ? pos.cost / pos.quantity : 0;
-        const soldQuantity = Math.min(item.quantity, pos.quantity);
-        pos.quantity -= soldQuantity;
-        pos.cost -= soldQuantity * averageCost;
-      } else {
-        pos.quantity += item.quantity;
-        pos.cost += item.quantity * item.price;
-      }
+function positions(state) {
+  const map = new Map();
+  positionEvents(state).forEach((item) => {
+    if (!map.has(item.ticker)) {
+      map.set(item.ticker, {
+        ticker: item.ticker,
+        name: item.name,
+        type: item.type,
+        quantity: 0,
+        cost: 0,
+        realizedGain: 0,
+        currentPrice: item.currentPrice,
+        firstDate: item.date,
+        transactions: 0
+      });
+    }
 
-      if (item.side !== "correction") {
-        pos.currentPrice = priceOf(state, item.ticker, item.currentPrice || pos.currentPrice);
-        pos.firstDate = item.date < pos.firstDate ? item.date : pos.firstDate;
-        pos.transactions += 1;
-      }
-    });
+    const pos = map.get(item.ticker);
+    if (item.side === "correction") {
+      pos.cost = Math.max(0, pos.quantity * item.avgPrice);
+    } else if (item.side === "sell") {
+      const averageCost = pos.quantity > 0 ? pos.cost / pos.quantity : 0;
+      const soldQuantity = Math.min(item.quantity, pos.quantity);
+      pos.quantity -= soldQuantity;
+      pos.cost -= soldQuantity * averageCost;
+      pos.realizedGain += soldQuantity * (item.price - averageCost);
+    } else {
+      pos.quantity += item.quantity;
+      pos.cost += item.quantity * item.price;
+    }
+
+    if (item.side !== "correction") {
+      pos.currentPrice = priceOf(state, item.ticker, item.currentPrice || pos.currentPrice);
+      pos.firstDate = item.date < pos.firstDate ? item.date : pos.firstDate;
+      pos.transactions += 1;
+    }
+  });
 
   return [...map.values()]
     .filter((pos) => pos.quantity > 0)
@@ -164,6 +196,46 @@ function positions(state) {
       };
     })
     .sort((a, b) => b.value - a.value);
+}
+
+function realizedGains(state) {
+  // Gerealiseerd resultaat per verkoop, op basis van gemiddelde kostprijs
+  // (inclusief handmatige gemiddelde-prijs-correcties, net als positions()).
+  const running = new Map();
+  const rows = [];
+  positionEvents(state).forEach((item) => {
+    const entry = running.get(item.ticker) || { quantity: 0, cost: 0 };
+    if (item.side === "correction") {
+      entry.cost = Math.max(0, entry.quantity * item.avgPrice);
+    } else if (item.side === "sell") {
+      const averageCost = entry.quantity > 0 ? entry.cost / entry.quantity : 0;
+      const soldQuantity = Math.min(item.quantity, entry.quantity);
+      entry.quantity -= soldQuantity;
+      entry.cost -= soldQuantity * averageCost;
+      if (soldQuantity > 0) {
+        rows.push({
+          ticker: item.ticker,
+          date: item.date,
+          quantity: soldQuantity,
+          proceeds: soldQuantity * item.price,
+          costBasis: soldQuantity * averageCost,
+          gain: soldQuantity * (item.price - averageCost)
+        });
+      }
+    } else {
+      entry.quantity += item.quantity;
+      entry.cost += item.quantity * item.price;
+    }
+    running.set(item.ticker, entry);
+  });
+  return rows;
+}
+
+function realizedGainForYear(state, year) {
+  const prefix = String(year);
+  return realizedGains(state)
+    .filter((row) => String(row.date || "").startsWith(prefix))
+    .reduce((sum, row) => sum + row.gain, 0);
 }
 
 function normalizeDcaAssets(plan) {
@@ -214,3 +286,26 @@ function totals(state) {
 
   return { list, cost, value, gain, gainPct: cost ? gain / cost : 0, dcaMonthly };
 }
+
+// Namespace zodat tracker.js kan delegeren zonder botsende globale namen.
+globalThis.PortfolioMath = {
+  parsePriceNumber,
+  parsePriceCsv,
+  EQUITY_QUOTE_SYMBOLS,
+  resolveEquityQuoteSymbol,
+  parseYahooChartQuote,
+  convertQuoteToEur,
+  addMonthsClamped,
+  dcaDates,
+  dateToISO,
+  priceOf,
+  averagePriceFor,
+  positions,
+  realizedGains,
+  realizedGainForYear,
+  normalizeDcaAssets,
+  dcaPlanQuantity,
+  dcaPlanValue,
+  totals
+};
+})();
