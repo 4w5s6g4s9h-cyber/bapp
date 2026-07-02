@@ -3,6 +3,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node tests/portfolioMath.test.mjs && python3 -m unittest discover -s tests -p '*_test.py'"
+    "test": "node tests/portfolioMath.test.mjs && node tests/browserSmoke.test.mjs && python3 -m unittest discover -s tests -p '*_test.py'"
   }
 }

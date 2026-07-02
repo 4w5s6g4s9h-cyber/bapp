@@ -96,14 +96,23 @@ function priceOf(state, ticker, fallback) {
 }
 
 function averagePriceFor(state, pos) {
+  if (state.avgPriceCorrections?.[pos.ticker]) return pos.quantity ? pos.cost / pos.quantity : 0;
   const override = state.avgPrices ? Number(state.avgPrices[pos.ticker]) : 0;
   return Number.isFinite(override) && override > 0 ? override : pos.cost / pos.quantity;
 }
 
 function positions(state) {
   const map = new Map();
-  [...(state.transactions || [])]
-    .sort((a, b) => new Date(a.date) - new Date(b.date))
+  const correctionEvents = Object.entries(state.avgPriceCorrections || {}).map(([ticker, correction]) => ({
+    ticker,
+    side: "correction",
+    date: correction.date || dateToISO(new Date()),
+    avgPrice: Number(correction.avgPrice),
+    order: 1
+  })).filter((item) => Number.isFinite(item.avgPrice) && item.avgPrice >= 0);
+  const transactionEvents = (state.transactions || []).map((item) => ({ ...item, order: 0 }));
+  [...transactionEvents, ...correctionEvents]
+    .sort((a, b) => new Date(a.date) - new Date(b.date) || a.order - b.order)
     .forEach((item) => {
       if (!map.has(item.ticker)) {
         map.set(item.ticker, {
@@ -119,7 +128,9 @@ function positions(state) {
       }
 
       const pos = map.get(item.ticker);
-      if (item.side === "sell") {
+      if (item.side === "correction") {
+        pos.cost = Math.max(0, pos.quantity * item.avgPrice);
+      } else if (item.side === "sell") {
         const averageCost = pos.quantity > 0 ? pos.cost / pos.quantity : 0;
         const soldQuantity = Math.min(item.quantity, pos.quantity);
         pos.quantity -= soldQuantity;
@@ -129,9 +140,11 @@ function positions(state) {
         pos.cost += item.quantity * item.price;
       }
 
-      pos.currentPrice = priceOf(state, item.ticker, item.currentPrice || pos.currentPrice);
-      pos.firstDate = item.date < pos.firstDate ? item.date : pos.firstDate;
-      pos.transactions += 1;
+      if (item.side !== "correction") {
+        pos.currentPrice = priceOf(state, item.ticker, item.currentPrice || pos.currentPrice);
+        pos.firstDate = item.date < pos.firstDate ? item.date : pos.firstDate;
+        pos.transactions += 1;
+      }
     });
 
   return [...map.values()]
@@ -153,15 +166,50 @@ function positions(state) {
     .sort((a, b) => b.value - a.value);
 }
 
+function normalizeDcaAssets(plan) {
+  if (Array.isArray(plan.assets) && plan.assets.length) {
+    return plan.assets.map((asset) => ({
+      ticker: String(asset.ticker || "").toUpperCase(),
+      name: asset.name || "",
+      type: asset.type || plan.type || "ETF",
+      quantity: Number(asset.quantity) || 0
+    })).filter((asset) => asset.ticker && asset.quantity > 0);
+  }
+  const ticker = String(plan.ticker || "").toUpperCase();
+  const quantity = dcaPlanQuantity(plan);
+  return ticker && quantity > 0 ? [{ ticker, name: plan.name || ticker, type: plan.type || "ETF", quantity }] : [];
+}
+
+function dcaPlanQuantity(plan) {
+  const assets = Array.isArray(plan.assets) ? plan.assets : [];
+  if (assets.length) return assets.reduce((sum, asset) => sum + Number(asset.quantity || 0), 0);
+  const quantity = Number(plan.quantity);
+  if (Number.isFinite(quantity) && quantity > 0) return quantity;
+  const amount = Number(plan.amount);
+  const price = Number(plan.price);
+  return Number.isFinite(amount) && Number.isFinite(price) && price > 0 ? amount / price : 0;
+}
+
+function dcaPlanValue(state, plan) {
+  const assets = normalizeDcaAssets(plan);
+  if (assets.length) {
+    return assets.reduce((sum, asset) => sum + asset.quantity * priceOf(state, asset.ticker, Number(plan.price) || 0), 0);
+  }
+  const amount = Number(plan.amount);
+  if (Number.isFinite(amount) && amount > 0) return amount;
+  return dcaPlanQuantity(plan) * (Number(plan.price) || 0);
+}
+
 function totals(state) {
   const list = positions(state);
   const cost = list.reduce((sum, item) => sum + item.cost, 0);
   const value = list.reduce((sum, item) => sum + item.value, 0);
   const gain = value - cost;
   const dcaMonthly = (state.dcas || []).filter((plan) => plan.active).reduce((sum, plan) => {
-    if (plan.frequency === "weekly") return sum + plan.amount * 52 / 12;
-    if (plan.frequency === "quarterly") return sum + plan.amount / 3;
-    return sum + plan.amount;
+    const valuePerRun = dcaPlanValue(state, plan);
+    if (plan.frequency === "weekly") return sum + valuePerRun * 52 / 12;
+    if (plan.frequency === "quarterly") return sum + valuePerRun / 3;
+    return sum + valuePerRun;
   }, 0);
 
   return { list, cost, value, gain, gainPct: cost ? gain / cost : 0, dcaMonthly };

@@ -88,6 +88,35 @@ assert.equal(total.cost, 5800);
 assert.equal(total.value, 7460);
 assert.equal(total.dcaMonthly, 300);
 
+const correctedState = {
+  prices: { VWCE: 120 },
+  avgPriceCorrections: {
+    VWCE: { avgPrice: 80, date: "2026-02-01" }
+  },
+  transactions: [
+    { ticker: "VWCE", name: "Vanguard FTSE All-World", type: "ETF", side: "buy", date: "2026-01-01", quantity: 10, price: 100, currentPrice: 120 },
+    { ticker: "VWCE", name: "Vanguard FTSE All-World", type: "ETF", side: "buy", date: "2026-03-01", quantity: 2, price: 120, currentPrice: 120 }
+  ]
+};
+const correctedPosition = positions(correctedState).find((item) => item.ticker === "VWCE");
+assert.equal(correctedPosition.quantity, 12);
+assert.equal(correctedPosition.cost, 1040);
+assert.equal(Number(correctedPosition.avgPrice.toFixed(2)), 86.67);
+
+const multiAssetDcaState = {
+  prices: { VWCE: 120, BTC: 65000 },
+  transactions: [],
+  dcas: [{
+    active: true,
+    frequency: "monthly",
+    assets: [
+      { ticker: "VWCE", quantity: 2, type: "ETF" },
+      { ticker: "BTC", quantity: 0.01, type: "Crypto" }
+    ]
+  }]
+};
+assert.equal(totals(multiAssetDcaState).dcaMonthly, 890);
+
 const screenshotState = {
   prices: {
     CR1: 100,
