@@ -5,8 +5,8 @@ const index = await readFile(new URL("../index.html", import.meta.url), "utf8");
 const css = await readFile(new URL("../css/styles.css", import.meta.url), "utf8");
 const tracker = await readFile(new URL("../js/tracker.js", import.meta.url), "utf8");
 
-assert.match(index, /<link rel="stylesheet" href="css\/styles\.css">/);
-assert.match(index, /<script src="js\/portfolioMath\.js" defer><\/script>\s*<script src="js\/tracker\.js" defer><\/script>/);
+assert.match(index, /<link rel="stylesheet" href="css\/styles\.css(\?v=\d+)?">/);
+assert.match(index, /<script src="js\/portfolioMath\.js(\?v=\d+)?" defer><\/script>\s*<script src="js\/tracker\.js(\?v=\d+)?" defer><\/script>/);
 assert.match(index, /<meta http-equiv="Content-Security-Policy"/);
 assert.doesNotMatch(index, /<style>|<script>\s*const STORAGE_KEY/);
 assert.doesNotMatch(index, /portfolio-import-data\.js/);

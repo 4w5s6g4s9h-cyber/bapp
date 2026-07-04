@@ -287,6 +287,191 @@ function totals(state) {
   return { list, cost, value, gain, gainPct: cost ? gain / cost : 0, dcaMonthly };
 }
 
+// ---- Rendement- en risicostatistiek (puur, geen state) ----
+
+const MS_PER_YEAR = 31557600000;
+
+// Money-weighted rendement (XIRR) via bisectie op de netto contante waarde.
+// flows: [{ date: "YYYY-MM-DD" of ms, amount }] met minstens één negatieve
+// (inleg) en één positieve (waarde/verkoop) flow. Retourneert jaarrendement
+// als fractie, of null wanneer er geen oplosbare wortel is.
+function xirr(flows) {
+  const points = (flows || [])
+    .map((flow) => ({
+      t: typeof flow.date === "number" ? flow.date : new Date(`${flow.date}T00:00:00`).getTime(),
+      amount: Number(flow.amount)
+    }))
+    .filter((point) => Number.isFinite(point.t) && Number.isFinite(point.amount) && point.amount !== 0);
+  if (points.length < 2) return null;
+  if (!points.some((point) => point.amount < 0) || !points.some((point) => point.amount > 0)) return null;
+  const t0 = Math.min(...points.map((point) => point.t));
+  const years = points.map((point) => ({ y: (point.t - t0) / MS_PER_YEAR, amount: point.amount }));
+  const npv = (rate) => years.reduce((sum, point) => sum + point.amount / Math.pow(1 + rate, point.y), 0);
+  let lo = -0.9999;
+  let hi = 10;
+  let npvLo = npv(lo);
+  if (npvLo * npv(hi) > 0) return null;
+  for (let i = 0; i < 200; i += 1) {
+    const mid = (lo + hi) / 2;
+    const npvMid = npv(mid);
+    if (Math.abs(npvMid) < 1e-7) return mid;
+    if (npvLo * npvMid < 0) hi = mid;
+    else {
+      lo = mid;
+      npvLo = npvMid;
+    }
+  }
+  return (lo + hi) / 2;
+}
+
+// Time-weighted rendement over een reeks [{ value, invested }] (chronologisch).
+// Stortingen/onttrekkingen (verschil in invested) worden per stap uitgefilterd,
+// zodat alleen marktrendement telt.
+function timeWeightedReturn(series) {
+  if (!Array.isArray(series) || series.length < 2) return null;
+  let growth = 1;
+  let steps = 0;
+  for (let i = 1; i < series.length; i += 1) {
+    const prev = series[i - 1];
+    const cur = series[i];
+    if (!(prev.value > 0)) continue;
+    const flow = (Number(cur.invested) || 0) - (Number(prev.invested) || 0);
+    const stepReturn = (cur.value - flow) / prev.value;
+    if (!Number.isFinite(stepReturn) || stepReturn <= 0) continue;
+    growth *= stepReturn;
+    steps += 1;
+  }
+  return steps ? growth - 1 : null;
+}
+
+// Grootste piek-naar-dal-daling als fractie (negatief getal), plus de indexen.
+function maxDrawdown(values) {
+  let peak = -Infinity;
+  let peakIndex = 0;
+  let worst = 0;
+  let worstPeakIndex = 0;
+  let worstTroughIndex = 0;
+  (values || []).forEach((value, index) => {
+    if (value > peak) {
+      peak = value;
+      peakIndex = index;
+    }
+    if (peak > 0) {
+      const drawdown = value / peak - 1;
+      if (drawdown < worst) {
+        worst = drawdown;
+        worstPeakIndex = peakIndex;
+        worstTroughIndex = index;
+      }
+    }
+  });
+  return { drawdown: worst, peakIndex: worstPeakIndex, troughIndex: worstTroughIndex };
+}
+
+// Flow-gecorrigeerde maandrendementen uit een reeks [{ date|t, value, invested }].
+function monthlyReturns(series, minValue = 0) {
+  // minValue filtert maanden weg waarin de portefeuille nog verwaarloosbaar
+  // klein was: een sprong van 50 naar 150 euro is geen bruikbaar rendement.
+  if (!Array.isArray(series) || series.length < 2) return [];
+  const byMonth = new Map();
+  series.forEach((point) => {
+    const ms = point.t ?? new Date(`${point.date}T00:00:00`).getTime();
+    if (!Number.isFinite(ms)) return;
+    const key = new Date(ms).toISOString().slice(0, 7);
+    byMonth.set(key, point); // laatste punt per maand wint
+  });
+  const months = [...byMonth.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([, point]) => point);
+  const returns = [];
+  for (let i = 1; i < months.length; i += 1) {
+    const prev = months[i - 1];
+    const cur = months[i];
+    if (!(prev.value > 0) || prev.value < minValue) continue;
+    const flow = (Number(cur.invested) || 0) - (Number(prev.invested) || 0);
+    const stepReturn = (cur.value - flow) / prev.value - 1;
+    if (Number.isFinite(stepReturn) && stepReturn > -1) returns.push(stepReturn);
+  }
+  return returns;
+}
+
+function mean(values) {
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+}
+
+function stdev(values) {
+  if (!values || values.length < 2) return 0;
+  const avg = mean(values);
+  const variance = values.reduce((sum, value) => sum + (value - avg) ** 2, 0) / (values.length - 1);
+  return Math.sqrt(variance);
+}
+
+// Pearson-correlatie tussen twee even lange reeksen.
+function correlation(a, b) {
+  if (!a || !b || a.length !== b.length || a.length < 3) return null;
+  const meanA = mean(a);
+  const meanB = mean(b);
+  let cov = 0;
+  let varA = 0;
+  let varB = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    const da = a[i] - meanA;
+    const db = b[i] - meanB;
+    cov += da * db;
+    varA += da * da;
+    varB += db * db;
+  }
+  const denom = Math.sqrt(varA * varB);
+  return denom > 0 ? cov / denom : null;
+}
+
+function quantile(sortedValues, q) {
+  if (!sortedValues.length) return 0;
+  const pos = (sortedValues.length - 1) * q;
+  const base = Math.floor(pos);
+  const rest = pos - base;
+  const next = sortedValues[base + 1];
+  return next === undefined ? sortedValues[base] : sortedValues[base] + rest * (next - sortedValues[base]);
+}
+
+// Monte-Carlo-projectie van portefeuillewaarde met maandelijkse inleg.
+// samples: eigen historische maandrendementen (bootstrap) — bij te weinig
+// samples wordt normaal getrokken met opgegeven jaarlijkse mu/sigma.
+function monteCarloProjection({ startValue, monthly, months, samples = [], mu = 0.06, sigma = 0.15, runs = 500, random = Math.random }) {
+  const useBootstrap = samples.length >= 24;
+  const muMonthly = Math.pow(1 + mu, 1 / 12) - 1;
+  const sigmaMonthly = sigma / Math.sqrt(12);
+  const normal = () => {
+    const u1 = Math.max(random(), 1e-12);
+    const u2 = random();
+    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  };
+  const drawReturn = useBootstrap
+    ? () => samples[Math.floor(random() * samples.length)]
+    : () => muMonthly + sigmaMonthly * normal();
+  const paths = [];
+  for (let run = 0; run < runs; run += 1) {
+    let value = startValue;
+    const path = new Array(months);
+    for (let month = 0; month < months; month += 1) {
+      value = Math.max(0, value * (1 + drawReturn()) + monthly);
+      path[month] = value;
+    }
+    paths.push(path);
+  }
+  const p10 = new Array(months);
+  const p50 = new Array(months);
+  const p90 = new Array(months);
+  const column = new Array(runs);
+  for (let month = 0; month < months; month += 1) {
+    for (let run = 0; run < runs; run += 1) column[run] = paths[run][month];
+    column.sort((a, b) => a - b);
+    p10[month] = quantile(column, 0.1);
+    p50[month] = quantile(column, 0.5);
+    p90[month] = quantile(column, 0.9);
+  }
+  const endValues = paths.map((path) => path[months - 1]).sort((a, b) => a - b);
+  return { p10, p50, p90, endValues, method: useBootstrap ? "bootstrap" : "normaal" };
+}
+
 // Namespace zodat tracker.js kan delegeren zonder botsende globale namen.
 globalThis.PortfolioMath = {
   parsePriceNumber,
@@ -306,6 +491,15 @@ globalThis.PortfolioMath = {
   normalizeDcaAssets,
   dcaPlanQuantity,
   dcaPlanValue,
-  totals
+  totals,
+  xirr,
+  timeWeightedReturn,
+  maxDrawdown,
+  monthlyReturns,
+  mean,
+  stdev,
+  correlation,
+  quantile,
+  monteCarloProjection
 };
 })();

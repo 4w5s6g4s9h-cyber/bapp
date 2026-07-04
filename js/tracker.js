@@ -42,6 +42,17 @@
     };
     const YAHOO_CHART_PROXY = "https://api.allorigins.win/raw?url=";
     const USD_EUR_RATE_URL = "https://open.er-api.com/v6/latest/USD";
+    const ASSET_CHART_RANGES = [
+      { key: "1m", label: "1M", days: 30, yahooRange: "1mo" },
+      { key: "3m", label: "3M", days: 91, yahooRange: "3mo" },
+      { key: "6m", label: "6M", days: 182, yahooRange: "6mo" },
+      { key: "1y", label: "1J", days: 365, yahooRange: "1y" },
+      { key: "max", label: "Alles", days: null, yahooRange: "max" }
+    ];
+    const HISTORY_CACHE_KEY = "portfolio-tracker-history-v1";
+    const HISTORY_TTL_MS = 6 * 3600000;
+    const HISTORY_MAX_ENTRIES = 24;
+    const HISTORY_MAX_POINTS = 400;
     const DEFAULT_UI = {
       positionSearch: "",
       positionSort: "value",
@@ -55,34 +66,21 @@
       transactionLimit: "100",
       transactionGroup: "month",
       transactionSpecialFilter: "all",
+      assetChartRange: "1y",
+      portfolioSegment: "positions",
+      mcMonthly: "",
+      mcGoal: "",
+      mcYears: "",
       sidebarCollapsed: false
     };
     const DEFAULT_PURCHASE_PLANS = [];
 
-    let stateCache = { positions: null, totals: null, history: null };
+    let stateCache = { positions: null, totals: null, history: null, series: null, xirr: null };
     const VIEW_RENDERERS = {
-      dashboard: (total) => {
-        renderMetrics(total);
-        renderPriceStatusCards(total);
-        renderInsights(total);
-        renderValueChartSummary(total);
-        renderAllocationLegend(total.list);
-      },
-      positions: (total) => {
-        renderPriceStatusCards(total);
-        renderPositions(total.list);
-      },
-      transactions: () => renderTransactions(),
+      dashboard: (total) => renderDashboard(total),
+      portfolio: (total) => renderPortfolio(total),
       analysis: (total) => renderAnalysis(total),
-      plans: (total) => renderPlans(total),
-      dca: (total) => {
-        renderDcaCards();
-        renderDcaSuggestions(total);
-      },
-      watchlist: (total) => renderWatchlist(total),
-      allocation: (total) => renderAllocation(total),
-      income: (total) => renderIncome(total),
-      strategy: (total) => renderStrategy(total),
+      plan: (total) => renderPlan(total),
       settings: (total) => {
         renderAudit(total);
         renderSettings();
@@ -91,16 +89,19 @@
     const dirtyViews = new Set();
 
     let state = loadState();
-    let valueChartHoverIndex = null;
+    let assetChartToken = 0;
+    let valueChartToken = 0;
+    let analysisRiskToken = 0;
+    let correlationToken = 0;
+    let mcToken = 0;
+    // In-memory memo bovenop de localStorage-cache voor koershistorie;
+    // dedupliceert ook gelijktijdige aanvragen (composer + correlatie).
+    const historyMemo = new Map();
+    let usdEurRateCache = null;
     let allocationHoverIndex = null;
     let allocationSegments = [];
     let activeModal = null;
     let activeModalOpener = null;
-    if (applyDcaPlans()) persist();
-    if (captureDailySnapshot()) persist();
-    applySidebarState();
-    render();
-    renderDcaAssetDraft();
 
     document.querySelectorAll(".nav-btn").forEach((button) => {
       button.addEventListener("click", () => switchView(button.dataset.view));
@@ -116,26 +117,14 @@
       });
     });
 
-    document.querySelectorAll("[data-mover-mode]").forEach((button) => {
-      button.addEventListener("click", () => {
-        state.ui.analysisMoverMode = button.dataset.moverMode;
+    ["mcMonthly", "mcGoal", "mcYears"].forEach((id) => {
+      document.getElementById(id).addEventListener("input", (event) => {
+        state.ui[id] = event.target.value;
         persist();
-        render();
+        renderPlanProjection(totals());
       });
     });
 
-    document.querySelectorAll("[data-analysis-jump]").forEach((button) => {
-      button.addEventListener("click", () => jumpToAnalysisSection(button.dataset.analysisJump));
-    });
-
-    document.addEventListener("input", (event) => {
-      if (!event.target.matches("[data-analysis-sim]")) return;
-      state.ui[event.target.dataset.analysisSim] = Number(event.target.value);
-      persist();
-      render();
-    });
-
-    window.addEventListener("scroll", updateAnalysisJumpNav, { passive: true });
     document.addEventListener("keydown", handleModalKeydown);
 
     // Gedelegeerde klik-acties voor dynamisch gerenderde knoppen; vervangt
@@ -155,36 +144,18 @@
       removeTransaction: (el) => removeTransaction(el.dataset.id),
       removeWatchlistItem: (el) => removeWatchlistItem(el.dataset.id),
       removeIncomeItem: (el) => removeIncomeItem(el.dataset.id),
-      removeSalePlan: (el) => removeSalePlan(el.dataset.ticker),
       removeAlert: (el) => removeAlert(el.dataset.id),
-      removeSnapshot: (el) => removeSnapshot(el.dataset.id),
       toggleDca: (el) => toggleDca(el.dataset.id),
       removeDca: (el) => removeDca(el.dataset.id),
       resetAveragePrice: (el) => resetAveragePrice(el.dataset.ticker),
-      prefillWatchlist: (el) => {
-        const payload = parseActionPayload(el);
-        if (payload) prefillWatchlist(payload.ticker, payload.name, payload.type, payload.currentPrice, payload.targetPrice, payload.note);
-      },
-      prefillDca: (el) => {
-        const payload = parseActionPayload(el);
-        if (payload) prefillDca(payload.ticker, payload.name, payload.type, payload.quantity, payload.price);
-      },
+      setPortfolioSegment: (el) => setPortfolioSegment(el.dataset.segment),
+      setAssetChartRange: (el) => setAssetChartRange(el.dataset.rangeKey, el.dataset.ticker),
       updateCryptoPrices: () => updateCryptoPrices(),
       updateEquityPrices: () => updateEquityPrices(),
       exportPriceTemplate: () => exportPriceTemplate(),
       importPriceCsv: () => document.getElementById("priceFileInput").click(),
-      markCurrentMonthProcessed: () => markCurrentMonthProcessed(),
-      captureSnapshot: () => captureSnapshot(),
       restoreBackup: () => restoreBackup()
     };
-
-    function parseActionPayload(el) {
-      try {
-        return JSON.parse(el.dataset.payload || "null");
-      } catch {
-        return null;
-      }
-    }
 
     document.addEventListener("click", (event) => {
       const target = event.target.closest("[data-action]");
@@ -233,13 +204,6 @@
       render();
     });
     document.getElementById("removeSmallPositionsBtn").addEventListener("click", removeSmallPositions);
-    ["simMonthly", "simReturn", "simGoal"].forEach((id) => {
-      document.getElementById(id).addEventListener("input", (event) => {
-        state.ui[id] = event.target.value;
-        persist();
-        render();
-      });
-    });
 
     document.getElementById("txForm").addEventListener("submit", (event) => {
       event.preventDefault();
@@ -439,22 +403,6 @@
       persist();
       event.target.reset();
       event.target.date.value = todayISO();
-      render();
-    });
-    document.getElementById("tagForm").addEventListener("submit", (event) => {
-      event.preventDefault();
-      const data = Object.fromEntries(new FormData(event.target));
-      const ticker = data.ticker.toUpperCase();
-      state.tags = { ...(state.tags || {}), [ticker]: { tags: data.tags || "", thesis: data.thesis || "", risk: data.risk || "" } };
-      persist();
-      render();
-    });
-    document.getElementById("salePlanForm").addEventListener("submit", (event) => {
-      event.preventDefault();
-      const data = Object.fromEntries(new FormData(event.target));
-      const ticker = data.ticker.toUpperCase();
-      state.salePlans = { ...(state.salePlans || {}), [ticker]: { targetPrice: parsePriceNumber(data.targetPrice), stopPrice: parsePriceNumber(data.stopPrice), note: data.note || "" } };
-      persist();
       render();
     });
     document.getElementById("alertForm").addEventListener("submit", (event) => {
@@ -698,6 +646,8 @@
       stateCache.positions = null;
       stateCache.totals = null;
       stateCache.history = null;
+      stateCache.series = null;
+      stateCache.xirr = null;
     }
 
     function positions() {
@@ -876,46 +826,17 @@
       document.querySelectorAll(".view").forEach((section) => section.classList.toggle("active", section.id === view));
       const titles = {
         dashboard: ["Dashboard", "Waarde, rendement en spreiding van je portefeuille."],
-        positions: ["Posities", "Bekijk je holdings, gemiddelde prijs en winst/verlies."],
-        transactions: ["Transacties", "Alle aankopen, verkopen en DCA-regels op één plek."],
-        analysis: ["Analyse", "Verdieping op rendement, spreiding, concentratie en transactiegedrag."],
-        plans: ["Plannen", "Maandworkflow, scenario's, risicoscore en actievoorstellen."],
-        audit: ["Controle", "Datakwaliteit, importbronnen en correctieregels."],
-        dca: ["DCA", "Plan automatische periodieke aankopen in."],
-        watchlist: ["Watchlist", "Kandidaten, koopzones en koerssignalen."],
-        allocation: ["Allocatie", "Doelweging, afwijkingen en rebalance-acties."],
-        income: ["Inkomsten", "Dividend, staking en belastingrapportage."],
-        strategy: ["Strategie", "Tags, thesis, verkoopplannen, alerts en snapshots."],
-        settings: ["Instellingen", "Import, export, koersupdates en opschonen."]
+        portfolio: ["Portfolio", "Posities, transacties en inkomsten op één plek."],
+        analysis: ["Analyse", "Rendement, risico, spreiding en samenhang op koershistorie."],
+        plan: ["Plan", "Doelplanner, DCA, doelallocatie, watchlist en alerts."],
+        settings: ["Instellingen", "Import, export, datakwaliteit en opschonen."]
       };
       document.getElementById("pageTitle").textContent = titles[view][0];
       document.getElementById("pageSubtitle").textContent = titles[view][1];
-      requestAnimationFrame(() => {
-        if (dirtyViews.has(view)) renderView(view);
-        else drawChartsForView(view);
-        updateAnalysisJumpNav();
-      });
-    }
-
-    function jumpToAnalysisSection(id) {
-      const target = document.getElementById(id);
-      if (!target) return;
-      target.scrollIntoView({ behavior: "smooth", block: "start" });
-      document.querySelectorAll("[data-analysis-jump]").forEach((button) => {
-        button.classList.toggle("active", button.dataset.analysisJump === id);
-      });
-    }
-
-    function updateAnalysisJumpNav() {
-      if (activeView() !== "analysis") return;
-      const buttons = [...document.querySelectorAll("[data-analysis-jump]")];
-      if (!buttons.length) return;
-      const current = buttons
-        .map((button) => ({ button, target: document.getElementById(button.dataset.analysisJump) }))
-        .filter((item) => item.target)
-        .map((item) => ({ ...item, top: Math.abs(item.target.getBoundingClientRect().top - 112) }))
-        .sort((a, b) => a.top - b.top)[0];
-      buttons.forEach((button) => button.classList.toggle("active", button === current?.button));
+      // Synchroon renderen: requestAnimationFrame vuurt niet betrouwbaar in
+      // achtergrond-tabs (mobiel), waardoor views leeg konden blijven.
+      if (dirtyViews.has(view)) renderView(view);
+      else drawChartsForView(view);
     }
 
     function render() {
@@ -944,23 +865,35 @@
     function drawChartsForView(view) {
       const total = totals();
       if (view === "dashboard") {
-        drawLineChart(document.getElementById("valueChart"), portfolioHistory(Number(state.chartRange || 12)).points);
+        drawDashboardChart();
         drawAllocationChart(document.getElementById("allocationChart"), total.list);
       }
-      if (view === "analysis") {
-        const visible = total.list.filter((item) => item.value >= 1);
-        drawTopHoldingsChart(document.getElementById("topHoldingsChart"), visible);
-        drawTypePerformanceChart(document.getElementById("typePerformanceChart"), analysisByType(visible));
-      }
+      if (view === "analysis") renderAnalysisRisk(total);
+      if (view === "plan") renderPlanProjection(total);
     }
 
-    function renderMetrics(total) {
-      const activeDca = state.dcas.filter((plan) => plan.active).length;
+    function renderDashboard(total) {
+      renderDashboardMetrics(total);
+      renderDashboardSignals(total);
+      renderValueChartSummary(total, null);
+      renderAllocationLegend(total.list);
+    }
+
+    function renderDashboardMetrics(total, periodInfo = null) {
+      const annual = portfolioXirr(total);
+      const months = Number(state.chartRange || 12);
+      const periodLabel = { 1: "1M", 3: "3M", 6: "6M", 12: "1J", 36: "3J", 60: "alles" }[months] || `${months}M`;
+      const periodValue = periodInfo && Number.isFinite(periodInfo.twr)
+        ? `${periodInfo.twr >= 0 ? "+" : ""}${pct.format(periodInfo.twr)}`
+        : total.list.length ? "berekenen..." : "n.v.t.";
+      const periodNote = periodInfo && Number.isFinite(periodInfo.twr)
+        ? "Time-weighted, exclusief inleg"
+        : "Op basis van koershistorie";
       document.getElementById("metrics").innerHTML = [
-        metric("Actuele waarde", currency.format(total.value), `${total.list.length} open posities`),
-        metric("Ingelegd", currency.format(total.cost), "Inclusief automatische DCA's"),
-        metric("Rendement", `${currency.format(total.gain)} (${pct.format(total.gainPct)})`, total.gain >= 0 ? "Boven aankoopwaarde" : "Onder aankoopwaarde"),
-        metric("Maandelijkse DCA", currency.format(total.dcaMonthly), `${activeDca} actief`)
+        metric("Actuele waarde", currency.format(total.value), `${total.list.length} open posities · inleg ${currency.format(total.cost)}`),
+        metric("Totaal rendement", `${currency.format(total.gain)} (${pct.format(total.gainPct)})`, total.gain >= 0 ? "Boven aankoopwaarde" : "Onder aankoopwaarde"),
+        metric("Rendement per jaar", annual === null ? "n.v.t." : pct.format(annual), "Money-weighted (XIRR) sinds start"),
+        `<article class="metric" id="metricPeriod"><span>Rendement ${esc(periodLabel)}</span><strong>${esc(periodValue)}</strong><small>${esc(periodNote)}</small></article>`
       ].join("");
     }
 
@@ -968,25 +901,67 @@
       return `<article class="metric"><span>${label}</span><strong>${value}</strong><small>${note}</small></article>`;
     }
 
-    function renderPriceStatusCards(total) {
-      const diagnostics = portfolioDiagnostics(total);
-      const hasPositions = total.list.length > 0;
-      const gainTone = !hasPositions ? "info" : total.gain >= 0 ? "good" : "bad";
-      const concentrationTone = !hasPositions ? "info" : diagnostics.topThreeWeight > .7 ? "warn" : "good";
-      const priceTone = !hasPositions ? "info" : diagnostics.priceInfo.stale.length ? "warn" : "good";
-      const dcaTone = total.dcaMonthly > 0 ? "info" : "warn";
-      const rows = [
-        healthTile("Rendement", hasPositions ? `${currency.format(total.gain)} · ${pct.format(total.gainPct)}` : "Nog geen data", hasPositions ? total.gain >= 0 ? "Boven aankoopwaarde" : "Onder aankoopwaarde" : "Importeer of voeg je eerste transactie toe", gainTone),
-        healthTile("Top 3 gewicht", hasPositions ? pct.format(diagnostics.topThreeWeight) : "n.v.t.", hasPositions ? concentrationTone === "warn" ? "Concentratie bewaken" : "Spreiding oogt gezond" : "Nog geen spreidingsdata", concentrationTone),
-        healthTile("Koersdata", hasPositions ? diagnostics.priceInfo.stale.length ? `${diagnostics.priceInfo.stale.length} oud` : "Recent" : "Geen posities", hasPositions ? diagnostics.priceInfo.liveCryptoAt ? `Crypto live ${dateNl(diagnostics.priceInfo.liveCryptoAt.slice(0, 10))}` : "Import/handmatig" : "Nog geen koersdata nodig", priceTone),
-        healthTile("DCA-status", total.dcaMonthly ? currency.format(total.dcaMonthly) : "Geen actief plan", total.dcaMonthly ? "Automatische maandinleg" : "Plan nog niet actief", dcaTone)
-      ].join("");
-      ["dashboardPriceStatus", "positionsPriceStatus"].forEach((id) => {
-        const target = document.getElementById(id);
-        if (!target) return;
-        target.innerHTML = rows;
+    // Money-weighted jaarrendement over de hele portefeuille: alle koop-/verkoop-
+    // flows plus de huidige waarde als slotflow.
+    function portfolioXirr(total = totals()) {
+      if (stateCache.xirr !== null) return stateCache.xirr;
+      const flows = state.transactions
+        .filter((item) => Number(item.price) > 0 && Number(item.quantity) > 0)
+        .map((item) => ({
+          date: item.date,
+          amount: (item.side === "sell" ? 1 : -1) * Math.abs(item.quantity * item.price)
+        }));
+      if (total.value > 0) flows.push({ date: todayISO(), amount: total.value });
+      const result = PortfolioMath.xirr(flows);
+      stateCache.xirr = Number.isFinite(result) ? result : null;
+      return stateCache.xirr;
+    }
+
+    function positionXirr(item) {
+      const flows = state.transactions
+        .filter((txItem) => txItem.ticker === item.ticker && Number(txItem.price) > 0 && Number(txItem.quantity) > 0)
+        .map((txItem) => ({
+          date: txItem.date,
+          amount: (txItem.side === "sell" ? 1 : -1) * Math.abs(txItem.quantity * txItem.price)
+        }));
+      if (item.value > 0) flows.push({ date: todayISO(), amount: item.value });
+      const result = PortfolioMath.xirr(flows);
+      return Number.isFinite(result) ? result : null;
+    }
+
+    function alertHits(total = totals()) {
+      return (state.alerts || [])
+        .map((item) => ({ ...item, priceNow: currentAssetPrice(item.ticker, 0) }))
+        .filter((item) => item.priceNow > 0 && (item.direction === "below" ? item.priceNow <= item.price : item.priceNow >= item.price));
+    }
+
+    // Maximaal drie signalen met besluitwaarde; de rest is ruis.
+    function renderDashboardSignals(total) {
+      const target = document.getElementById("dashboardSignals");
+      if (!target) return;
+      const signals = [];
+      if (window.location.protocol === "file:") {
+        signals.push(healthTile("Live koersen geblokkeerd", "App via bestand geopend", "Dubbelklik start-app.command in de projectmap", "bad"));
+      }
+      if (!total.list.length) {
+        signals.push(healthTile("Startpunt", "Nog geen data", "Importeer een backup of voeg je eerste transactie toe", "info"));
+        target.innerHTML = signals.join("");
         target.hidden = false;
-      });
+        return;
+      }
+      const info = priceDiagnostics(total);
+      const hits = alertHits(total);
+      const list = total.list.filter((item) => item.value >= 1);
+      const visibleValue = list.reduce((sum, item) => sum + item.value, 0);
+      const topWeight = list.length ? list[0].value / Math.max(visibleValue, 1) : 0;
+      const cryptoWeight = list.filter((item) => item.type === "Crypto").reduce((sum, item) => sum + item.value, 0) / Math.max(visibleValue, 1);
+      if (hits.length) signals.push(healthTile("Alerts geraakt", `${hits.length}`, hits.slice(0, 2).map((item) => `${item.ticker} ${item.direction === "below" ? "onder" : "boven"} ${currency.format(item.price)}`).join(" · "), "warn"));
+      if (info.stale.length) signals.push(healthTile("Koersdata", `${info.stale.length} verouderd`, "Klik bovenin op Koersen voordat je conclusies trekt", "warn"));
+      if (topWeight > .45 && list[0]) signals.push(healthTile("Concentratie", `${list[0].ticker} ${pct.format(topWeight)}`, "Stuur nieuwe inleg naar onderwogen categorieën", "warn"));
+      if (cryptoWeight > .35) signals.push(healthTile("Crypto-weging", pct.format(cryptoWeight), "Boven je bewakingsgrens van 35%", "warn"));
+      if (signals.length < 3) signals.push(healthTile("Op koers", "Geen actie nodig", "Geen harde signalen voor bijsturen vandaag", "good"));
+      target.innerHTML = signals.slice(0, 3).join("");
+      target.hidden = false;
     }
 
     function healthTile(label, value, note, tone = "info") {
@@ -999,19 +974,26 @@
       </article>`;
     }
 
-    function renderValueChartSummary(total) {
+    function signalCard(item) {
+      return `<article class="analysis-signal signal-${item.tone}"><strong>${esc(item.title)}</strong><p>${esc(item.text)}</p></article>`;
+    }
+
+    function renderValueChartSummary(total, seriesInfo = null) {
       const list = total.list.filter((item) => item.value >= 1);
       const biggest = list[0];
-      const crypto = list.filter((item) => item.type === "Crypto").reduce((sum, item) => sum + item.value, 0);
-      const history = portfolioHistory(Number(state.chartRange || 12));
-      const sourceLabel = history.source === "snapshots"
-        ? `Snapshots (${history.points.length} metingen)`
-        : "Reconstructie · indicatie op huidige koersen";
+      const sourceLabel = seriesInfo
+        ? seriesInfo.liveCount
+          ? `Koershistorie (${seriesInfo.liveCount}/${seriesInfo.totalTickers} assets live)`
+          : "Reconstructie op transactieprijzen"
+        : "Koershistorie laden...";
+      const periodChange = seriesInfo && Number.isFinite(seriesInfo.twr)
+        ? `<strong class="${seriesInfo.twr >= 0 ? "gain" : "loss"}">${seriesInfo.twr >= 0 ? "+" : ""}${pct.format(seriesInfo.twr)}</strong>`
+        : `<strong>—</strong>`;
       document.getElementById("valueChartSummary").innerHTML = [
         `<div><span>Waarde</span><strong>${currency.format(total.value)}</strong></div>`,
-        `<div><span>Rendement</span><strong class="${total.gain >= 0 ? "gain" : "loss"}">${currency.format(total.gain)} · ${pct.format(total.gainPct)}</strong></div>`,
+        `<div><span>Totaal rendement</span><strong class="${total.gain >= 0 ? "gain" : "loss"}">${currency.format(total.gain)} · ${pct.format(total.gainPct)}</strong></div>`,
+        `<div><span>Periode-rendement</span>${periodChange}</div>`,
         `<div><span>Grootste positie</span><strong>${biggest ? `${esc(biggest.ticker)} · ${pct.format(biggest.value / Math.max(total.value, 1))}` : "Geen"}</strong></div>`,
-        `<div><span>Crypto-weging</span><strong>${pct.format(crypto / Math.max(total.value, 1))}</strong></div>`,
         `<div><span>Bron grafiek</span><strong>${esc(sourceLabel)}</strong></div>`
       ].join("");
     }
@@ -1032,10 +1014,36 @@
     window.filterPositionsByType = (type) => {
       state.ui.positionSearch = type;
       state.ui.positionSpecialFilter = "all";
-      switchView("positions");
+      state.ui.portfolioSegment = "positions";
       persist();
       render();
+      switchView("portfolio");
     };
+
+    function renderPortfolio(total) {
+      applyPortfolioSegment();
+      renderPositions(total.list);
+      renderTransactions();
+      renderIncome(total);
+    }
+
+    function applyPortfolioSegment() {
+      const segment = ["positions", "transactions", "income"].includes(state.ui.portfolioSegment) ? state.ui.portfolioSegment : "positions";
+      document.querySelectorAll("#portfolioSegments [data-segment]").forEach((button) => {
+        button.classList.toggle("active", button.dataset.segment === segment);
+      });
+      const map = { positions: "portfolioPositions", transactions: "portfolioTransactions", income: "portfolioIncome" };
+      Object.entries(map).forEach(([key, id]) => {
+        const element = document.getElementById(id);
+        if (element) element.hidden = key !== segment;
+      });
+    }
+
+    function setPortfolioSegment(segment) {
+      state.ui.portfolioSegment = segment;
+      persist();
+      applyPortfolioSegment();
+    }
 
     function renderPositions(list) {
       const target = document.getElementById("positionsTable");
@@ -1239,28 +1247,12 @@
       render();
     };
 
-    window.showAllPositions = () => {
-      state.ui.positionSearch = "";
-      state.ui.hideSmallPositions = false;
-      state.ui.positionSpecialFilter = "all";
-      persist();
-      render();
-    };
-
     window.showSmallPositions = () => {
       state.ui.positionSearch = "";
       state.ui.hideSmallPositions = false;
       state.ui.positionSpecialFilter = "small";
       state.ui.positionSort = "value";
       state.ui.positionDir = "asc";
-      persist();
-      render();
-    };
-
-    window.showAverageOverrides = () => {
-      state.ui.positionSearch = "";
-      state.ui.hideSmallPositions = false;
-      state.ui.positionSpecialFilter = "overrides";
       persist();
       render();
     };
@@ -1289,37 +1281,177 @@
 
     function renderAnalysis(total) {
       const list = total.list.filter((item) => item.value >= 1);
-      const visibleValue = list.reduce((sum, item) => sum + item.value, 0);
-      const typeRows = analysisByType(list);
-      const top = list[0];
-      const topFiveWeight = list.slice(0, 5).reduce((sum, item) => sum + item.value, 0) / Math.max(visibleValue, 1);
-      const cryptoWeight = typeRows.find((item) => item.type === "Crypto")?.weight || 0;
-      const correctionCount = correctionTransactions().length;
-      const firstDate = state.transactions.reduce((min, item) => !min || item.date < min ? item.date : min, "");
-      const monthlyBuys = averageMonthlyBuys();
-      const priceInfo = priceDiagnostics(total);
+      renderAttribution(list);
+      renderAnalysisTypeTable(analysisByType(list));
+      renderAnalysisRisk(total);
+    }
 
-      document.getElementById("analysisMetrics").innerHTML = [
-        metric("Zichtbare waarde", currency.format(visibleValue), `${list.length} posities boven €1`),
-        metric("Toppositie", top ? `${top.ticker} · ${pct.format(top.value / visibleValue)}` : "Geen", top ? currency.format(top.value) : "Nog geen data"),
-        metric("Top 5 gewicht", pct.format(topFiveWeight), topFiveWeight > .75 ? "Sterk geconcentreerd" : "Redelijk gespreid"),
-        metric("Gem. maandinleg", currency.format(monthlyBuys), firstDate ? `Sinds ${dateNl(firstDate)}` : "Geen transacties")
+    function renderAttribution(list) {
+      const target = document.getElementById("attributionList");
+      if (!target) return;
+      const rows = [...list].sort((a, b) => Math.abs(b.gain) - Math.abs(a.gain)).slice(0, 10);
+      if (!rows.length) {
+        target.innerHTML = `<div class="empty">Nog geen posities.</div>`;
+        return;
+      }
+      const maxAbs = Math.max(...rows.map((item) => Math.abs(item.gain)), 1);
+      target.innerHTML = rows.map((item) => {
+        const width = Math.max(2, Math.abs(item.gain) / maxAbs * 100);
+        const positive = item.gain >= 0;
+        return `<button class="attribution-row" type="button" data-action="openPosition" data-ticker="${escAttr(item.ticker)}">
+          <strong>${esc(item.ticker)}</strong>
+          <span class="attribution-track"><span class="attribution-fill ${positive ? "is-gain" : "is-loss"}" style="width:${width.toFixed(1)}%"></span></span>
+          <span class="attribution-value ${positive ? "gain" : "loss"}">${positive ? "+" : ""}${currency.format(item.gain)}</span>
+        </button>`;
+      }).join("");
+    }
+
+    async function renderAnalysisRisk(total) {
+      const metricsTarget = document.getElementById("analysisMetrics");
+      const canvas = document.getElementById("drawdownChart");
+      const summaryTarget = document.getElementById("drawdownSummary");
+      if (!metricsTarget || !canvas) return;
+      const token = ++analysisRiskToken;
+      if (!total.list.length) {
+        metricsTarget.innerHTML = metric("Analyse", "Nog geen data", "Voeg transacties toe of importeer een backup");
+        const ctx = setupCanvas(canvas);
+        const rect = canvas.getBoundingClientRect();
+        drawEmptyCanvasMessage(ctx, rect.width, rect.height, "Geen data", "Nog geen portefeuillehistorie.");
+        if (summaryTarget) summaryTarget.innerHTML = "";
+        renderCorrelationMatrix(total);
+        return;
+      }
+      metricsTarget.innerHTML = [
+        metric("Volatiliteit", "berekenen...", "Jaarbasis, op maandrendementen"),
+        metric("Max drawdown", "berekenen...", "Grootste piek-naar-dal-daling"),
+        metric("Beste maand", "berekenen...", "Flow-gecorrigeerd"),
+        metric("Slechtste maand", "berekenen...", "Flow-gecorrigeerd")
       ].join("");
+      const series = await loadPortfolioSeries(60);
+      if (token !== analysisRiskToken || !canvas.isConnected) return;
+      const points = series?.points || [];
+      const returns = PortfolioMath.monthlyReturns(points, 500);
+      const volatility = returns.length >= 6 ? PortfolioMath.stdev(returns) * Math.sqrt(12) : null;
+      const values = points.map((point) => point.value);
+      const dd = PortfolioMath.maxDrawdown(values);
+      const best = returns.length ? Math.max(...returns) : null;
+      const worst = returns.length ? Math.min(...returns) : null;
+      metricsTarget.innerHTML = [
+        metric("Volatiliteit", volatility === null ? "Te weinig data" : pct.format(volatility), `Jaarbasis · ${returns.length} maandrendementen`),
+        metric("Max drawdown", pct.format(dd.drawdown), points[dd.peakIndex] && points[dd.troughIndex] ? `${dateNl(points[dd.peakIndex].date)} → ${dateNl(points[dd.troughIndex].date)}` : "Piek naar dal"),
+        metric("Beste maand", best === null ? "n.v.t." : `+${pct.format(best)}`, "Flow-gecorrigeerd maandrendement"),
+        metric("Slechtste maand", worst === null ? "n.v.t." : pct.format(worst), "Flow-gecorrigeerd maandrendement")
+      ].join("");
+      drawDrawdownChart(canvas, points);
+      if (summaryTarget) {
+        const current = values.length && Math.max(...values) > 0 ? values[values.length - 1] / Math.max(...values) - 1 : 0;
+        summaryTarget.innerHTML = [
+          `<div><span>Huidige drawdown</span><strong class="${current < -0.01 ? "loss" : "gain"}">${pct.format(Math.min(0, current))}</strong></div>`,
+          `<div><span>Diepste punt</span><strong>${pct.format(dd.drawdown)}</strong></div>`,
+          `<div><span>Bron</span><strong>${series?.liveCount ? `Koershistorie (${series.liveCount}/${series.totalTickers} live)` : "Transactieprijzen"}</strong></div>`
+        ].join("");
+      }
+      renderCorrelationMatrix(total);
+    }
 
-      renderAnalysisTypeTable(typeRows);
-      renderAnalysisMoversTable(list, visibleValue);
-      renderAnalysisTransactionTable();
-      renderAnalysisSignals({ list, visibleValue, top, topFiveWeight, cryptoWeight, correctionCount, typeRows, monthlyBuys, priceInfo });
-      renderAnalysisActions(total, { list, visibleValue, top, topFiveWeight, cryptoWeight, correctionCount, typeRows, monthlyBuys, priceInfo });
-      renderAnalysisPriceQuality(total);
-      renderAnalysisImpactList(list, visibleValue);
-      renderScenarioCards(total);
-      renderAssetScatter(list, visibleValue);
-      renderAnalysisDcaSimulator(total);
-      renderAnalysisDcaPlanCheck(total);
-      renderAnalysisTimeline(total);
-      renderAnalysisRebalancePlanner(total);
-      renderAnalysisMoverPerspective(total);
+    function drawDrawdownChart(canvas, points) {
+      if (points.length < 2) {
+        const ctx = setupCanvas(canvas);
+        const rect = canvas.getBoundingClientRect();
+        drawEmptyCanvasMessage(ctx, rect.width, rect.height, "Geen historie", "Te weinig datapunten voor drawdown.");
+        return;
+      }
+      let peak = 0;
+      const ddPoints = points.map((point) => {
+        peak = Math.max(peak, point.value);
+        return { t: point.t ?? new Date(`${point.date}T00:00:00`).getTime(), v: peak > 0 ? point.value / peak - 1 : 0 };
+      });
+      drawTimeChart(canvas, {
+        series: [{ points: ddPoints, color: "#b23b44", width: 2, fill: "rgba(178,59,68,.16)", fillToZero: true }],
+        formatValue: (value) => pct.format(value),
+        tooltip: (index) => `<strong>${dateNlFromMs(ddPoints[index].t)}</strong>${pct.format(ddPoints[index].v)} vanaf piek`,
+        emptyTitle: "Geen historie"
+      });
+    }
+
+    async function renderCorrelationMatrix(total) {
+      const target = document.getElementById("correlationMatrix");
+      if (!target) return;
+      const list = total.list.filter((item) => item.value >= 1).slice(0, 8);
+      if (list.length < 2) {
+        target.innerHTML = `<div class="empty">Minimaal twee posities nodig voor correlatie.</div>`;
+        return;
+      }
+      const token = ++correlationToken;
+      target.innerHTML = `<div class="empty">Koershistorie laden voor ${list.length} posities...</div>`;
+      const range = ASSET_CHART_RANGES.find((item) => item.key === "1y");
+      const histories = new Map();
+      await runBatched(list, 3, async (item) => {
+        try {
+          const history = await fetchAssetHistory(item, range);
+          if (history.points.length >= 30) histories.set(item.ticker, history.points);
+        } catch {
+          // Ticker zonder historie doet niet mee aan de matrix.
+        }
+      });
+      if (token !== correlationToken || !target.isConnected) return;
+      const withData = list.filter((item) => histories.has(item.ticker));
+      if (withData.length < 2) {
+        target.innerHTML = `<div class="empty">Onvoldoende koershistorie beschikbaar (live bronnen niet bereikbaar).</div>`;
+        return;
+      }
+      const returnsByTicker = new Map(withData.map((item) => [item.ticker, dailyReturnMap(histories.get(item.ticker))]));
+      const cells = withData.map((rowItem) => withData.map((colItem) => {
+        if (rowItem.ticker === colItem.ticker) return 1;
+        return pairCorrelation(returnsByTicker.get(rowItem.ticker), returnsByTicker.get(colItem.ticker));
+      }));
+      target.innerHTML = `<table class="correlation-table">
+        <thead><tr><th></th>${withData.map((item) => `<th>${esc(item.ticker)}</th>`).join("")}</tr></thead>
+        <tbody>${withData.map((rowItem, rowIndex) => `<tr>
+          <th>${esc(rowItem.ticker)}</th>
+          ${cells[rowIndex].map((value) => correlationCell(value)).join("")}
+        </tr>`).join("")}</tbody>
+      </table>
+      <p class="correlation-note">1,00 = beweegt identiek · 0 = onafhankelijk · negatief = tegengesteld. Posities zonder live historie ontbreken.</p>`;
+    }
+
+    function correlationCell(value) {
+      if (value === null || !Number.isFinite(value)) return `<td class="corr-na">–</td>`;
+      const clamped = Math.max(-1, Math.min(1, value));
+      const alpha = Math.abs(clamped) * .85;
+      const background = clamped >= 0 ? `rgba(19,124,155,${alpha.toFixed(2)})` : `rgba(217,87,123,${alpha.toFixed(2)})`;
+      const ink = Math.abs(clamped) > .55 ? "#ffffff" : "#172235";
+      return `<td style="background:${background};color:${ink}">${clamped.toFixed(2).replace(".", ",")}</td>`;
+    }
+
+    function dailyReturnMap(points) {
+      const byDay = new Map();
+      points.forEach((point) => byDay.set(new Date(point.t).toISOString().slice(0, 10), point.p));
+      const days = [...byDay.keys()].sort();
+      const returns = new Map();
+      for (let i = 1; i < days.length; i += 1) {
+        const prev = byDay.get(days[i - 1]);
+        const cur = byDay.get(days[i]);
+        if (prev > 0) returns.set(days[i], cur / prev - 1);
+      }
+      return returns;
+    }
+
+    function pairCorrelation(mapA, mapB) {
+      const keys = [...mapA.keys()].filter((key) => mapB.has(key));
+      if (keys.length < 20) return null;
+      return PortfolioMath.correlation(keys.map((key) => mapA.get(key)), keys.map((key) => mapB.get(key)));
+    }
+
+    async function runBatched(items, concurrency, worker) {
+      const queue = [...items];
+      const runners = Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
+        while (queue.length) {
+          const item = queue.shift();
+          await worker(item);
+        }
+      });
+      await Promise.all(runners);
     }
 
     function analysisByType(list) {
@@ -1366,324 +1498,6 @@
       </div>`;
     }
 
-    function renderAnalysisMoversTable(list, totalValue) {
-      const winners = [...list].sort((a, b) => b.gain - a.gain).slice(0, 3);
-      const losers = [...list].sort((a, b) => a.gain - b.gain).slice(0, 3);
-      const rows = [...winners, ...losers.filter((item) => !winners.some((winner) => winner.ticker === item.ticker))];
-      const target = document.getElementById("analysisMoversTable");
-      if (!rows.length) {
-        target.innerHTML = `<div class="empty">Nog geen winnaars of verliezers.</div>`;
-        return;
-      }
-      target.innerHTML = `<div class="mover-grid">${rows.map((item) => moverCard(item, totalValue)).join("")}</div>`;
-    }
-
-    function moverCard(item, totalValue) {
-      const positive = item.gain >= 0;
-      const color = typeColor(item.type);
-      return `<button class="mover-card" type="button" data-action="openPosition" data-ticker="${escAttr(item.ticker)}">
-        <div class="badge" style="--badge-ink:${color};--badge-bg:color-mix(in srgb, ${color} 16%, white)">${esc(String(item.ticker || "?").slice(0, 2))}</div>
-        <div class="mover-main">
-          <strong>${esc(item.ticker)}</strong>
-          <span>${esc(item.name)}</span>
-        </div>
-        <div class="mover-meta">
-          <strong class="${positive ? "gain" : "loss"}">${positive ? "+" : ""}${currency.format(item.gain)}</strong>
-          <span>${pct.format(item.value / Math.max(totalValue, 1))} · ${pct.format(item.gainPct)}</span>
-        </div>
-      </button>`;
-    }
-
-    function renderAnalysisTransactionTable() {
-      const corrections = correctionTransactions().length;
-      const buys = state.transactions.filter((item) => item.side === "buy").length;
-      const sells = state.transactions.filter((item) => item.side === "sell").length;
-      const buyValue = state.transactions
-        .filter((item) => item.side === "buy")
-        .reduce((sum, item) => sum + Math.abs(item.quantity * item.price), 0);
-      const sellValue = state.transactions
-        .filter((item) => item.side === "sell")
-        .reduce((sum, item) => sum + Math.abs(item.quantity * item.price), 0);
-      const latestBuy = [...state.transactions]
-        .filter((item) => item.side === "buy")
-        .sort((a, b) => new Date(b.date) - new Date(a.date))[0];
-      const avgTicket = buys ? buyValue / buys : 0;
-      const realizedTotal = PortfolioMath.realizedGains(state).reduce((sum, row) => sum + row.gain, 0);
-      const rows = [
-        { tone: "info", label: "Koop/verkoop", value: `${number.format(buys)} / ${number.format(sells)}`, tag: "regels", note: `${currency.format(buyValue)} gekocht · ${currency.format(sellValue)} verkocht` },
-        { tone: realizedTotal >= 0 ? "good" : "bad", label: "Gerealiseerd", value: currency.format(realizedTotal), tag: "verkopen", note: "Resultaat op alle verkopen (gem. kostprijs)" },
-        { tone: avgTicket > 0 ? "info" : "warn", label: "Gem. aankoop", value: currency.format(avgTicket), tag: "ticket", note: "Gemiddelde koopregel" },
-        { tone: latestBuy ? "good" : "warn", label: "Laatste aankoop", value: latestBuy ? dateNl(latestBuy.date) : "Geen", tag: latestBuy?.ticker || "n.v.t.", note: latestBuy ? `${latestBuy.ticker} · ${currency.format(Math.abs(latestBuy.quantity * latestBuy.price))}` : "Nog geen koopregels" },
-        { tone: corrections ? "warn" : "good", label: "Correcties", value: number.format(corrections), tag: corrections ? "check" : "schoon", note: corrections ? "Controleer in Audit" : "Geen correctieregels" }
-      ];
-      document.getElementById("analysisTransactionTable").innerHTML = `<div class="stat-grid">${rows.map(analysisStatTile).join("")}</div>`;
-    }
-
-    function renderAnalysisActions(total, context) {
-      const diagnostics = portfolioDiagnostics(total);
-      const plan = planDiagnostics(total);
-      const topWeight = context.top ? context.top.value / Math.max(context.visibleValue, 1) : 0;
-      const rows = [];
-      if (!total.list.length) {
-        document.getElementById("analysisActionList").innerHTML = analysisStatTile({
-          tone: "info",
-          label: "Startpunt",
-          value: "Geen portefeuilledata",
-          tag: "import",
-          note: "Importeer een JSON-backup of voeg handmatig je eerste transactie toe."
-        });
-        return;
-      }
-      if (context.priceInfo?.stale?.length) {
-        rows.push({ tone: "warn", label: "Koersen", value: `${number.format(context.priceInfo.stale.length)} oud`, tag: "nu", note: "Klik bovenin op Koersen voordat je conclusies trekt." });
-      }
-      if (topWeight > .45) {
-        rows.push({ tone: "warn", label: "Nieuwe inleg", value: `Niet naar ${context.top.ticker}`, tag: "spreiden", note: `Toppositie weegt ${pct.format(topWeight)}. Stuur nieuwe inleg naar onderwogen categorieën.` });
-      }
-      if (context.cryptoWeight > .35) {
-        rows.push({ tone: "warn", label: "Crypto-grens", value: pct.format(context.cryptoWeight), tag: "bewaken", note: "Laat crypto groeien via rendement, niet via extra bijstorten." });
-      }
-      if (plan.remaining > 10) {
-        rows.push({ tone: "info", label: "Maandplan", value: currency.format(plan.remaining), tag: "open", note: "Gepland bedrag is deze maand nog niet volledig terug te zien." });
-      }
-      if (diagnostics.planInfo.remaining <= 10 && !context.priceInfo?.stale?.length && topWeight <= .45 && context.cryptoWeight <= .35) {
-        rows.push({ tone: "good", label: "Geen actie", value: "Op schema", tag: "rustig", note: "Geen harde signalen voor bijsturen vandaag." });
-      }
-      document.getElementById("analysisActionList").innerHTML = rows.slice(0, 3).map(analysisStatTile).join("");
-    }
-
-    function renderAnalysisPriceQuality(total) {
-      const list = total.list.filter((item) => item.value >= 1);
-      if (!list.length) {
-        document.getElementById("analysisPriceQuality").innerHTML = analysisStatTile({
-          tone: "info",
-          label: "Koersdata",
-          value: "Geen posities",
-          tag: "n.v.t.",
-          note: "Koerskwaliteit wordt zichtbaar zodra er posities zijn."
-        });
-        return;
-      }
-      const info = priceDiagnostics(total);
-      const live = list.filter((item) => /coingecko|yahoo/i.test(state.priceMeta?.[item.ticker]?.source || "")).length;
-      const manual = list.filter((item) => /handmatig|csv|import|screenshot|demo/i.test(state.priceMeta?.[item.ticker]?.source || "")).length;
-      const missing = list.filter((item) => !state.priceMeta?.[item.ticker]).length;
-      const oldest = list
-        .map((item) => ({ item, time: new Date(state.priceMeta?.[item.ticker]?.updatedAt || 0).getTime() }))
-        .filter((row) => Number.isFinite(row.time) && row.time > 0)
-        .sort((a, b) => a.time - b.time)[0];
-      const rows = [
-        { tone: live ? "good" : "info", label: "Live", value: number.format(live), tag: "bron", note: "CoinGecko/Yahoo" },
-        { tone: manual ? "info" : "good", label: "Handmatig/import", value: number.format(manual), tag: "controle", note: "Niet live gevalideerd" },
-        { tone: info.stale.length ? "warn" : "good", label: "Oud", value: number.format(info.stale.length), tag: ">7d", note: info.stale.length && oldest ? `${oldest.item.ticker} · ${dateNl(new Date(oldest.time).toISOString().slice(0, 10))}` : "Alles recent" },
-        { tone: missing ? "bad" : "good", label: "Ontbrekend", value: number.format(missing), tag: missing ? "actie" : "ok", note: missing ? "Geen koersmeta" : "Metadata compleet" }
-      ];
-      document.getElementById("analysisPriceQuality").innerHTML = rows.map(analysisStatTile).join("");
-    }
-
-    function renderAnalysisImpactList(list, visibleValue) {
-      const rows = list.slice(0, 5).map((item) => {
-        const shock = item.type === "Crypto" ? -.2 : -.1;
-        const portfolioHit = item.value / Math.max(visibleValue, 1) * shock;
-        return { item, shock, portfolioHit };
-      });
-      const maxHit = Math.max(...rows.map((row) => Math.abs(row.portfolioHit)), .01);
-      document.getElementById("analysisImpactList").innerHTML = rows.length ? rows.map((row) => {
-        const width = Math.max(3, Math.min(100, Math.abs(row.portfolioHit) / maxHit * 100));
-        return `<article class="impact-row">
-          <strong>${esc(row.item.ticker)}</strong>
-          <div class="impact-track"><span class="impact-fill" style="--bar-width:${width.toFixed(1)}%"></span></div>
-          <span>${pct.format(row.shock)} = ${pct.format(row.portfolioHit)}</span>
-        </article>`;
-      }).join("") : `<div class="empty">Nog geen topposities voor impactanalyse.</div>`;
-    }
-
-    function renderAnalysisSignals(context) {
-      const signals = [];
-      if (context.top) {
-        const topWeight = context.top.value / Math.max(context.visibleValue, 1);
-        signals.push({
-          tone: topWeight > .45 ? "warn" : "good",
-          title: "Concentratie",
-          value: `${context.top.ticker} · ${pct.format(topWeight)}`,
-          status: topWeight > .45 ? "Let op" : "Gezond",
-          note: topWeight > .45 ? "Grootste positie domineert" : "Binnen bandbreedte"
-        });
-      }
-      signals.push({
-        tone: context.cryptoWeight > .35 ? "warn" : "info",
-        title: "Crypto-weging",
-        value: pct.format(context.cryptoWeight),
-        status: context.cryptoWeight > .35 ? "Let op" : "Monitor",
-        note: "Aandeel in zichtbare waarde"
-      });
-      signals.push({
-        tone: context.monthlyBuys > 0 ? "info" : "warn",
-        title: "Inlegtempo",
-        value: currency.format(context.monthlyBuys),
-        status: context.monthlyBuys > 0 ? "Maand" : "Geen data",
-        note: context.monthlyBuys > 0 ? "Gemiddelde aankoopflow" : "Geen koopgemiddelde"
-      });
-      if (context.priceInfo?.stale?.length) {
-        signals.push({
-          tone: "warn",
-          title: "Koersen",
-          value: `${number.format(context.priceInfo.stale.length)} oud`,
-          status: "Bijwerken",
-          note: "Gebruik Koersen bovenin"
-        });
-      }
-      if (context.correctionCount) {
-        signals.push({
-          tone: "warn",
-          title: "Correcties",
-          value: number.format(context.correctionCount),
-          status: "Check",
-          note: "Controleer in Audit"
-        });
-      }
-      document.getElementById("analysisSignals").innerHTML = signals.map(analysisChip).join("");
-    }
-
-    function renderScenarioCards(total) {
-      const monthly = Math.max(total.dcaMonthly, averageMonthlyBuys(), 0);
-      if (!total.list.length && monthly <= 0) {
-        document.getElementById("scenarioCards").innerHTML = `<div class="empty">Nog geen scenario beschikbaar. Voeg eerst posities of een DCA-plan toe.</div>`;
-        return;
-      }
-      const oneYear = total.value + monthly * 12;
-      const threeYear = total.value + monthly * 36;
-      const fiveYear = total.value + monthly * 60;
-      const maxValue = Math.max(oneYear, threeYear, fiveYear, total.value, 1);
-      const rows = [
-        { tone: "info", title: "1 jaar", value: oneYear, delta: oneYear - total.value, note: "alleen inleg" },
-        { tone: "info", title: "3 jaar", value: threeYear, delta: threeYear - total.value, note: "zelfde tempo" },
-        { tone: "info", title: "5 jaar", value: fiveYear, delta: fiveYear - total.value, note: "zonder rendement" }
-      ];
-      const note = monthly > 0
-        ? `<p class="scenario-note">Dit is bewust geen voorspelling: rendement test je met de sliders bij DCA impact.</p>`
-        : `<div class="empty">Nog geen maandelijkse inleg gevonden.</div>`;
-      document.getElementById("scenarioCards").innerHTML = `<div class="scenario-grid">${rows.map((row) => scenarioVisualCard(row, maxValue)).join("")}</div>${note}`;
-    }
-
-    function renderAssetScatter(list, visibleValue) {
-      if (!list.length) {
-        document.getElementById("analysisScatter").innerHTML = `<div class="empty">Nog geen scatterdata.</div>`;
-        return;
-      }
-      const rows = list.slice(0, 18);
-      const maxWeight = Math.max(...rows.map((item) => item.value / Math.max(visibleValue, 1)), .01);
-      const gains = rows.map((item) => item.gainPct);
-      const minGain = Math.min(...gains, -.25);
-      const maxGain = Math.max(...gains, .25);
-      const maxValue = Math.max(...rows.map((item) => item.value), 1);
-      document.getElementById("analysisScatter").innerHTML = [
-        `<span class="scatter-axis y">rendement</span><span class="scatter-axis x">weging</span>
-        <span class="scatter-zone top-left">klein + sterk</span><span class="scatter-zone top-right">groot + sterk</span>
-        <span class="scatter-zone bottom-left">ruis</span><span class="scatter-zone bottom-right">risicohoek</span>`,
-        ...rows.map((item, index) => {
-          const weight = item.value / Math.max(visibleValue, 1);
-          const x = Math.max(6, Math.min(94, weight / maxWeight * 88 + 6));
-          const y = Math.max(8, Math.min(92, (item.gainPct - minGain) / Math.max(maxGain - minGain, .01) * 84 + 8));
-          const size = 16 + item.value / maxValue * 22;
-          const color = item.gain >= 0 ? "var(--good)" : "var(--bad)";
-          const labeled = index < 5 || weight > .06;
-          return `<button class="scatter-point ${labeled ? "is-labeled" : "is-dot"}" type="button" aria-label="${escAttr(`${item.ticker}: ${pct.format(weight)} · ${pct.format(item.gainPct)}`)}" title="${escAttr(`${item.ticker}: ${pct.format(weight)} · ${pct.format(item.gainPct)}`)}" data-action="openPosition" data-ticker="${escAttr(item.ticker)}" style="--x:${x.toFixed(1)}%;--y:${y.toFixed(1)}%;--size:${size.toFixed(0)}px;--point-color:${color}">${labeled ? esc(item.ticker) : ""}</button>`;
-        })
-      ].join("");
-    }
-
-    function renderAnalysisDcaSimulator(total) {
-      const monthly = Number(state.ui.analysisSimMonthly || Math.max(planDiagnostics(total).planned, averageMonthlyBuys(), total.dcaMonthly, 500));
-      const annualPct = Number(state.ui.analysisSimReturn || 6);
-      const annual = annualPct / 100;
-      const one = projectValue(total.value, monthly, annual, 1);
-      const three = projectValue(total.value, monthly, annual, 3);
-      const five = projectValue(total.value, monthly, annual, 5);
-      const max = Math.max(one, three, five, 1);
-      document.getElementById("analysisDcaSimulator").innerHTML = `<div class="analysis-sim-controls">
-        <label>Maandinleg <strong>${currency.format(monthly)}</strong><input type="range" min="0" max="2500" step="50" value="${monthly}" data-analysis-sim="analysisSimMonthly"></label>
-        <label>Rendement <strong>${number.format(annualPct)}%</strong><input type="range" min="-20" max="20" step="0.5" value="${annualPct}" data-analysis-sim="analysisSimReturn"></label>
-      </div>
-      <div class="sim-result-grid">
-        ${analysisSimResult("1 jaar", one, total.value, max)}
-        ${analysisSimResult("3 jaar", three, total.value, max)}
-        ${analysisSimResult("5 jaar", five, total.value, max)}
-      </div>`;
-    }
-
-    function renderAnalysisDcaPlanCheck(total) {
-      const plan = planDiagnostics(total);
-      const coverageRaw = plan.planned ? Math.max(0, plan.actual / plan.planned) : 0;
-      const coverage = Math.min(1, coverageRaw);
-      const rows = [
-        { tone: plan.planned ? "info" : "warn", label: "Gepland", value: currency.format(plan.planned), tag: monthLabel(plan.key), note: `${number.format(plan.matches.length)} actieve plannen` },
-        { tone: plan.actual >= plan.planned && plan.planned ? "good" : plan.actual > 0 ? "info" : "warn", label: "Werkelijk", value: currency.format(plan.actual), tag: coverageRaw > 1 ? "boven plan" : pct.format(coverage), note: coverageRaw > 1 ? `${number.format(coverageRaw)}x van plan` : "Teruggevonden in transacties" },
-        { tone: plan.remaining > 10 ? "warn" : "good", label: "Nog open", value: currency.format(Math.max(0, plan.remaining)), tag: plan.remaining > 10 ? "actie" : "ok", note: plan.remaining > 10 ? "Import/controle nodig" : "Maandplan gedekt" }
-      ];
-      document.getElementById("analysisDcaPlanCheck").innerHTML = rows.map(analysisStatTile).join("");
-    }
-
-    function renderAnalysisTimeline(total) {
-      const months = recentMonthKeys(8);
-      const buysByMonth = new Map();
-      const countsByMonth = new Map();
-      state.transactions.filter((item) => item.side === "buy").forEach((item) => {
-        const key = monthKey(item.date);
-        buysByMonth.set(key, (buysByMonth.get(key) || 0) + Math.abs(item.quantity * item.price));
-        countsByMonth.set(key, (countsByMonth.get(key) || 0) + 1);
-      });
-      const maxBuy = Math.max(...months.map((key) => buysByMonth.get(key) || 0), 1);
-      document.getElementById("analysisTimeline").innerHTML = months.map((key) => {
-        const buy = buysByMonth.get(key) || 0;
-        const count = countsByMonth.get(key) || 0;
-        return `<div class="timeline-row">
-          <strong>${esc(shortMonthLabel(key))}</strong>
-          <div class="timeline-line">
-            <div class="timeline-track"><span class="timeline-fill" style="--bar-width:${(buy / maxBuy * 100).toFixed(1)}%;--bar-color:var(--accent);--bar-color-2:var(--accent-3)"></span></div>
-            <span class="timeline-count">${count ? `${number.format(count)} koopregel${count === 1 ? "" : "s"}` : "geen aankopen"}</span>
-          </div>
-          <span class="muted">${currency.format(buy)}</span>
-        </div>`;
-      }).join("");
-    }
-
-    function renderAnalysisRebalancePlanner(total) {
-      const rows = allocationRows(total);
-      const monthly = Math.max(planDiagnostics(total).planned, averageMonthlyBuys(), total.dcaMonthly, 500);
-      const plan = rebalanceAllocations(rows, monthly);
-      document.getElementById("analysisRebalancePlanner").innerHTML = `<div class="rebalance-summary">
-        ${plan.slice(0, 3).map((item) => analysisStatTile({ tone: item.amount > 0 ? "info" : "good", label: item.type, value: currency.format(item.amount), tag: pct.format(item.share), note: item.diffPct < 0 ? "onder doel" : "op koers" })).join("")}
-      </div>
-      ${plan.map((item) => `<article class="rebalance-row">
-        <div class="rebalance-head"><strong>${esc(item.type)}</strong><span>${currency.format(item.amount)}</span></div>
-        <div class="rebalance-track"><span class="rebalance-fill" style="--bar-width:${Math.max(2, item.share * 100).toFixed(1)}%;--bar-color:${typeColor(item.type)};--bar-color-2:${typeColor(item.type)}"></span></div>
-      </article>`).join("")}`;
-    }
-
-    function renderAnalysisMoverPerspective(total) {
-      const mode = state.ui.analysisMoverMode || "gain";
-      document.querySelectorAll("#analysisMoverTabs [data-mover-mode]").forEach((button) => {
-        button.classList.toggle("active", button.dataset.moverMode === mode);
-      });
-      const rows = moverPerspectiveRows(total, mode).slice(0, 6);
-      document.getElementById("analysisMoverPerspective").innerHTML = rows.length ? rows.map((row) => `<button class="mover-card" type="button" data-action="openPosition" data-ticker="${escAttr(row.item.ticker)}">
-        <div class="badge" style="--badge-ink:${typeColor(row.item.type)};--badge-bg:color-mix(in srgb, ${typeColor(row.item.type)} 16%, white)">${esc(row.item.ticker.slice(0, 2))}</div>
-        <div class="mover-main"><strong>${esc(row.item.ticker)}</strong><span>${esc(row.label)}</span></div>
-        <div class="mover-meta"><strong class="${row.tone === "bad" ? "loss" : "gain"}">${esc(row.value)}</strong><span>${esc(row.meta)}</span></div>
-      </button>`).join("") : `<div class="empty">Nog geen movers.</div>`;
-    }
-
-    function analysisSimResult(label, value, startValue, maxValue) {
-      const width = Math.max(2, Math.min(100, value / Math.max(maxValue, 1) * 100));
-      const delta = value - startValue;
-      return `<article class="analysis-stat-tile signal-${delta >= 0 ? "good" : "bad"}">
-        <div class="stat-tile-top"><span class="stat-label">${esc(label)}</span><span class="analysis-tag">${delta >= 0 ? "+" : ""}${currency.format(delta)}</span></div>
-        <strong class="stat-main">${currency.format(value)}</strong>
-        <span class="sim-track"><span class="sim-fill" style="--bar-width:${width.toFixed(1)}%"></span></span>
-      </article>`;
-    }
-
     function rebalanceAllocations(rows, amount) {
       const under = rows.filter((item) => item.diffPct < -1);
       const totalGap = under.reduce((sum, item) => sum + Math.abs(item.diffPct), 0);
@@ -1695,257 +1509,6 @@
         const share = totalGap ? gap / totalGap : 0;
         return { ...item, amount: amount * share, share };
       }).sort((a, b) => b.amount - a.amount);
-    }
-
-    function recentMonthKeys(count) {
-      const end = new Date(`${todayISO()}T00:00:00`);
-      return Array.from({ length: count }, (_, index) => {
-        const date = new Date(end);
-        date.setMonth(end.getMonth() - (count - 1 - index));
-        return date.toISOString().slice(0, 7);
-      });
-    }
-
-    function shortMonthLabel(key) {
-      return new Intl.DateTimeFormat("nl-NL", { month: "short" }).format(new Date(`${key}-01T00:00:00`));
-    }
-
-    function moverPerspectiveRows(total, mode) {
-      const value = Math.max(total.value, 1);
-      const volume = new Map();
-      state.transactions.forEach((item) => {
-        volume.set(item.ticker, (volume.get(item.ticker) || 0) + Math.abs(item.quantity * item.price));
-      });
-      return total.list.filter((item) => item.value >= 1).map((item) => {
-        if (mode === "pct") return { item, score: item.gainPct, value: `${item.gainPct >= 0 ? "+" : ""}${pct.format(item.gainPct)}`, label: "Rendement", meta: currency.format(item.gain), tone: item.gain >= 0 ? "good" : "bad" };
-        if (mode === "weight") return { item, score: item.value / value, value: pct.format(item.value / value), label: "Portefeuilleweging", meta: currency.format(item.value), tone: "good" };
-        if (mode === "volume") return { item, score: volume.get(item.ticker) || 0, value: currency.format(volume.get(item.ticker) || 0), label: "Transactievolume", meta: `${item.transactions} tx`, tone: "good" };
-        return { item, score: item.gain, value: `${item.gain >= 0 ? "+" : ""}${currency.format(item.gain)}`, label: "Winst/verlies", meta: pct.format(item.gainPct), tone: item.gain >= 0 ? "good" : "bad" };
-      }).sort((a, b) => Math.abs(b.score) - Math.abs(a.score));
-    }
-
-    function setAnalysisSim(key, value) {
-      state.ui[key] = Number(value);
-      persist();
-      render();
-    }
-
-    window.setAnalysisSim = setAnalysisSim;
-
-    function analysisChip(item) {
-      return `<article class="analysis-chip signal-${item.tone || "info"}">
-        <div class="chip-top">
-          <span class="chip-title">${esc(item.title)}</span>
-          <span class="chip-status">${esc(item.status || toneLabel(item.tone))}</span>
-        </div>
-        <strong class="chip-value">${esc(item.value || "")}</strong>
-        <div class="chip-bottom">
-          <span class="chip-note">${esc(item.note || "")}</span>
-        </div>
-      </article>`;
-    }
-
-    function analysisStatTile(item) {
-      return `<article class="analysis-stat-tile signal-${item.tone || "info"}">
-        <div class="stat-tile-top">
-          <span class="stat-label">${esc(item.label)}</span>
-          <span class="analysis-tag">${esc(item.tag || toneLabel(item.tone))}</span>
-        </div>
-        <strong class="stat-main">${esc(item.value)}</strong>
-        <span class="stat-note">${esc(item.note || "")}</span>
-      </article>`;
-    }
-
-    function scenarioVisualCard(row, maxValue) {
-      const width = Math.max(4, Math.min(100, row.value / Math.max(maxValue, 1) * 100));
-      return `<article class="scenario-card signal-${row.tone || "info"}">
-        <div class="scenario-head">
-          <strong>${esc(row.title)}</strong>
-          <span class="analysis-tag">${esc(row.note)}</span>
-        </div>
-        <div class="scenario-value">
-          <strong>${currency.format(row.value)}</strong>
-          <span>${row.delta >= 0 ? "+" : ""}${currency.format(row.delta)}</span>
-        </div>
-        <div class="mini-track"><span class="mini-fill" style="--bar-width:${width.toFixed(1)}%"></span></div>
-      </article>`;
-    }
-
-    function toneLabel(tone) {
-      if (tone === "good") return "Gezond";
-      if (tone === "warn") return "Let op";
-      if (tone === "bad") return "Risico";
-      return "Info";
-    }
-
-    function renderPlans(total) {
-      const diagnostics = portfolioDiagnostics(total);
-      const planInfo = diagnostics.planInfo;
-      const remaining = planInfo.remaining;
-      document.getElementById("planMetrics").innerHTML = [
-        metric("Deze maand gepland", currency.format(planInfo.planned), planInfo.label),
-        metric("Werkelijk gekocht", currency.format(planInfo.actual), `${planInfo.matches.reduce((sum, item) => sum + item.transactions.length, 0)} matchende transacties`),
-        metric("Nog te verwerken", currency.format(remaining), remaining > 0 ? "Importeer aankopen of controleer broker" : "Maand ligt op schema"),
-        metric("Risicoscore", `${diagnostics.riskScore}/100`, diagnostics.riskScore > 65 ? "Hoog aandachtspunt" : diagnostics.riskScore > 40 ? "Middelmatig" : "Rustig")
-      ].join("");
-      renderMonthlyPlanCards(planInfo);
-      renderRiskScoreCards(diagnostics);
-      renderShortTermPlan(diagnostics);
-      renderLongTermPlan(total, diagnostics);
-      renderScenarioSimulator(total);
-      renderRebalancePlan(diagnostics);
-      syncSimulatorInputs(total);
-    }
-
-    function renderMonthlyPlanCards(planInfo) {
-      document.getElementById("monthlyPlanCards").innerHTML = planInfo.matches.map((item) => {
-        const tone = item.status === "bevestigd" || item.status === "geimporteerd" ? "good" : item.status === "afwijking" ? "warn" : "bad";
-        const progress = item.plan.amount ? Math.min(100, Math.max(0, item.actual / item.plan.amount * 100)) : 0;
-        const progressLabel = item.plan.amount ? `${number.format(Math.round(progress))}% van plan` : "Geen bedrag ingesteld";
-        return `<article class="monthly-plan-card ${tone}">
-          <div class="plan-head">
-            <div><h3>${esc(item.plan.name)}</h3><p>${esc(item.plan.broker)} · ${item.plan.tickers.map(esc).join(", ")}</p></div>
-            <span class="status-pill ${tone}">${esc(item.status)}</span>
-          </div>
-          <div class="plan-mini-grid">
-            <div class="plan-mini"><span>Gepland</span><strong>${currency.format(item.plan.amount)}</strong></div>
-            <div class="plan-mini"><span>Werkelijk</span><strong>${currency.format(item.actual)}</strong></div>
-            <div class="plan-mini"><span>Verschil</span><strong>${currency.format(item.diff)}</strong></div>
-          </div>
-          <div class="plan-progress" aria-label="${escAttr(progressLabel)}">
-            <div class="plan-progress-label"><span>${esc(monthLabel(planInfo.key))}</span><span>${esc(progressLabel)} · ${number.format(item.transactions.length)} transacties</span></div>
-            <div class="progress-track"><span class="progress-fill ${tone}" style="width:${progress.toFixed(1)}%"></span></div>
-          </div>
-        </article>`;
-      }).join("");
-    }
-
-    function renderRiskScoreCards(diagnostics) {
-      const topWeight = diagnostics.top ? diagnostics.top.value / Math.max(diagnostics.visibleValue, 1) : 0;
-      const rows = [
-        { tone: diagnostics.riskScore > 65 ? "bad" : diagnostics.riskScore > 40 ? "warn" : "good", title: `Score ${diagnostics.riskScore}/100`, text: "Regelgebaseerde score op concentratie, crypto-weging, top 5 en koersleeftijd." },
-        { tone: topWeight > .45 ? "warn" : "good", title: "Toppositie", text: diagnostics.top ? `${diagnostics.top.ticker} weegt ${pct.format(topWeight)}.` : "Geen toppositie." },
-        { tone: diagnostics.cryptoWeight > .35 ? "warn" : "info", title: "Crypto", text: `Crypto weegt ${pct.format(diagnostics.cryptoWeight)}.` },
-        { tone: diagnostics.priceInfo.stale.length ? "warn" : "good", title: "Koersen", text: `${diagnostics.priceInfo.stale.length} posities hebben een koers ouder dan 7 dagen.` }
-      ];
-      document.getElementById("riskScoreCards").innerHTML = riskGauge(diagnostics) + rows.map(signalCard).join("");
-    }
-
-    function riskGauge(diagnostics) {
-      const score = Math.max(0, Math.min(100, diagnostics.riskScore));
-      const color = score > 65 ? "var(--bad)" : score > 40 ? "var(--warn)" : "var(--good)";
-      const label = score > 65 ? "Hoog aandachtspunt" : score > 40 ? "Middelmatig" : "Rustig";
-      return `<div class="risk-gauge">
-        <div class="gauge-ring" style="background: conic-gradient(${color} ${(score * 3.6).toFixed(1)}deg, #e8edf3 0deg)">
-          <span><strong>${score}</strong><small>/100</small></span>
-        </div>
-        <div class="risk-gauge-copy">
-          <strong>${esc(label)}</strong>
-          <p>Score op concentratie, crypto-weging, top 5, koersleeftijd en datakwaliteit.</p>
-        </div>
-      </div>`;
-    }
-
-    function renderShortTermPlan(diagnostics) {
-      const rows = [
-        diagnostics.planInfo.remaining > 0
-          ? { tone: "warn", title: "Aankoopronde afronden", text: `Er staat nog ${currency.format(diagnostics.planInfo.remaining)} open volgens je maandplan.` }
-          : { tone: "good", title: "Aankoopronde op schema", text: "De geïmporteerde aankopen dekken het maandplan." },
-        diagnostics.priceInfo.stale.length
-          ? { tone: "warn", title: "Koersen verversen", text: `${diagnostics.priceInfo.stale.length} koersen zijn ouder dan 7 dagen. Werk crypto live bij en aandelen/ETF via CSV/import.` }
-          : { tone: "good", title: "Koersen recent", text: "Geen opvallend oude koersdata." },
-        { tone: "info", title: "Nieuwe inlegadvies", text: rebalanceSuggestionText(diagnostics) }
-      ];
-      document.getElementById("shortTermPlan").innerHTML = rows.map(signalCard).join("");
-    }
-
-    function renderLongTermPlan(total, diagnostics) {
-      const monthly = Math.max(diagnostics.planInfo.planned, total.dcaMonthly, averageMonthlyBuys(), 0);
-      const conservative = projectValue(total.value, monthly, .03, 5);
-      const base = projectValue(total.value, monthly, .06, 5);
-      const optimistic = projectValue(total.value, monthly, .10, 5);
-      const rows = [
-        { tone: "info", title: "1 jaar", text: `Bij ${currency.format(monthly)} per maand en 6%/jaar: ${currency.format(projectValue(total.value, monthly, .06, 1))}.` },
-        { tone: "info", title: "5 jaar scenario's", text: `Conservatief ${currency.format(conservative)} · basis ${currency.format(base)} · optimistisch ${currency.format(optimistic)}.` },
-        { tone: diagnostics.topFiveWeight > .75 ? "warn" : "good", title: "Spreiding", text: `Top 5 weegt ${pct.format(diagnostics.topFiveWeight)}. Gebruik nieuwe inleg om concentratie te sturen.` }
-      ];
-      document.getElementById("longTermPlan").innerHTML = rows.map(signalCard).join("");
-    }
-
-    function renderScenarioSimulator(total) {
-      const monthly = Number(state.ui.simMonthly || Math.max(planDiagnostics(total).planned, averageMonthlyBuys(), 0));
-      const annual = Number(state.ui.simReturn || 6) / 100;
-      const goal = Number(state.ui.simGoal || 50000);
-      const one = projectValue(total.value, monthly, annual, 1);
-      const five = projectValue(total.value, monthly, annual, 5);
-      const monthsToGoal = monthsUntilGoal(total.value, monthly, annual, goal);
-      const rows = [
-        { tone: "info", title: "Projectie 1 jaar", text: `${currency.format(one)} bij ${currency.format(monthly)} per maand en ${pct.format(annual)} per jaar.` },
-        { tone: "info", title: "Projectie 5 jaar", text: `${currency.format(five)} met dezelfde aannames.` },
-        { tone: monthsToGoal ? "good" : "warn", title: "Doelwaarde", text: monthsToGoal ? `${currency.format(goal)} bereikt in circa ${monthsToGoal} maanden.` : "Doelwaarde niet bereikt binnen 30 jaar met deze aannames." }
-      ];
-      document.getElementById("scenarioSimulator").innerHTML = rows.map(signalCard).join("");
-    }
-
-    function renderRebalancePlan(diagnostics) {
-      const rows = [
-        { tone: "info", title: "Nieuwe inleg", text: rebalanceSuggestionText(diagnostics) },
-        { tone: diagnostics.cryptoWeight > .35 ? "warn" : "good", title: "Crypto-bandbreedte", text: diagnostics.cryptoWeight > .35 ? "Stuur nieuwe DEGIRO-inleg naar ETF/aandelen tot crypto onder 35% komt." : "Crypto zit rond of onder de waarschuwingsgrens." },
-        { tone: diagnostics.top?.ticker === "VWCE" && diagnostics.top.value / Math.max(diagnostics.visibleValue, 1) > .5 ? "warn" : "info", title: "Toppositie", text: diagnostics.top ? `${diagnostics.top.ticker} is de grootste positie; nieuwe inleg kan onderwogen posities versterken.` : "Nog geen positie." }
-      ];
-      document.getElementById("rebalancePlan").innerHTML = rows.map(signalCard).join("");
-    }
-
-    function signalCard(item) {
-      return `<article class="analysis-signal signal-${item.tone}"><strong>${esc(item.title)}</strong><p>${esc(item.text)}</p></article>`;
-    }
-
-    function rebalanceSuggestionText(diagnostics) {
-      if (diagnostics.cryptoWeight > .35) return `Laat BTC-DCA op €500 staan, maar stuur de DEGIRO-pot tijdelijk vooral naar ETF/IONQ/GOOGL om crypto-weging te dempen.`;
-      if (diagnostics.top && diagnostics.top.value / Math.max(diagnostics.visibleValue, 1) > .45) return `Gebruik nieuwe inleg voor assets buiten ${diagnostics.top.ticker} om concentratie te verlagen zonder verkoop.`;
-      return "Houd de huidige maandplannen aan en gebruik afwijkingen alleen om onderwogen categorieën bij te sturen.";
-    }
-
-    function projectValue(startValue, monthly, annualReturn, years) {
-      let value = startValue;
-      const monthlyReturn = Math.pow(1 + annualReturn, 1 / 12) - 1;
-      for (let month = 0; month < years * 12; month += 1) {
-        value = value * (1 + monthlyReturn) + monthly;
-      }
-      return value;
-    }
-
-    function monthsUntilGoal(startValue, monthly, annualReturn, goal) {
-      let value = startValue;
-      const monthlyReturn = Math.pow(1 + annualReturn, 1 / 12) - 1;
-      for (let month = 1; month <= 360; month += 1) {
-        value = value * (1 + monthlyReturn) + monthly;
-        if (value >= goal) return month;
-      }
-      return null;
-    }
-
-    function syncSimulatorInputs(total) {
-      const defaults = {
-        simMonthly: Math.max(planDiagnostics(total).planned, averageMonthlyBuys(), 0),
-        simReturn: 6,
-        simGoal: 50000
-      };
-      Object.entries(defaults).forEach(([id, value]) => {
-        const element = document.getElementById(id);
-        if (element && !state.ui[id] && element.value !== String(value)) element.value = value;
-      });
-    }
-
-    function transactionTypeStats() {
-      const map = new Map();
-      state.transactions.forEach((item) => {
-        const row = map.get(item.type) || { type: item.type, count: 0, notional: 0 };
-        row.count += 1;
-        row.notional += item.quantity * item.price;
-        map.set(item.type, row);
-      });
-      return [...map.values()].sort((a, b) => b.count - a.count);
     }
 
     function sourceStats() {
@@ -1969,78 +1532,6 @@
       const months = Math.max(1, (end.getFullYear() - start.getFullYear()) * 12 + end.getMonth() - start.getMonth() + 1);
       const totalBuyValue = buys.reduce((sum, item) => sum + item.quantity * item.price, 0);
       return totalBuyValue / months;
-    }
-
-    function monthsSinceFirstTransaction() {
-      if (!state.transactions.length) return 1;
-      const first = state.transactions.reduce((min, item) => item.date < min ? item.date : min, state.transactions[0].date);
-      const start = new Date(`${first}T00:00:00`);
-      const end = new Date(`${todayISO()}T00:00:00`);
-      return Math.max(1, (end.getFullYear() - start.getFullYear()) * 12 + end.getMonth() - start.getMonth() + 1);
-    }
-
-    function monthKey(date = todayISO()) {
-      return String(date).slice(0, 7);
-    }
-
-    function monthLabel(key = monthKey()) {
-      return new Intl.DateTimeFormat("nl-NL", { month: "long", year: "numeric" }).format(new Date(`${key}-01T00:00:00`));
-    }
-
-    function planDiagnostics(total = totals(), key = monthKey()) {
-      const plans = normalizePurchasePlans(state.purchasePlans).filter((plan) => plan.active);
-      const matches = plans.map((plan) => {
-        const transactions = matchingPlanTransactions(plan, key);
-        const actual = transactions.reduce((sum, item) => sum + Math.abs(item.quantity * item.price), 0);
-        const diff = actual - plan.amount;
-        const processed = state.processedMonths?.includes(`${key}:${plan.id}`);
-        const status = processed ? "bevestigd" : actual <= 0 ? "gepland" : Math.abs(diff) <= Math.max(25, plan.amount * .08) ? "geimporteerd" : "afwijking";
-        return { plan, transactions, actual, diff, processed, status };
-      });
-      const planned = matches.reduce((sum, item) => sum + item.plan.amount, 0);
-      const actual = matches.reduce((sum, item) => sum + item.actual, 0);
-      return {
-        key,
-        label: monthLabel(key),
-        matches,
-        planned,
-        actual,
-        remaining: Math.max(planned - actual, 0),
-        processedCount: matches.filter((item) => item.processed).length
-      };
-    }
-
-    function matchingPlanTransactions(plan, key) {
-      const tickers = new Set(plan.tickers.map((ticker) => ticker.toUpperCase()));
-      return state.transactions.filter((item) => {
-        if (item.auto || item.side !== "buy" || !item.date.startsWith(key)) return false;
-        if (!tickers.has(item.ticker)) return false;
-        const source = (item.source || "").toLowerCase();
-        const broker = String(plan.broker || "").toLowerCase();
-        if (broker.includes("bitvavo")) return source.includes("bitvavo") || item.type === "Crypto";
-        if (broker.includes("degiro")) return source.includes("degiro") || item.type !== "Crypto";
-        return true;
-      });
-    }
-
-    function portfolioDiagnostics(total = totals()) {
-      const list = total.list.filter((item) => item.value >= 1);
-      const visibleValue = list.reduce((sum, item) => sum + item.value, 0);
-      const typeRows = analysisByType(list);
-      const top = list[0];
-      const topThreeWeight = list.slice(0, 3).reduce((sum, item) => sum + item.value, 0) / Math.max(visibleValue, 1);
-      const topFiveWeight = list.slice(0, 5).reduce((sum, item) => sum + item.value, 0) / Math.max(visibleValue, 1);
-      const cryptoWeight = typeRows.find((item) => item.type === "Crypto")?.weight || 0;
-      const priceInfo = priceDiagnostics(total);
-      const planInfo = planDiagnostics(total);
-      const riskPoints = [
-        top ? Math.min(35, (top.value / Math.max(visibleValue, 1)) * 55) : 0,
-        Math.min(25, cryptoWeight * 45),
-        Math.min(20, topFiveWeight * 20),
-        Math.min(20, priceInfo.stale.length * 2)
-      ];
-      const riskScore = Math.round(riskPoints.reduce((sum, item) => sum + item, 0));
-      return { list, visibleValue, typeRows, top, topThreeWeight, topFiveWeight, cryptoWeight, priceInfo, planInfo, riskScore };
     }
 
     function renderAudit(total) {
@@ -2138,158 +1629,10 @@
         : `<div class="empty">Geen importnotities beschikbaar.</div>`;
     }
 
-    function renderWatchlist(total) {
-      const rows = state.watchlist || [];
-      document.getElementById("watchlistTable").innerHTML = rows.length ? `<table>
-        <thead><tr><th>Ticker</th><th>Prijs</th><th>Koopdoel</th><th>Afstand</th><th>Notitie</th><th></th></tr></thead>
-        <tbody>${rows.map((item) => {
-          const price = currentAssetPrice(item.ticker, item.currentPrice);
-          const distance = item.targetPrice ? (price - item.targetPrice) / item.targetPrice : 0;
-          const tone = price <= item.targetPrice ? "good" : price <= item.targetPrice * 1.05 ? "warn" : "info";
-          return `<tr>
-            <td>${assetCell(item)}</td>
-            <td>${currency.format(price)}</td>
-            <td>${currency.format(item.targetPrice)}</td>
-            <td><span class="status-pill ${tone}">${price <= item.targetPrice ? "koopzone" : pct.format(distance)}</span></td>
-            <td>${esc(item.note || "")}</td>
-            <td><button class="icon-btn" title="Verwijder" data-action="removeWatchlistItem" data-id="${escAttr(item.id)}">×</button></td>
-          </tr>`;
-        }).join("")}</tbody>
-      </table>` : `<div class="empty">Nog geen watchlist-items.</div>`;
-
-      const signals = rows
-        .map((item) => ({ ...item, livePrice: currentAssetPrice(item.ticker, item.currentPrice) }))
-        .sort((a, b) => (a.livePrice - a.targetPrice) / Math.max(a.targetPrice, 1) - (b.livePrice - b.targetPrice) / Math.max(b.targetPrice, 1))
-        .slice(0, 4);
-      document.getElementById("watchlistSignals").innerHTML = signals.length
-        ? signals.map((item) => signalCard({
-          tone: item.livePrice <= item.targetPrice ? "good" : item.livePrice <= item.targetPrice * 1.05 ? "warn" : "info",
-          title: item.ticker,
-          text: `${currency.format(item.livePrice)} versus koopdoel ${currency.format(item.targetPrice)}. ${item.note || "Geen notitie."}`
-        })).join("")
-        : `<div class="empty">Voeg kandidaten toe om koopzones te zien.</div>`;
-      renderWatchlistSuggestions(total);
-    }
-
-    function renderWatchlistSuggestions(total) {
-      const target = document.getElementById("watchlistSuggestions");
-      if (!target) return;
-      const existing = new Set((state.watchlist || []).map((item) => item.ticker));
-      const suggestions = watchlistSuggestions(total).filter((item) => !existing.has(item.ticker)).slice(0, 4);
-      target.innerHTML = suggestions.length
-        ? suggestions.map((item) => `<article class="recommendation-card">
-          <strong>${esc(item.title)}</strong>
-          <p>${esc(item.text)}</p>
-          <button class="ghost-btn" type="button" data-action="prefillWatchlist" data-payload="${escAttr(JSON.stringify({ ticker: item.ticker, name: item.name, type: item.type, currentPrice: Number(item.currentPrice) || 0, targetPrice: Number(item.targetPrice) || 0, note: item.note || "" }))}">Gebruik suggestie</button>
-        </article>`).join("")
-        : `<div class="empty">Geen nieuwe suggesties uit je huidige posities.</div>`;
-    }
-
-    function watchlistSuggestions(total) {
-      const list = total.list.filter((item) => item.value >= 1 && item.currentPrice > 0);
-      if (!list.length) return [];
-      const suggestions = [];
-      const add = (item, title, text, targetFactor, note) => {
-        if (!item || suggestions.some((entry) => entry.ticker === item.ticker)) return;
-        suggestions.push({
-          title,
-          text,
-          ticker: item.ticker,
-          name: item.name,
-          type: item.type,
-          currentPrice: item.currentPrice,
-          targetPrice: Number((item.currentPrice * targetFactor).toFixed(4)),
-          note
-        });
-      };
-      const value = Math.max(total.value, 1);
-      const broadEtf = list.find((item) => item.ticker === "VWCE" || item.ticker === "VWRL" || item.type === "ETF");
-      const best = [...list].sort((a, b) => b.gainPct - a.gainPct)[0];
-      const laggard = [...list].sort((a, b) => a.gainPct - b.gainPct)[0];
-      const smallestCore = [...list].filter((item) => item.value / value < .08).sort((a, b) => b.currentPrice - a.currentPrice)[0];
-      add(
-        broadEtf,
-        "Kernpositie volgen",
-        `${broadEtf?.ticker || "ETF"} is een brede basispositie. Zet een koopdoel onder de actuele koers om nieuwe inleg gedisciplineerd te plannen.`,
-        .95,
-        "Portfolio-suggestie: kernpositie volgen bij pullback."
-      );
-      add(
-        best,
-        "Sterke positie op pullback",
-        `${best?.ticker || "Deze positie"} heeft het beste rendement in je portefeuille. Volgen bij een terugval voorkomt haastige aankopen.`,
-        .92,
-        "Portfolio-suggestie: sterke positie alleen bijkopen bij terugval."
-      );
-      add(
-        laggard,
-        "Achterblijver evalueren",
-        `${laggard?.ticker || "Deze positie"} blijft achter. Zet een lager koopdoel en gebruik de notitie om je thesis opnieuw te checken.`,
-        .9,
-        "Portfolio-suggestie: achterblijver volgen, thesis controleren."
-      );
-      add(
-        smallestCore,
-        "Kleine positie monitoren",
-        `${smallestCore?.ticker || "Deze positie"} is nog klein binnen je portefeuille. Een watchlist-doel maakt opschalen bewuster.`,
-        .94,
-        "Portfolio-suggestie: kleine positie bewust opschalen."
-      );
-      return suggestions;
-    }
-
-    function renderAllocation(total) {
-      const rows = allocationRows(total);
-      document.getElementById("allocationMetrics").innerHTML = [
-        metric("Doelsom", `${number.format(rows.reduce((sum, item) => sum + item.targetPct, 0))}%`, "Streef naar 100%"),
-        metric("Grootste afwijking", rows[0] ? `${rows[0].type} ${pct.format(rows[0].diffPct / 100)}` : "Geen", "Absoluut verschil"),
-        metric("Rebalance nodig", rows.some((item) => Math.abs(item.diffPct) >= 5) ? "Ja" : "Nee", "Grens: 5 procentpunt"),
-        metric("Nieuwe inleg", allocationSuggestion(rows), "Zonder verkoop")
-      ].join("");
-      document.getElementById("allocationTable").innerHTML = `<table>
-        <thead><tr><th>Categorie</th><th>Huidig</th><th>Doel</th><th>Afwijking</th><th>Actie</th></tr></thead>
-        <tbody>${rows.map((item) => `<tr>
-          <td>${typeBadge(item.type)}</td>
-          <td>${allocationPercentCell(currency.format(item.value), item.currentPct, typeColor(item.type))}</td>
-          <td>${allocationPercentCell(pct.format(item.targetPct / 100), item.targetPct, "var(--accent-5)")}</td>
-          <td>${diffBadge(item.diffPct)}</td>
-          <td>${item.diffPct < -2 ? "Bijkopen met nieuwe inleg" : item.diffPct > 5 ? "Geen nieuwe inleg nodig" : "Op koers"}</td>
-        </tr>`).join("")}</tbody>
-      </table>`;
-      document.getElementById("allocationSignals").innerHTML = `<div class="allocation-card-grid">${rows.map(allocationCard).join("")}</div>`;
-    }
-
-    function allocationCard(item) {
-      const tone = Math.abs(item.diffPct) >= 5 ? "warn" : "good";
-      const color = typeColor(item.type);
-      const bg = tone === "warn" ? "var(--warn-soft)" : "var(--good-soft)";
-      return `<article class="allocation-card" style="--card-color:${color};--card-bg:${bg}">
-        <div class="allocation-card-head">
-          <strong>${esc(item.type)}</strong>
-          ${diffBadge(item.diffPct)}
-        </div>
-        <div class="allocation-bars">
-          ${allocationBar("Huidig", item.currentPct, color)}
-          ${allocationBar("Doel", item.targetPct, "var(--accent-5)")}
-        </div>
-        <p class="muted">${item.diffPct < -2 ? "Onderwogen: stuur nieuwe inleg hierheen." : item.diffPct > 5 ? "Overwogen: pauzeer nieuwe inleg." : "Op koers binnen de bandbreedte."}</p>
-      </article>`;
-    }
-
-    function allocationBar(label, value, color) {
-      return `<div>
-        <div class="allocation-bar-label"><span>${esc(label)}</span><span>${pct.format(value / 100)}</span></div>
-        <span class="mini-track"><span class="mini-fill" style="width:${Math.max(2, Math.min(100, value)).toFixed(1)}%;--mini-color:${color};--mini-color-2:${color}"></span></span>
-      </div>`;
-    }
-
-    function allocationPercentCell(label, value, color) {
-      return visualValueCell(label, pct.format(value / 100), Math.max(2, Math.min(100, value)), color);
-    }
-
     function diffBadge(diffPct) {
       const tone = Math.abs(diffPct) < 2 ? "good" : Math.abs(diffPct) < 5 ? "warn" : "bad";
-      return `<span class="status-pill ${tone}">${diffPct >= 0 ? "+" : ""}${number.format(diffPct)} pp</span>`;
+      const formatted = new Intl.NumberFormat("nl-NL", { maximumFractionDigits: 1 }).format(diffPct);
+      return `<span class="status-pill ${tone}">${diffPct >= 0 ? "+" : ""}${formatted} pp</span>`;
     }
 
     function incomeNetCell(item) {
@@ -2347,62 +1690,6 @@
         { tone: "info", title: "Inkomsten", text: `Netto dividend/staking/rente: ${currency.format(netIncome)}.` },
         { tone: "warn", title: "Controle", text: "Gebruik dit als werkoverzicht; fiscale regels en peildata blijven handmatig te controleren." }
       ].map(signalCard).join("");
-    }
-
-    function renderStrategy(total) {
-      renderStrategyTable(total);
-      renderSalePlans(total);
-      renderAlerts(total);
-      renderSnapshots();
-    }
-
-    function renderStrategyTable(total) {
-      const rows = total.list.map((item) => ({ ...item, meta: (state.tags || {})[item.ticker] || {} }));
-      document.getElementById("strategyTable").innerHTML = rows.length ? `<table>
-        <thead><tr><th>Positie</th><th>Tags</th><th>Thesis</th><th>Risico</th></tr></thead>
-        <tbody>${rows.map((item) => `<tr>
-          <td>${assetCell(item)}</td><td>${esc(item.meta.tags || "")}</td><td>${esc(item.meta.thesis || "")}</td><td>${esc(item.meta.risk || "")}</td>
-        </tr>`).join("")}</tbody>
-      </table>` : `<div class="empty">Nog geen posities.</div>`;
-    }
-
-    function renderSalePlans(total) {
-      const rows = Object.entries(state.salePlans || {}).map(([ticker, plan]) => ({ ticker, ...plan, price: currentAssetPrice(ticker, 0) }));
-      document.getElementById("salePlanTable").innerHTML = rows.length ? `<table>
-        <thead><tr><th>Ticker</th><th>Prijs</th><th>Doel</th><th>Stop</th><th>Plan</th><th></th></tr></thead>
-        <tbody>${rows.map((item) => `<tr>
-          <td>${esc(item.ticker)}</td><td>${currency.format(item.price)}</td>
-          <td>${item.targetPrice ? targetDistanceCell(item.price, item.targetPrice, "above") : "-"}</td><td>${item.stopPrice ? targetDistanceCell(item.price, item.stopPrice, "below") : "-"}</td>
-          <td>${esc(item.note || "")}</td><td><button class="icon-btn" data-action="removeSalePlan" data-ticker="${escAttr(item.ticker)}">×</button></td>
-        </tr>`).join("")}</tbody>
-      </table>` : `<div class="empty">Nog geen verkoopplannen.</div>`;
-    }
-
-    function renderAlerts(total) {
-      const rows = state.alerts || [];
-      const evaluated = rows.map((item) => ({ ...item, priceNow: currentAssetPrice(item.ticker, 0) }));
-      document.getElementById("alertSignals").innerHTML = evaluated.length ? evaluated.map((item) => {
-        const hit = item.direction === "below" ? item.priceNow <= item.price : item.priceNow >= item.price;
-        return signalCard({ tone: hit ? "warn" : "info", title: `${item.ticker} ${hit ? "geraakt" : "open"}`, text: `${currency.format(item.priceNow)} nu, grens ${item.direction === "below" ? "onder" : "boven"} ${currency.format(item.price)}. ${item.note || ""}` });
-      }).join("") : `<div class="empty">Nog geen koersalerts.</div>`;
-      document.getElementById("alertTable").innerHTML = rows.length ? `<table>
-        <thead><tr><th>Ticker</th><th>Richting</th><th>Grens</th><th>Notitie</th><th></th></tr></thead>
-        <tbody>${evaluated.map((item) => {
-          const hit = item.direction === "below" ? item.priceNow <= item.price : item.priceNow >= item.price;
-          return `<tr><td><strong>${esc(item.ticker)}</strong></td><td><span class="status-pill ${hit ? "warn" : "info"}">${item.direction === "below" ? "Onder" : "Boven"}</span></td><td>${targetDistanceCell(item.priceNow, item.price, item.direction === "below" ? "below" : "above")}</td><td>${esc(item.note || "")}</td><td><button class="icon-btn" data-action="removeAlert" data-id="${escAttr(item.id)}">×</button></td></tr>`;
-        }).join("")}</tbody>
-      </table>` : `<div class="empty">Nog geen alerts.</div>`;
-    }
-
-    function renderSnapshots() {
-      const rows = [...(state.snapshots || [])].sort((a, b) => b.date.localeCompare(a.date));
-      document.getElementById("snapshotTable").innerHTML = rows.length ? `<table>
-        <thead><tr><th>Datum</th><th>Waarde</th><th>Kostprijs</th><th>Rendement</th><th></th></tr></thead>
-        <tbody>${rows.map((item) => `<tr>
-          <td>${dateTimeNl(item.date)}</td><td>${currency.format(item.value)}</td><td>${currency.format(item.cost)}</td><td>${currency.format(item.gain)}</td>
-          <td><button class="icon-btn" data-action="removeSnapshot" data-id="${escAttr(item.id)}">×</button></td>
-        </tr>`).join("")}</tbody>
-      </table>` : `<div class="empty">Nog geen snapshots.</div>`;
     }
 
     function allocationRows(total) {
@@ -2500,114 +1787,245 @@
       }).join("");
     }
 
-    function renderDcaSuggestions(total) {
-      const target = document.getElementById("dcaSuggestions");
-      if (!target) return;
-      const visible = total.list.filter((item) => item.value >= 1);
-      const typeRows = analysisByType(visible);
-      const suggested = dcaSuggestions(total, typeRows);
-      target.innerHTML = suggested.map((item) => `<article class="recommendation-card">
-        <strong>${esc(item.title)}</strong>
-        <p>${esc(item.text)}</p>
-        <button class="ghost-btn" type="button" data-action="prefillDca" data-payload="${escAttr(JSON.stringify({ ticker: item.ticker, name: item.name, type: item.type, quantity: Number(item.quantity) || 0, price: Number(item.price) || 0 }))}">Gebruik suggestie</button>
-      </article>`).join("");
-    }
-
-    function dcaSuggestions(total, typeRows) {
-      const value = Math.max(total.value, 1);
-      const weights = Object.fromEntries(typeRows.map((row) => [row.type, row.weight]));
-      const suggestions = [];
-      const broadEtf = total.list.find((item) => item.ticker === "VWCE" || item.ticker === "VWRL" || item.type === "ETF");
-      const top = total.list[0];
-      const monthlyBase = Math.max(100, Math.round((averageMonthlyBuys() || total.value * .01) / 25) * 25);
-      if ((weights.ETF || 0) < .6 && broadEtf) {
-        suggestions.push({
-          title: "ETF als basis versterken",
-          text: `ETF weegt nu ${pct.format(weights.ETF || 0)}. Een maandelijkse DCA richting ${broadEtf.ticker} kan de kern rustiger maken.`,
-          ticker: broadEtf.ticker,
-          name: broadEtf.name,
-          type: broadEtf.type,
-          quantity: suggestedQuantity(monthlyBase, broadEtf.currentPrice),
-          price: broadEtf.currentPrice
-        });
-      }
-      if ((weights.Crypto || 0) > .35 && broadEtf) {
-        suggestions.push({
-          title: "Nieuwe inleg weg van crypto",
-          text: `Crypto weegt ${pct.format(weights.Crypto)}. Nieuwe DCA naar ${broadEtf.ticker} verlaagt die weging zonder verkoop.`,
-          ticker: broadEtf.ticker,
-          name: broadEtf.name,
-          type: broadEtf.type,
-          quantity: suggestedQuantity(monthlyBase, broadEtf.currentPrice),
-          price: broadEtf.currentPrice
-        });
-      }
-      if (top && top.value / value > .45 && broadEtf && top.ticker !== broadEtf.ticker) {
-        suggestions.push({
-          title: "Toppositie verdunnen",
-          text: `${top.ticker} is ${pct.format(top.value / value)}. DCA naar een bredere positie maakt de portefeuille minder afhankelijk van één asset.`,
-          ticker: broadEtf.ticker,
-          name: broadEtf.name,
-          type: broadEtf.type,
-          quantity: suggestedQuantity(monthlyBase, broadEtf.currentPrice),
-          price: broadEtf.currentPrice
-        });
-      }
-      if (!suggestions.length && broadEtf) {
-        suggestions.push({
-          title: "Consistente kern-DCA",
-          text: `Geen grote disbalans gevonden. Een vaste DCA naar ${broadEtf.ticker} houdt de discipline erin.`,
-          ticker: broadEtf.ticker,
-          name: broadEtf.name,
-          type: broadEtf.type,
-          quantity: suggestedQuantity(monthlyBase, broadEtf.currentPrice),
-          price: broadEtf.currentPrice
-        });
-      }
-      return suggestions.slice(0, 3);
-    }
-
-    function suggestedQuantity(amount, price) {
-      return price > 0 ? Number((amount / price).toFixed(6)) : 0;
-    }
-
-    window.prefillDca = (ticker, name, type, quantity, price) => {
-      switchView("dca");
-      const form = document.getElementById("dcaForm");
-      form.name.value = `${ticker} maandelijks`;
-      form.type.value = type;
-      setDcaDraftAssets([{ ticker, name, type, quantity }]);
-      form.frequency.value = "monthly";
-      form.startDate.value = todayISO();
-      form.active.value = "true";
-      form.name.focus();
-    };
-
     window.removeDcaAssetDraft = (ticker) => {
       setDcaDraftAssets(dcaDraftAssets().filter((asset) => asset.ticker !== ticker));
     };
 
-    function renderInsights(total) {
-      const biggest = total.list[0];
-      const best = [...total.list].sort((a, b) => b.gainPct - a.gainPct)[0];
-      const dcaRunway = total.dcaMonthly ? total.value / total.dcaMonthly : 0;
-      const visible = total.list.filter((item) => item.value >= 1);
-      const typeRows = analysisByType(visible);
-      const crypto = typeRows.find((item) => item.type === "Crypto");
-      document.getElementById("insights").innerHTML = [
-        insight("Grootste positie", biggest ? `${biggest.ticker} is ${pct.format(biggest.value / total.value)} van je portefeuille.` : "Voeg je eerste transactie toe."),
-        insight("Beste rendement", best ? `${best.ticker} staat op ${pct.format(best.gainPct)} sinds aankoop.` : "Nog geen rendement beschikbaar."),
-        insight("DCA-tempo", total.dcaMonthly ? `Je automatische inleg is circa ${currency.format(total.dcaMonthly)} per maand. Dat is ${pct.format(1 / Math.max(dcaRunway, 1))} van je huidige waarde.` : "Er is nog geen actief DCA-plan."),
-        insight("Categorieën", typeRows.length ? typeRows.map((row) => `${row.type} ${pct.format(row.weight)}`).join(" · ") : "Nog geen categorieën."),
-        insight("Crypto-risico", crypto ? `Crypto weegt ${pct.format(crypto.weight)} en staat op ${currency.format(crypto.gain)} rendement.` : "Geen crypto boven €1 zichtbaar."),
-        insight("Datakwaliteit", `${correctionTransactions().length} correctieregels · ${sourceStats().length} bronnen.`)
+    // ---- Plan-view: doelplanner (Monte Carlo), allocatie, watchlist, alerts ----
+
+    function renderPlan(total) {
+      renderDcaCards();
+      renderPlanAllocation(total);
+      renderWatchlistTable(total);
+      renderAlertsTable();
+      renderPlanSignals(total);
+      syncMcInputs(total);
+      renderPlanProjection(total);
+    }
+
+    function renderPlanAllocation(total) {
+      const target = document.getElementById("planAllocation");
+      if (!target) return;
+      if (!total.list.length) {
+        target.innerHTML = `<div class="empty">Nog geen posities om te wegen.</div>`;
+        return;
+      }
+      const rows = allocationRows(total);
+      const monthly = mcSettings(total).monthly;
+      const plan = rebalanceAllocations(rows, monthly);
+      target.innerHTML = rows.map((item) => {
+        const planned = plan.find((entry) => entry.type === item.type);
+        const color = typeColor(item.type);
+        return `<article class="allocation-row">
+          <div class="allocation-row-head">
+            <strong>${esc(item.type)}</strong>
+            ${diffBadge(item.diffPct)}
+          </div>
+          <span class="mini-track"><span class="mini-fill" style="width:${Math.max(2, Math.min(100, item.currentPct)).toFixed(1)}%;--mini-color:${color};--mini-color-2:${color}"></span></span>
+          <span class="allocation-row-meta">${pct.format(item.currentPct / 100)} nu · doel ${pct.format(item.targetPct / 100)}${planned && planned.amount > 0 ? ` · volgende inleg: ${currency.format(planned.amount)}` : ""}</span>
+        </article>`;
+      }).join("");
+    }
+
+    function renderWatchlistTable(total) {
+      const target = document.getElementById("watchlistTable");
+      if (!target) return;
+      const rows = state.watchlist || [];
+      target.innerHTML = rows.length ? `<table>
+        <thead><tr><th>Ticker</th><th>Prijs</th><th>Koopdoel</th><th>Afstand</th><th>Notitie</th><th></th></tr></thead>
+        <tbody>${rows.map((item) => {
+          const price = currentAssetPrice(item.ticker, item.currentPrice);
+          const distance = item.targetPrice ? (price - item.targetPrice) / item.targetPrice : 0;
+          const tone = price <= item.targetPrice ? "good" : price <= item.targetPrice * 1.05 ? "warn" : "info";
+          return `<tr>
+            <td>${assetCell(item)}</td>
+            <td>${currency.format(price)}</td>
+            <td>${currency.format(item.targetPrice)}</td>
+            <td><span class="status-pill ${tone}">${price <= item.targetPrice ? "koopzone" : pct.format(distance)}</span></td>
+            <td>${esc(item.note || "")}</td>
+            <td><button class="icon-btn" title="Verwijder" data-action="removeWatchlistItem" data-id="${escAttr(item.id)}">×</button></td>
+          </tr>`;
+        }).join("")}</tbody>
+      </table>` : `<div class="empty">Nog geen watchlist-items.</div>`;
+    }
+
+    function renderAlertsTable() {
+      const target = document.getElementById("alertTable");
+      if (!target) return;
+      const rows = (state.alerts || []).map((item) => ({ ...item, priceNow: currentAssetPrice(item.ticker, 0) }));
+      target.innerHTML = rows.length ? `<table>
+        <thead><tr><th>Ticker</th><th>Richting</th><th>Grens</th><th>Notitie</th><th></th></tr></thead>
+        <tbody>${rows.map((item) => {
+          const hit = item.direction === "below" ? item.priceNow <= item.price : item.priceNow >= item.price;
+          return `<tr>
+            <td><strong>${esc(item.ticker)}</strong></td>
+            <td><span class="status-pill ${hit ? "warn" : "info"}">${item.direction === "below" ? "Onder" : "Boven"}</span></td>
+            <td>${targetDistanceCell(item.priceNow, item.price, item.direction === "below" ? "below" : "above")}</td>
+            <td>${esc(item.note || "")}</td>
+            <td><button class="icon-btn" data-action="removeAlert" data-id="${escAttr(item.id)}">×</button></td>
+          </tr>`;
+        }).join("")}</tbody>
+      </table>` : `<div class="empty">Nog geen alerts.</div>`;
+    }
+
+    // Eén signalenlijst: geraakte alerts, koopzones en verkoopdoelen/stops.
+    function renderPlanSignals(total) {
+      const target = document.getElementById("planSignals");
+      if (!target) return;
+      const signals = [];
+      alertHits(total).forEach((item) => {
+        signals.push(signalCard({
+          tone: "warn",
+          title: `Alert ${item.ticker} geraakt`,
+          text: `${currency.format(item.priceNow)} is ${item.direction === "below" ? "onder" : "boven"} je grens van ${currency.format(item.price)}. ${item.note || ""}`
+        }));
+      });
+      (state.watchlist || []).forEach((item) => {
+        const price = currentAssetPrice(item.ticker, item.currentPrice);
+        if (item.targetPrice && price > 0 && price <= item.targetPrice) {
+          signals.push(signalCard({
+            tone: "good",
+            title: `${item.ticker} in koopzone`,
+            text: `${currency.format(price)} is op of onder je koopdoel van ${currency.format(item.targetPrice)}. ${item.note || ""}`
+          }));
+        }
+      });
+      Object.entries(state.salePlans || {}).forEach(([ticker, plan]) => {
+        const price = currentAssetPrice(ticker, 0);
+        if (!price) return;
+        if (plan.targetPrice && price >= plan.targetPrice) {
+          signals.push(signalCard({ tone: "good", title: `${ticker} boven verkoopdoel`, text: `${currency.format(price)} ≥ doel ${currency.format(plan.targetPrice)}. ${plan.note || ""}` }));
+        }
+        if (plan.stopPrice && price <= plan.stopPrice) {
+          signals.push(signalCard({ tone: "bad", title: `${ticker} onder stop-loss`, text: `${currency.format(price)} ≤ stop ${currency.format(plan.stopPrice)}. ${plan.note || ""}` }));
+        }
+      });
+      target.innerHTML = signals.length ? signals.join("") : `<div class="empty">Geen geraakte alerts, koopzones of verkoopgrenzen.</div>`;
+    }
+
+    function mcDefaults(total) {
+      const monthly = Math.max(Math.round(Math.max(total.dcaMonthly, averageMonthlyBuys()) / 25) * 25, 100);
+      const goal = Math.max(Math.round(total.value * 2 / 5000) * 5000, 25000);
+      return { mcMonthly: monthly, mcGoal: goal, mcYears: 10 };
+    }
+
+    function mcSettings(total) {
+      const defaults = mcDefaults(total);
+      return {
+        monthly: Math.max(0, Number(state.ui.mcMonthly) || defaults.mcMonthly),
+        goal: Math.max(0, Number(state.ui.mcGoal) || defaults.mcGoal),
+        years: Math.min(30, Math.max(1, Math.round(Number(state.ui.mcYears) || defaults.mcYears)))
+      };
+    }
+
+    function syncMcInputs(total) {
+      const settings = mcSettings(total);
+      [["mcMonthly", settings.monthly], ["mcGoal", settings.goal], ["mcYears", settings.years]].forEach(([id, value]) => {
+        const element = document.getElementById(id);
+        if (element && document.activeElement !== element && element.value !== String(value)) element.value = value;
+      });
+    }
+
+    // Historische rendementen per categorie als terugval wanneer de eigen
+    // historie te kort is voor bootstrapping (jaarlijkse mu/sigma).
+    function categoryAssumption(total) {
+      const ASSUMPTIONS = {
+        ETF: { mu: .06, sigma: .15 },
+        Aandeel: { mu: .08, sigma: .25 },
+        Crypto: { mu: .15, sigma: .70 },
+        Gemengd: { mu: .04, sigma: .10 }
+      };
+      const list = total.list.filter((item) => item.value >= 1);
+      const value = list.reduce((sum, item) => sum + item.value, 0);
+      if (!value) return { mu: .06, sigma: .15 };
+      let mu = 0;
+      let sigma = 0;
+      list.forEach((item) => {
+        const assumption = ASSUMPTIONS[item.type] || ASSUMPTIONS.Gemengd;
+        mu += (item.value / value) * assumption.mu;
+        sigma += (item.value / value) * assumption.sigma;
+      });
+      return { mu, sigma };
+    }
+
+    // Deterministische RNG zodat dezelfde invoer dezelfde waaier oplevert.
+    function seededRandom(seed) {
+      let s = seed >>> 0;
+      return () => {
+        s = (s + 0x6D2B79F5) >>> 0;
+        let t = s;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+
+    async function renderPlanProjection(total = totals()) {
+      const canvas = document.getElementById("mcChart");
+      const summary = document.getElementById("mcSummary");
+      if (!canvas || !summary) return;
+      const settings = mcSettings(total);
+      const token = ++mcToken;
+      const series = await loadPortfolioSeries(60);
+      if (token !== mcToken || !canvas.isConnected || activeView() !== "plan") return;
+      // Bootstrap op de laatste 36 maanden: de vroege jaren (bijna volledig
+      // small-cap crypto) zeggen niets over de huidige mix. Uitschieters worden
+      // gedempt op ±25% per maand zodat één mania-maand de waaier niet opblaast.
+      const samples = (series ? PortfolioMath.monthlyReturns(series.points, 500) : [])
+        .slice(-36)
+        .map((value) => Math.max(-0.25, Math.min(0.25, value)));
+      const assumption = categoryAssumption(total);
+      const months = settings.years * 12;
+      const projection = PortfolioMath.monteCarloProjection({
+        startValue: total.value,
+        monthly: settings.monthly,
+        months,
+        samples,
+        mu: assumption.mu,
+        sigma: assumption.sigma,
+        runs: 400,
+        random: seededRandom(settings.monthly * 7919 + settings.goal + settings.years * 104729 + samples.length * 31)
+      });
+      drawFanChart(canvas, projection, settings, total);
+      const probability = projection.endValues.length
+        ? projection.endValues.filter((value) => value >= settings.goal).length / projection.endValues.length
+        : 0;
+      const methodLabel = projection.method === "bootstrap"
+        ? `Bootstrap, laatste ${samples.length} maanden`
+        : `Normaal: μ ${pct.format(assumption.mu)}, σ ${pct.format(assumption.sigma)}/jr (allocatie)`;
+      summary.innerHTML = [
+        `<div><span>Kans op ${currency.format(settings.goal)}</span><strong class="${probability >= .5 ? "gain" : "loss"}">${pct.format(probability)}</strong></div>`,
+        `<div><span>Mediaan na ${settings.years} jaar</span><strong>${currency.format(projection.p50[months - 1])}</strong></div>`,
+        `<div><span>Bandbreedte P10–P90</span><strong>${currency.format(projection.p10[months - 1])} – ${currency.format(projection.p90[months - 1])}</strong></div>`,
+        `<div><span>Methode</span><strong>${esc(methodLabel)}</strong></div>`
       ].join("");
     }
 
-    function insight(title, text) {
-      const color = title.includes("Crypto") ? "var(--type-crypto)" : title.includes("DCA") ? "var(--type-income)" : title.includes("rendement") ? "var(--accent-2)" : "var(--accent)";
-      const bg = title.includes("Crypto") ? "var(--surface-gold)" : title.includes("DCA") ? "var(--surface-green)" : title.includes("rendement") ? "var(--surface-pink)" : "var(--surface-blue)";
-      return `<article class="insight" style="--insight-color:${color};--insight-bg:${bg}"><h3>${esc(title)}</h3><p>${esc(text)}</p></article>`;
+    function drawFanChart(canvas, projection, settings, total) {
+      const start = Date.now();
+      const monthMs = 2629800000;
+      const toPoints = (values) => values.map((value, index) => ({ t: start + (index + 1) * monthMs, v: value }));
+      const median = [{ t: start, v: total.value }, ...toPoints(projection.p50)];
+      const upper = [{ t: start, v: total.value }, ...toPoints(projection.p90)];
+      const lower = [{ t: start, v: total.value }, ...toPoints(projection.p10)];
+      const invested = [{ t: start, v: total.value }, ...projection.p50.map((_, index) => ({ t: start + (index + 1) * monthMs, v: total.value + settings.monthly * (index + 1) }))];
+      drawTimeChart(canvas, {
+        series: [
+          { points: median, color: "#137c9b", width: 2.5 },
+          { points: invested, color: "#7b8ba1", width: 1.5, dash: [5, 5] }
+        ],
+        band: { upper, lower, color: "rgba(19,124,155,.15)" },
+        legend: [
+          { label: "Mediaan (P50)", color: "#137c9b" },
+          { label: "Alleen inleg", color: "#7b8ba1", dash: true },
+          { label: "P10–P90 band", color: "rgba(19,124,155,.45)" }
+        ],
+        avgLine: settings.goal > 0 ? { value: settings.goal, label: `doel ${currency.format(settings.goal)}`, expandScale: true } : null,
+        formatValue: (value) => currency.format(value),
+        tooltip: (index) => `<strong>${dateNlFromMs(median[index].t)}</strong>P50 ${currency.format(median[index].v)}<br>P10 ${currency.format(lower[index].v)} · P90 ${currency.format(upper[index].v)}`,
+        emptyTitle: "Geen projectie",
+        emptyNote: "Voeg posities of inleg toe."
+      });
     }
 
     function assetCell(item) {
@@ -2726,142 +2144,406 @@
       return esc(value).replace(/`/g, "&#96;");
     }
 
-    function portfolioHistory(months) {
-      if (!stateCache.history) stateCache.history = new Map();
-      if (!stateCache.history.has(months)) stateCache.history.set(months, computePortfolioHistory(months));
-      return stateCache.history.get(months);
+    // ---- Portefeuillehistorie: transactie-walker + live koershistorie ----
+
+    function sortedValidTransactions() {
+      return [...state.transactions]
+        .filter((item) => /^\d{4}-\d{2}-\d{2}/.test(String(item.date || "")))
+        .sort((a, b) => a.date.localeCompare(b.date));
     }
 
-    function computePortfolioHistory(months) {
-      const start = new Date(`${todayISO()}T00:00:00`);
-      start.setMonth(start.getMonth() - months);
-      // Snapshots zijn echte waarnemingen; de reconstructie waardeert historische
-      // aantallen tegen de huidige koers en is daarmee slechts een indicatie.
-      const byDay = new Map();
-      [...(state.snapshots || [])]
-        .filter((item) => Number.isFinite(Number(item.value)))
-        .sort((a, b) => String(a.date).localeCompare(String(b.date)))
-        .forEach((item) => byDay.set(String(item.date).slice(0, 10), Number(item.value)));
-      const snapshotPoints = [...byDay.entries()]
-        .map(([date, value]) => ({ date, value }))
-        .filter((point) => new Date(`${point.date}T00:00:00`) >= start);
-      if (snapshotPoints.length >= 2) return { points: snapshotPoints, source: "snapshots" };
-      return { points: reconstructedHistory(months), source: "reconstructie" };
+    // Loopt chronologisch door de transacties en levert per griddatum de
+    // aantallen, laatst bekende transactieprijs en cumulatieve netto inleg.
+    function transactionWalker() {
+      const txs = sortedValidTransactions();
+      const quantities = new Map();
+      const lastTxPrice = new Map();
+      let invested = 0;
+      let txIndex = 0;
+      return {
+        applyUntil(date) {
+          while (txIndex < txs.length && txs[txIndex].date <= date) {
+            const item = txs[txIndex];
+            const quantity = Number(item.quantity) || 0;
+            const price = Number(item.price) || 0;
+            const held = quantities.get(item.ticker) || 0;
+            if (item.side === "sell") {
+              quantities.set(item.ticker, Math.max(0, held - quantity));
+              invested -= quantity * price;
+            } else {
+              quantities.set(item.ticker, held + quantity);
+              invested += quantity * price;
+            }
+            if (price > 0) lastTxPrice.set(item.ticker, price);
+            txIndex += 1;
+          }
+        },
+        quantities,
+        lastTxPrice,
+        get invested() {
+          return invested;
+        },
+        hasTransactions: txs.length > 0
+      };
     }
 
-    function reconstructedHistory(months) {
+    // Synchrone fallback: waardeert tegen de laatst bekende transactieprijs.
+    function transactionSeries(months) {
       const end = new Date(`${todayISO()}T00:00:00`);
       const start = new Date(end);
       start.setMonth(start.getMonth() - months);
+      const walker = transactionWalker();
+      if (!walker.hasTransactions) return [];
       const points = [];
-      for (let cursor = new Date(start); cursor <= end; cursor.setDate(cursor.getDate() + 7)) {
-        const date = cursor.toISOString().slice(0, 10);
-        const value = positionsAt(date).reduce((sum, item) => sum + item.value, 0);
-        points.push({ date, value });
+      for (let cursor = new Date(start); cursor < end; cursor.setDate(cursor.getDate() + 7)) {
+        const date = dateToISO(cursor);
+        walker.applyUntil(date);
+        let value = 0;
+        walker.quantities.forEach((quantity, ticker) => {
+          if (quantity > 0) value += quantity * (walker.lastTxPrice.get(ticker) || 0);
+        });
+        points.push({ t: cursor.getTime(), date, value, invested: walker.invested });
       }
+      walker.applyUntil(todayISO());
+      points.push({ t: end.getTime(), date: todayISO(), value: totals().value, invested: walker.invested });
       return points;
     }
 
-    function positionsAt(date) {
-      const active = state.transactions
-        .filter((item) => item.date <= date)
-        .sort((a, b) => new Date(a.date) - new Date(b.date));
-      const map = new Map();
-      active.forEach((item) => {
-        if (!map.has(item.ticker)) map.set(item.ticker, { ticker: item.ticker, value: 0, quantity: 0, currentPrice: item.currentPrice });
-        const pos = map.get(item.ticker);
-        if (item.side === "sell") pos.quantity = Math.max(0, pos.quantity - item.quantity);
-        else pos.quantity += item.quantity;
-        pos.currentPrice = priceOf(item.ticker, item.currentPrice || pos.currentPrice);
-        pos.value = pos.quantity * pos.currentPrice;
-      });
-      return [...map.values()].filter((item) => item.quantity > 0);
+    function assetRangeForMonths(months) {
+      const key = { 1: "1m", 3: "3m", 6: "6m", 12: "1y", 36: "max", 60: "max" }[months] || "max";
+      return ASSET_CHART_RANGES.find((range) => range.key === key);
     }
 
-    function drawLineChart(canvas, points) {
+    function loadPortfolioSeries(months) {
+      if (!stateCache.series) stateCache.series = new Map();
+      if (!stateCache.series.has(months)) {
+        stateCache.series.set(months, composePortfolioSeries(months).catch(() => null));
+      }
+      return stateCache.series.get(months);
+    }
+
+    // Bouwt de portefeuillereeks op echte koershistorie per asset. Tickers
+    // zonder bereikbare live bron vallen per stuk terug op transactieprijzen.
+    async function composePortfolioSeries(months) {
+      const end = new Date(`${todayISO()}T00:00:00`);
+      const start = new Date(end);
+      start.setMonth(start.getMonth() - months);
+      const walker = transactionWalker();
+      if (!walker.hasTransactions) return { points: [], liveCount: 0, totalTickers: 0, twr: null };
+
+      const notional = new Map();
+      const typeOf = new Map();
+      sortedValidTransactions().forEach((item) => {
+        notional.set(item.ticker, (notional.get(item.ticker) || 0) + Math.abs((Number(item.quantity) || 0) * (Number(item.price) || 0)));
+        if (!typeOf.has(item.ticker)) typeOf.set(item.ticker, item.type);
+      });
+      const tickers = [...notional.entries()]
+        .filter(([, amount]) => amount >= 1)
+        .sort((a, b) => b[1] - a[1])
+        .map(([ticker]) => ({ ticker, type: typeOf.get(ticker) }));
+      const range = assetRangeForMonths(months);
+      const priceSeries = new Map();
+      await runBatched(tickers, 3, async (info) => {
+        try {
+          const history = await fetchAssetHistory(info, range);
+          if (history.points.length >= 2) priceSeries.set(info.ticker, history.points);
+        } catch {
+          // Geen live bron: deze ticker telt mee tegen transactieprijzen.
+        }
+      });
+
+      const priceAt = (ticker, t) => {
+        const series = priceSeries.get(ticker);
+        if (!series || !series.length || t < series[0].t) {
+          return walker.lastTxPrice.get(ticker) || (series && series.length ? series[0].p : 0);
+        }
+        let lo = 0;
+        let hi = series.length - 1;
+        while (lo < hi) {
+          const mid = Math.ceil((lo + hi) / 2);
+          if (series[mid].t <= t) lo = mid;
+          else hi = mid - 1;
+        }
+        return series[lo].p;
+      };
+
+      const totalDays = Math.max(7, Math.round((end - start) / 86400000));
+      const stepDays = Math.max(1, Math.round(totalDays / 130));
+      const points = [];
+      for (let cursor = new Date(start); cursor < end; cursor.setDate(cursor.getDate() + stepDays)) {
+        const date = dateToISO(cursor);
+        const t = cursor.getTime();
+        walker.applyUntil(date);
+        let value = 0;
+        walker.quantities.forEach((quantity, ticker) => {
+          if (quantity > 0) value += quantity * priceAt(ticker, t);
+        });
+        points.push({ t, date, value, invested: walker.invested });
+      }
+      walker.applyUntil(todayISO());
+      points.push({ t: end.getTime(), date: todayISO(), value: totals().value, invested: walker.invested });
+      const windowPoints = points.filter((point) => point.value > 0 || point.invested > 0);
+      const twr = PortfolioMath.timeWeightedReturn(windowPoints);
+      return { points, liveCount: priceSeries.size, totalTickers: tickers.length, twr };
+    }
+
+    function drawDashboardChart() {
+      const canvas = document.getElementById("valueChart");
+      if (!canvas) return;
+      const months = Number(state.chartRange || 12);
+      const fallback = transactionSeries(months);
+      renderValueChart(canvas, fallback);
+      const token = ++valueChartToken;
+      loadPortfolioSeries(months).then((series) => {
+        if (token !== valueChartToken || !canvas.isConnected || activeView() !== "dashboard") return;
+        const total = totals();
+        if (series && series.points.length >= 2) {
+          renderValueChart(canvas, series.points);
+          renderValueChartSummary(total, series);
+          renderDashboardMetrics(total, series);
+        } else {
+          const twr = PortfolioMath.timeWeightedReturn(fallback);
+          renderValueChartSummary(total, { liveCount: 0, totalTickers: 0, twr });
+          renderDashboardMetrics(total, { twr });
+        }
+      });
+    }
+
+    function renderValueChart(canvas, points) {
+      const valuePoints = points.map((point) => ({ t: point.t, v: point.value }));
+      const investedPoints = points
+        .filter((point) => Number.isFinite(point.invested))
+        .map((point) => ({ t: point.t, v: point.invested }));
+      drawTimeChart(canvas, {
+        series: [
+          { points: valuePoints, color: "#137c9b", width: 3, fill: "rgba(19,124,155,.14)" },
+          investedPoints.length >= 2 ? { points: investedPoints, color: "#7b8ba1", width: 1.5, dash: [5, 5] } : null
+        ].filter(Boolean),
+        legend: [
+          { label: "Waarde", color: "#137c9b" },
+          { label: "Netto inleg", color: "#7b8ba1", dash: true }
+        ],
+        formatValue: (value) => currency.format(value),
+        tooltip: (index) => {
+          const point = points[index];
+          const gain = Number.isFinite(point.invested) ? point.value - point.invested : null;
+          return `<strong>${dateNl(point.date)}</strong>${currency.format(point.value)}${gain === null ? "" : `<br>Inleg ${currency.format(point.invested)} · ${gain >= 0 ? "+" : ""}${currency.format(gain)}`}`;
+        },
+        emptyTitle: "Nog geen waardedata",
+        emptyNote: "Importeer of voeg transacties toe."
+      });
+    }
+
+    // ---- Generieke tijdreeksgrafiek: één stijl voor waarde-, drawdown-,
+    // fan- en assetgrafiek. Serie 0 is de hoofdserie (scrub + labels). ----
+    function drawTimeChart(canvas, model) {
       const ctx = setupCanvas(canvas);
       const { width, height } = canvas.getBoundingClientRect();
       ctx.clearRect(0, 0, width, height);
-      const pad = 42;
-      const values = points.map((point) => point.value);
-      const max = Math.max(...values, 1);
-      const min = Math.min(...values, 0);
-      drawGrid(ctx, width, height, pad);
-      if (!points.length || !points.some((point) => point.value > 0)) {
-        drawEmptyCanvasMessage(ctx, width, height, "Nog geen waardedata", "Importeer of voeg transacties toe.");
-        canvas.onmousemove = null;
-        canvas.onmouseleave = null;
+      const series = (model.series || []).filter((entry) => entry && entry.points && entry.points.length >= 2);
+      const main = series[0];
+      if (!main) {
+        drawEmptyCanvasMessage(ctx, width, height, model.emptyTitle || "Geen data", model.emptyNote || "Onvoldoende datapunten.");
+        canvas.onpointermove = canvas.onpointerdown = canvas.onpointerleave = canvas.onpointercancel = canvas.onpointerup = null;
         return;
       }
-      const areaGradient = ctx.createLinearGradient(0, pad, 0, height - pad);
-      areaGradient.addColorStop(0, "rgba(19,124,155,.30)");
-      areaGradient.addColorStop(.55, "rgba(47,174,137,.14)");
-      areaGradient.addColorStop(1, "rgba(217,87,123,0)");
-      ctx.beginPath();
-      points.forEach((point, index) => {
-        const x = pad + (index / Math.max(points.length - 1, 1)) * (width - pad * 1.5);
-        const y = height - pad - ((point.value - min) / Math.max(max - min, 1)) * (height - pad * 1.6);
-        if (index === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
-      ctx.lineTo(width - pad / 2, height - pad);
-      ctx.lineTo(pad, height - pad);
-      ctx.closePath();
-      ctx.fillStyle = areaGradient;
-      ctx.fill();
-      ctx.beginPath();
-      points.forEach((point, index) => {
-        const x = pad + (index / Math.max(points.length - 1, 1)) * (width - pad * 1.5);
-        const y = height - pad - ((point.value - min) / Math.max(max - min, 1)) * (height - pad * 1.6);
-        if (index === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
-      ctx.lineWidth = 4;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      const lineGradient = ctx.createLinearGradient(pad, 0, width - pad, 0);
-      lineGradient.addColorStop(0, "#137c9b");
-      lineGradient.addColorStop(.52, "#2fae89");
-      lineGradient.addColorStop(1, "#d9577b");
-      ctx.strokeStyle = lineGradient;
-      ctx.stroke();
-      axisLabel(ctx, currency.format(max), pad, pad - 12);
-      axisLabel(ctx, currency.format(min), pad, height - 12);
-      if (points.length > 1) {
-        axisLabel(ctx, dateNl(points[0].date), pad, height - 28);
-        axisLabel(ctx, dateNl(points[points.length - 1].date), width - 112, height - 28);
+      const padX = 16;
+      const padTop = model.legend ? 40 : 30;
+      const padBottom = 34;
+      const format = model.formatValue || ((value) => String(value));
+
+      const allPoints = series.flatMap((entry) => entry.points)
+        .concat(model.band ? [...model.band.upper, ...model.band.lower] : []);
+      const t0 = Math.min(...allPoints.map((point) => point.t));
+      const t1 = Math.max(...allPoints.map((point) => point.t));
+      const spanT = Math.max(t1 - t0, 1);
+      let minV = Math.min(...allPoints.map((point) => point.v));
+      let maxV = Math.max(...allPoints.map((point) => point.v));
+      // Referentielijn telt alleen mee in de schaal als dat gevraagd is (doel in
+      // de fan chart wel; gemiddelde aankoopprijs ver buiten koersbereik niet).
+      if (model.avgLine && Number.isFinite(model.avgLine.value) && model.avgLine.expandScale) {
+        minV = Math.min(minV, model.avgLine.value);
+        maxV = Math.max(maxV, model.avgLine.value);
       }
-      const hover = Number.isInteger(valueChartHoverIndex) ? points[valueChartHoverIndex] : null;
-      if (hover) {
-        const x = pad + (valueChartHoverIndex / Math.max(points.length - 1, 1)) * (width - pad * 1.5);
-        const y = height - pad - ((hover.value - min) / Math.max(max - min, 1)) * (height - pad * 1.6);
-        ctx.strokeStyle = "rgba(23,34,53,.28)";
+      if (model.includeZero) minV = Math.min(minV, 0);
+      const spanV = Math.max(maxV - minV, Math.abs(maxV) * .002, 1e-9);
+      const xFor = (t) => padX + ((t - t0) / spanT) * (width - padX * 2);
+      const yFor = (v) => padTop + (1 - (v - minV) / spanV) * (height - padTop - padBottom);
+
+      // Onzekerheidsband (fan chart)
+      if (model.band) {
+        ctx.beginPath();
+        model.band.upper.forEach((point, index) => {
+          const x = xFor(point.t);
+          const y = yFor(point.v);
+          if (index === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        [...model.band.lower].reverse().forEach((point) => ctx.lineTo(xFor(point.t), yFor(point.v)));
+        ctx.closePath();
+        ctx.fillStyle = model.band.color || "rgba(19,124,155,.14)";
+        ctx.fill();
+      }
+
+      series.forEach((entry) => {
+        if (entry.fill) {
+          const baseline = entry.fillToZero && minV < 0 ? yFor(Math.min(0, maxV)) : height - padBottom;
+          ctx.beginPath();
+          entry.points.forEach((point, index) => {
+            const x = xFor(point.t);
+            const y = yFor(point.v);
+            if (index === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          });
+          ctx.lineTo(xFor(entry.points[entry.points.length - 1].t), baseline);
+          ctx.lineTo(xFor(entry.points[0].t), baseline);
+          ctx.closePath();
+          ctx.fillStyle = entry.fill;
+          ctx.fill();
+        }
+        ctx.beginPath();
+        entry.points.forEach((point, index) => {
+          const x = xFor(point.t);
+          const y = yFor(point.v);
+          if (index === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.lineWidth = entry.width || 2;
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        ctx.strokeStyle = entry.color || "#137c9b";
+        ctx.save();
+        if (entry.dash) ctx.setLineDash(entry.dash);
+        ctx.stroke();
+        ctx.restore();
+      });
+
+      if (model.avgLine && Number.isFinite(model.avgLine.value) && model.avgLine.value >= minV && model.avgLine.value <= maxV) {
+        const y = yFor(model.avgLine.value);
+        ctx.save();
+        ctx.setLineDash([5, 5]);
+        ctx.strokeStyle = "rgba(23,34,53,.38)";
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(x, pad);
-        ctx.lineTo(x, height - pad);
+        ctx.moveTo(padX, y);
+        ctx.lineTo(width - padX, y);
         ctx.stroke();
-        ctx.fillStyle = "#ffffff";
-        ctx.strokeStyle = "#147f9d";
-        ctx.lineWidth = 3;
+        ctx.restore();
+        axisLabel(ctx, model.avgLine.label, padX + 4, y - 6);
+      }
+
+      // Hoog/laag-labels op de hoofdserie + datumranden
+      ctx.font = "12px Inter, sans-serif";
+      ctx.fillStyle = "#647084";
+      let maxIndex = 0;
+      let minIndex = 0;
+      main.points.forEach((point, index) => {
+        if (point.v > main.points[maxIndex].v) maxIndex = index;
+        if (point.v < main.points[minIndex].v) minIndex = index;
+      });
+      const clampLabelX = (x, text) => Math.max(padX, Math.min(width - padX - ctx.measureText(text).width, x - ctx.measureText(text).width / 2));
+      if (model.labels !== false) {
+        const highText = format(main.points[maxIndex].v);
+        ctx.fillText(highText, clampLabelX(xFor(main.points[maxIndex].t), highText), Math.max(14, yFor(main.points[maxIndex].v) - 10));
+        const lowText = format(main.points[minIndex].v);
+        ctx.fillText(lowText, clampLabelX(xFor(main.points[minIndex].t), lowText), Math.min(height - padBottom + 12, yFor(main.points[minIndex].v) + 18));
+      }
+      axisLabel(ctx, dateNlFromMs(t0), padX, height - 10);
+      const endLabel = model.endLabel || dateNlFromMs(t1);
+      axisLabel(ctx, endLabel, width - padX - ctx.measureText(endLabel).width, height - 10);
+
+      if (model.legend) {
+        let legendX = padX;
+        model.legend.forEach((entry) => {
+          ctx.strokeStyle = entry.color;
+          ctx.lineWidth = 3;
+          ctx.save();
+          if (entry.dash) ctx.setLineDash([4, 4]);
+          ctx.beginPath();
+          ctx.moveTo(legendX, 16);
+          ctx.lineTo(legendX + 18, 16);
+          ctx.stroke();
+          ctx.restore();
+          ctx.fillStyle = "#647084";
+          ctx.fillText(entry.label, legendX + 23, 20);
+          legendX += 23 + ctx.measureText(entry.label).width + 18;
+        });
+      }
+
+      // Markers (bijv. aan-/verkoopmomenten) op de hoofdserie
+      const hover = Number.isInteger(canvas.__hoverIndex) ? Math.max(0, Math.min(main.points.length - 1, canvas.__hoverIndex)) : null;
+      const tolerance = Math.max(1, Math.round(main.points.length / 70));
+      if (model.markers && model.markers.length) {
+        const active = model.activeMarkers ? model.activeMarkers(hover, tolerance) : [];
+        model.markers.forEach((marker) => {
+          const point = main.points[marker.index];
+          if (!point) return;
+          const isActive = active.includes(marker);
+          ctx.beginPath();
+          ctx.arc(xFor(point.t), yFor(point.v), isActive ? 6.5 : 4.5, 0, Math.PI * 2);
+          ctx.fillStyle = marker.color;
+          ctx.fill();
+          ctx.lineWidth = isActive ? 2.5 : 1.5;
+          ctx.strokeStyle = "#ffffff";
+          ctx.stroke();
+        });
+      }
+
+      // Scrub-lijn en punt
+      if (hover !== null && model.tooltip) {
+        const point = main.points[hover];
+        const x = xFor(point.t);
+        const y = yFor(point.v);
+        ctx.save();
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = "rgba(23,34,53,.35)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, padTop - 6);
+        ctx.lineTo(x, height - padBottom);
+        ctx.stroke();
+        ctx.restore();
         ctx.beginPath();
         ctx.arc(x, y, 6, 0, Math.PI * 2);
+        ctx.fillStyle = "#ffffff";
         ctx.fill();
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = main.color || "#137c9b";
         ctx.stroke();
       }
-      canvas.onmousemove = (event) => {
+
+      if (!model.tooltip) {
+        canvas.onpointermove = canvas.onpointerdown = canvas.onpointerleave = canvas.onpointercancel = canvas.onpointerup = null;
+        return;
+      }
+      const scrub = (event) => {
         const rect = canvas.getBoundingClientRect();
         const x = event.clientX - rect.left;
-        const index = Math.max(0, Math.min(points.length - 1, Math.round(((x - pad) / Math.max(width - pad * 1.5, 1)) * (points.length - 1))));
-        valueChartHoverIndex = index;
-        const point = points[index];
-        showChartTooltip(event, `<strong>${dateNl(point.date)}</strong>${currency.format(point.value)}`);
-        drawLineChart(canvas, points);
+        let index = 0;
+        let best = Infinity;
+        main.points.forEach((point, pointIndex) => {
+          const distance = Math.abs(xFor(point.t) - x);
+          if (distance < best) {
+            best = distance;
+            index = pointIndex;
+          }
+        });
+        canvas.__hoverIndex = index;
+        const html = model.tooltip(index, tolerance);
+        if (html) showChartTooltip(event, html);
+        drawTimeChart(canvas, model);
       };
-      canvas.onmouseleave = () => {
-        valueChartHoverIndex = null;
+      const clear = () => {
+        canvas.__hoverIndex = null;
         hideChartTooltip();
-        drawLineChart(canvas, points);
+        drawTimeChart(canvas, model);
+      };
+      canvas.onpointermove = scrub;
+      canvas.onpointerdown = scrub;
+      canvas.onpointerleave = clear;
+      canvas.onpointercancel = clear;
+      canvas.onpointerup = (event) => {
+        if (event.pointerType !== "mouse") clear();
       };
     }
 
@@ -2913,7 +2595,7 @@
       ctx.font = "12px Inter, sans-serif";
       ctx.fillText(`${grouped.length} categorieen`, cx, cy + 17);
       ctx.textAlign = "left";
-      canvas.onmousemove = (event) => {
+      const allocationScrub = (event) => {
         const rect = canvas.getBoundingClientRect();
         const x = event.clientX - rect.left - cx;
         const y = event.clientY - rect.top - cy;
@@ -2932,78 +2614,18 @@
         }
         drawAllocationChart(canvas, list);
       };
-      canvas.onmouseleave = () => {
+      const allocationClear = () => {
         allocationHoverIndex = null;
         hideChartTooltip();
         drawAllocationChart(canvas, list);
       };
-    }
-
-    function drawTopHoldingsChart(canvas, list) {
-      const ctx = setupCanvas(canvas);
-      const { width, height } = canvas.getBoundingClientRect();
-      ctx.clearRect(0, 0, width, height);
-      const rows = list.slice(0, 8);
-      if (!rows.length || width <= 0 || height <= 0) return;
-      const total = list.reduce((sum, item) => sum + item.value, 0);
-      const max = Math.max(...rows.map((item) => item.value), 1);
-      const left = 76;
-      const right = 24;
-      const top = 16;
-      const rowGap = 6;
-      const barHeight = Math.max(14, Math.min(24, (height - top * 2 - rowGap * (rows.length - 1)) / rows.length));
-      rows.forEach((item, index) => {
-        const y = top + index * (barHeight + rowGap);
-        const barWidth = ((width - left - right) * item.value) / max;
-        ctx.fillStyle = "#647084";
-        ctx.font = "12px Inter, sans-serif";
-        ctx.fillText(truncateCanvasText(ctx, item.ticker, left - 24), 16, y + barHeight * .72);
-        ctx.fillStyle = "#e8edf3";
-        fillRoundedRect(ctx, left, y, width - left - right, barHeight, 7);
-        ctx.fillStyle = chartColors()[index % chartColors().length];
-        fillRoundedRect(ctx, left, y, barWidth, barHeight, 7);
-        ctx.fillStyle = barWidth > 145 ? "#ffffff" : "#18212f";
-        ctx.font = "12px Inter, sans-serif";
-        const labelMaxWidth = barWidth > 145 ? Math.max(90, barWidth - 20) : Math.max(88, width - left - right - barWidth - 12);
-        const label = truncateCanvasText(ctx, `${currency.format(item.value)} · ${pct.format(item.value / Math.max(total, 1))}`, labelMaxWidth);
-        const labelX = barWidth > 145 ? left + 10 : Math.min(left + barWidth + 8, Math.max(left + 8, width - 112));
-        ctx.fillText(label, Math.max(labelX, left + 8), y + barHeight * .72);
-      });
-    }
-
-    function drawTypePerformanceChart(canvas, rows) {
-      const ctx = setupCanvas(canvas);
-      const { width, height } = canvas.getBoundingClientRect();
-      ctx.clearRect(0, 0, width, height);
-      if (!rows.length || width <= 0 || height <= 0) return;
-      const pad = 52;
-      const max = Math.max(...rows.flatMap((item) => [item.value, item.cost]), 1);
-      drawGrid(ctx, width, height, pad);
-      const groupWidth = (width - pad * 2) / rows.length;
-      const barWidth = Math.min(28, groupWidth / 3.2);
-      rows.forEach((item, index) => {
-        const x = pad + index * groupWidth + groupWidth / 2;
-        const costHeight = ((height - pad * 1.8) * item.cost) / max;
-        const valueHeight = ((height - pad * 1.8) * item.value) / max;
-        ctx.fillStyle = "#d7dee8";
-        fillRoundedRect(ctx, x - barWidth - 3, height - pad - costHeight, barWidth, costHeight, 6);
-        ctx.fillStyle = item.gain >= 0 ? "#187a4d" : "#b23b44";
-        fillRoundedRect(ctx, x + 3, height - pad - valueHeight, barWidth, valueHeight, 6);
-        ctx.fillStyle = "#647084";
-        ctx.font = "12px Inter, sans-serif";
-        ctx.textAlign = "center";
-        ctx.fillText(truncateCanvasText(ctx, item.type, Math.max(44, groupWidth - 8)), x, height - 14);
-        ctx.fillStyle = item.gain >= 0 ? "#10845c" : "#c2495a";
-        ctx.font = "11px Inter, sans-serif";
-        ctx.fillText(pct.format(item.gainPct), x, Math.max(18, height - pad - Math.max(costHeight, valueHeight) - 8));
-      });
-      ctx.textAlign = "left";
-      ctx.fillStyle = "#d7dee8";
-      ctx.fillRect(pad, 14, 12, 12);
-      axisLabel(ctx, "kostprijs", pad + 18, 24);
-      ctx.fillStyle = "#10845c";
-      ctx.fillRect(pad + 100, 14, 12, 12);
-      axisLabel(ctx, "waarde", pad + 118, 24);
+      canvas.onpointermove = allocationScrub;
+      canvas.onpointerdown = allocationScrub;
+      canvas.onpointerleave = allocationClear;
+      canvas.onpointercancel = allocationClear;
+      canvas.onpointerup = (event) => {
+        if (event.pointerType !== "mouse") allocationClear();
+      };
     }
 
     function showChartTooltip(event, html) {
@@ -3015,8 +2637,18 @@
         document.body.appendChild(tooltip);
       }
       tooltip.innerHTML = html;
-      tooltip.style.left = `${Math.min(window.innerWidth - 240, event.clientX + 14)}px`;
-      tooltip.style.top = `${Math.max(10, event.clientY - 18)}px`;
+      // Eerst content zetten en meten, dan klemmen binnen het scherm; bij de
+      // rechterrand klapt de tooltip naar de linkerkant van de cursor.
+      const rect = tooltip.getBoundingClientRect();
+      const margin = 10;
+      let left = event.clientX + 14;
+      if (left + rect.width > window.innerWidth - margin) left = event.clientX - rect.width - 14;
+      left = Math.max(margin, left);
+      let top = event.clientY - 18;
+      if (top + rect.height > window.innerHeight - margin) top = window.innerHeight - rect.height - margin;
+      top = Math.max(margin, top);
+      tooltip.style.left = `${left}px`;
+      tooltip.style.top = `${top}px`;
     }
 
     function hideChartTooltip() {
@@ -3159,6 +2791,10 @@
         .sort((a, b) => new Date(b.date) - new Date(a.date))
         .slice(0, 12);
       const correction = state.avgPriceCorrections?.[ticker];
+      const activeRange = assetChartRange();
+      const annual = positionXirr(item);
+      const meta = (state.tags || {})[ticker] || {};
+      const salePlan = (state.salePlans || {})[ticker] || {};
       document.getElementById("positionTitle").textContent = `${item.ticker} · ${item.name}`;
       document.getElementById("positionDetail").innerHTML = `
         <div class="detail-grid">
@@ -3166,6 +2802,19 @@
           <div class="detail-stat"><span>Waarde</span><strong>${currency.format(item.value)}</strong></div>
           <div class="detail-stat"><span>Gem. prijs</span><strong>${currency.format(item.avgPrice)}</strong></div>
           <div class="detail-stat"><span>Rendement</span><strong class="${item.gain >= 0 ? "gain" : "loss"}">${currency.format(item.gain)} · ${pct.format(item.gainPct)}</strong></div>
+          <div class="detail-stat"><span>Rendement/jaar</span><strong class="${(annual || 0) >= 0 ? "gain" : "loss"}">${annual === null ? "n.v.t." : pct.format(annual)}</strong></div>
+          ${item.realizedGain ? `<div class="detail-stat"><span>Gerealiseerd</span><strong class="${item.realizedGain >= 0 ? "gain" : "loss"}">${currency.format(item.realizedGain)}</strong></div>` : ""}
+        </div>
+        <div class="asset-chart-block">
+          <div class="asset-chart-head">
+            <div class="asset-chart-price">
+              <span>Actuele prijs</span>
+              <strong>${currency.format(item.currentPrice)}</strong>
+            </div>
+            <div class="tabs compact-tabs" id="assetRangeTabs">${ASSET_CHART_RANGES.map((range) => `<button type="button" class="${range.key === activeRange.key ? "active" : ""}" data-action="setAssetChartRange" data-range-key="${range.key}" data-ticker="${escAttr(item.ticker)}">${range.label}</button>`).join("")}</div>
+          </div>
+          <div class="asset-chart-wrap"><canvas id="assetChart"></canvas></div>
+          <div class="asset-chart-meta" id="assetChartMeta"></div>
         </div>
         <form id="avgPriceForm">
           <div class="form-grid">
@@ -3182,6 +2831,20 @@
           <div class="actions-row">
             <button class="ghost-btn" type="button" data-action="resetAveragePrice" data-ticker="${escAttr(item.ticker)}">Reset gemiddelde</button>
             <button class="primary-btn" type="submit">Opslaan</button>
+          </div>
+        </form>
+        <form id="strategyForm">
+          <div class="detail-form-head"><strong>Strategie & verkoopplan</strong><span>Waarom bezit je dit en wanneer verkoop je?</span></div>
+          <div class="form-grid">
+            <label>Tags<input name="tags" value="${escAttr(meta.tags || "")}" placeholder="core, long-term"></label>
+            <label>Thesis<input name="thesis" value="${escAttr(meta.thesis || "")}" placeholder="Waarom bezit ik dit?"></label>
+            <label>Risico<input name="risk" value="${escAttr(meta.risk || "")}" placeholder="Wat kan fout gaan?"></label>
+            <label>Verkoopdoel<input name="targetPrice" type="number" inputmode="decimal" min="0" step="any" value="${salePlan.targetPrice || ""}" placeholder="Doelprijs"></label>
+            <label>Stop-loss<input name="stopPrice" type="number" inputmode="decimal" min="0" step="any" value="${salePlan.stopPrice || ""}" placeholder="Ondergrens"></label>
+            <label>Verkoopplan<input name="note" value="${escAttr(salePlan.note || "")}" placeholder="Wanneer verkoop ik?"></label>
+          </div>
+          <div class="actions-row">
+            <button class="primary-btn" type="submit">Strategie opslaan</button>
           </div>
         </form>
         <div class="table-wrap">
@@ -3216,7 +2879,323 @@
         render();
         openPositionDetail(item.ticker);
       });
+      document.getElementById("strategyForm").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const data = Object.fromEntries(new FormData(event.target));
+        const tags = { tags: data.tags?.trim() || "", thesis: data.thesis?.trim() || "", risk: data.risk?.trim() || "" };
+        state.tags = { ...(state.tags || {}) };
+        if (tags.tags || tags.thesis || tags.risk) state.tags[item.ticker] = tags;
+        else delete state.tags[item.ticker];
+        const plan = {
+          targetPrice: parsePriceNumber(data.targetPrice) || 0,
+          stopPrice: parsePriceNumber(data.stopPrice) || 0,
+          note: data.note?.trim() || ""
+        };
+        state.salePlans = { ...(state.salePlans || {}) };
+        if (plan.targetPrice || plan.stopPrice || plan.note) state.salePlans[item.ticker] = plan;
+        else delete state.salePlans[item.ticker];
+        persist();
+        render();
+        openPositionDetail(item.ticker);
+      });
       openDialog("positionModal", document.getElementById("closePositionModal"));
+      loadAssetChart(item);
+    }
+
+    // ---- Interactieve koersgrafiek per asset (historie + aan-/verkoopmomenten) ----
+
+    function assetChartRange() {
+      return ASSET_CHART_RANGES.find((range) => range.key === state.ui.assetChartRange) || ASSET_CHART_RANGES[3];
+    }
+
+    function setAssetChartRange(key, ticker) {
+      if (!ASSET_CHART_RANGES.some((range) => range.key === key)) return;
+      state.ui.assetChartRange = key;
+      persist();
+      document.querySelectorAll("#assetRangeTabs [data-range-key]").forEach((button) => {
+        button.classList.toggle("active", button.dataset.rangeKey === key);
+      });
+      const item = positions().find((pos) => pos.ticker === ticker);
+      if (item) loadAssetChart(item);
+    }
+
+    async function loadAssetChart(item) {
+      const canvas = document.getElementById("assetChart");
+      if (!canvas) return;
+      const token = ++assetChartToken;
+      canvas.__hoverIndex = null;
+      hideChartTooltip();
+      const range = assetChartRange();
+      const ctx = setupCanvas(canvas);
+      const rect = canvas.getBoundingClientRect();
+      drawEmptyCanvasMessage(ctx, rect.width, rect.height, "Koershistorie laden...", "Live bron: CoinGecko / Yahoo Finance");
+      let history;
+      let note = "";
+      try {
+        history = await fetchAssetHistory(item, range);
+      } catch (error) {
+        history = transactionFallbackHistory(item, range);
+        note = window.location.protocol === "file:"
+          ? "Live historie geblokkeerd omdat de app via een bestand is geopend. Start via start-app.command; nu zijn eigen transactieprijzen getoond."
+          : `Live historie niet beschikbaar (${error.message || "onbekende fout"}). Eigen transactieprijzen getoond.`;
+      }
+      if (token !== assetChartToken || !canvas.isConnected) return;
+      const model = buildAssetChartModel(item, history, range);
+      drawAssetChart(canvas, model);
+      updateAssetChartMeta(model, history, range, note);
+    }
+
+    function fetchAssetHistory(item, range) {
+      const cacheKey = `${item.ticker}:${range.key}`;
+      if (historyMemo.has(cacheKey)) return historyMemo.get(cacheKey);
+      const promise = (async () => {
+        const cached = readHistoryCache(cacheKey);
+        if (cached) return { points: cached.points, source: cached.source, cachedAt: cached.at };
+        const result = item.type === "Crypto" && COINGECKO_IDS[item.ticker]
+          ? await fetchCryptoHistory(item.ticker, range)
+          : await fetchEquityHistory(item, range);
+        writeHistoryCache(cacheKey, { at: new Date().toISOString(), points: result.points, source: result.source });
+        return result;
+      })();
+      historyMemo.set(cacheKey, promise);
+      // Mislukte fetches even vasthouden (negatieve cache) zodat een render
+      // geen burst van retries veroorzaakt; na 45s mag het opnieuw.
+      promise.catch(() => setTimeout(() => {
+        if (historyMemo.get(cacheKey) === promise) historyMemo.delete(cacheKey);
+      }, 45000));
+      return promise;
+    }
+
+    async function fetchCryptoHistory(ticker, range) {
+      // De publieke CoinGecko-API staat maximaal 365 dagen historie toe
+      // (days=max geeft 401); oudere periodes vallen terug op transactieprijzen.
+      const days = range.days ? String(Math.min(range.days, 365)) : "365";
+      const url = `https://api.coingecko.com/api/v3/coins/${COINGECKO_IDS[ticker]}/market_chart?vs_currency=eur&days=${days}`;
+      const response = await fetchWithTimeout(url);
+      if (!response.ok) throw new Error(`CoinGecko gaf status ${response.status}`);
+      const payload = await response.json();
+      const points = (payload.prices || [])
+        .map(([t, p]) => ({ t: Number(t), p: Number(p) }))
+        .filter((point) => Number.isFinite(point.t) && Number.isFinite(point.p) && point.p > 0);
+      if (points.length < 2) throw new Error("geen historische koersen gevonden");
+      return { points: downsamplePoints(points, HISTORY_MAX_POINTS), source: "CoinGecko" };
+    }
+
+    async function fetchEquityHistory(item, range) {
+      const symbol = resolveEquityQuoteSymbol(item.ticker);
+      const interval = range.key === "max" ? "1wk" : "1d";
+      const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range.yahooRange}&interval=${interval}`;
+      const payload = await fetchFirstJson([yahooUrl, `${YAHOO_CHART_PROXY}${encodeURIComponent(yahooUrl)}`]);
+      const result = payload?.chart?.result?.[0];
+      if (payload?.chart?.error) throw new Error(payload.chart.error.description || payload.chart.error.code || "Yahoo gaf een fout");
+      const timestamps = result?.timestamp || [];
+      const closes = result?.indicators?.quote?.[0]?.close || [];
+      const quoteCurrency = String(result?.meta?.currency || "").toUpperCase();
+      let fx = 1;
+      if (quoteCurrency === "USD") fx = await usdEurRateCached();
+      else if (quoteCurrency && quoteCurrency !== "EUR") throw new Error(`valuta ${quoteCurrency} niet ondersteund`);
+      const points = timestamps
+        .map((t, index) => ({ t: Number(t) * 1000, p: Number(closes[index]) * fx }))
+        .filter((point) => Number.isFinite(point.t) && Number.isFinite(point.p) && point.p > 0);
+      if (points.length < 2) throw new Error("geen historische koersen gevonden");
+      return { points: downsamplePoints(points, HISTORY_MAX_POINTS), source: "Yahoo Finance" };
+    }
+
+    // Fetch met harde timeout zodat een hangende bron de grafieken niet blokkeert.
+    function fetchWithTimeout(url, ms = 9000) {
+      return fetch(url, typeof AbortSignal !== "undefined" && AbortSignal.timeout ? { signal: AbortSignal.timeout(ms) } : {});
+    }
+
+    async function fetchFirstJson(urls) {
+      const errors = [];
+      for (const url of urls) {
+        try {
+          const response = await fetchWithTimeout(url);
+          if (!response.ok) throw new Error(`status ${response.status}`);
+          return await response.json();
+        } catch (error) {
+          errors.push(error.message || "fetch mislukt");
+        }
+      }
+      throw new Error(errors.join(", "));
+    }
+
+    async function usdEurRateCached() {
+      if (usdEurRateCache && Date.now() - usdEurRateCache.at < HISTORY_TTL_MS) return usdEurRateCache.rate;
+      const rate = await fetchUsdEurRate();
+      usdEurRateCache = { rate, at: Date.now() };
+      return rate;
+    }
+
+    function readHistoryCache(key) {
+      try {
+        const store = JSON.parse(localStorage.getItem(HISTORY_CACHE_KEY) || "{}");
+        const entry = store[key];
+        if (!entry || !Array.isArray(entry.points)) return null;
+        if (Date.now() - new Date(entry.at).getTime() > HISTORY_TTL_MS) return null;
+        return entry;
+      } catch {
+        return null;
+      }
+    }
+
+    function writeHistoryCache(key, entry) {
+      try {
+        const store = JSON.parse(localStorage.getItem(HISTORY_CACHE_KEY) || "{}");
+        store[key] = entry;
+        const keys = Object.keys(store);
+        if (keys.length > HISTORY_MAX_ENTRIES) {
+          keys
+            .sort((a, b) => new Date(store[a].at) - new Date(store[b].at))
+            .slice(0, keys.length - HISTORY_MAX_ENTRIES)
+            .forEach((oldKey) => delete store[oldKey]);
+        }
+        localStorage.setItem(HISTORY_CACHE_KEY, JSON.stringify(store));
+      } catch {
+        // Cache is best-effort; zonder opslagruimte blijft de grafiek gewoon live werken.
+      }
+    }
+
+    function downsamplePoints(points, maxPoints) {
+      if (points.length <= maxPoints) return points;
+      const step = (points.length - 1) / (maxPoints - 1);
+      return Array.from({ length: maxPoints }, (_, index) => points[Math.round(index * step)]);
+    }
+
+    function transactionFallbackHistory(item, range) {
+      const startMs = range.days ? Date.now() - range.days * 86400000 : 0;
+      const points = state.transactions
+        .filter((txItem) => txItem.ticker === item.ticker && Number(txItem.price) > 0)
+        .map((txItem) => ({ t: new Date(`${txItem.date}T12:00:00`).getTime(), p: Number(txItem.price) }))
+        .filter((point) => Number.isFinite(point.t) && point.t >= startMs)
+        .sort((a, b) => a.t - b.t);
+      if (Number(item.currentPrice) > 0) points.push({ t: Date.now(), p: Number(item.currentPrice) });
+      return { points, source: "transacties" };
+    }
+
+    function buildAssetChartModel(item, history, range) {
+      const startMs = range.days ? Date.now() - range.days * 86400000 : 0;
+      const filtered = history.points.filter((point) => point.t >= startMs);
+      const points = filtered.length >= 2 ? filtered : history.points;
+      const values = points.map((point) => point.p);
+      return {
+        points,
+        markers: assetChartMarkers(item.ticker, points),
+        avgPrice: Number(item.avgPrice) || 0,
+        min: Math.min(...values),
+        max: Math.max(...values)
+      };
+    }
+
+    function assetChartMarkers(ticker, points) {
+      if (!points.length) return [];
+      const startMs = points[0].t - 43200000;
+      const endMs = points[points.length - 1].t + 86400000;
+      const byKey = new Map();
+      // Regels met prijs 0 (staking, dividend, correcties) zijn geen echte
+      // handelsmomenten en horen niet als marker op de koerslijn.
+      state.transactions
+        .filter((txItem) => txItem.ticker === ticker && Number(txItem.quantity) > 0 && Number(txItem.price) > 0)
+        .forEach((txItem) => {
+          const t = new Date(`${txItem.date}T12:00:00`).getTime();
+          if (!Number.isFinite(t) || t < startMs || t > endMs) return;
+          const key = `${txItem.date}:${txItem.side}`;
+          const row = byKey.get(key) || { date: txItem.date, side: txItem.side, t, quantity: 0, total: 0, count: 0 };
+          row.quantity += Number(txItem.quantity) || 0;
+          row.total += (Number(txItem.quantity) || 0) * (Number(txItem.price) || 0);
+          row.count += 1;
+          byKey.set(key, row);
+        });
+      return [...byKey.values()]
+        .map((row) => ({
+          ...row,
+          price: row.quantity ? row.total / row.quantity : 0,
+          index: nearestPointIndex(points, row.t)
+        }))
+        .sort((a, b) => a.t - b.t);
+    }
+
+    function nearestPointIndex(points, t) {
+      let best = 0;
+      let bestDistance = Infinity;
+      points.forEach((point, index) => {
+        const distance = Math.abs(point.t - t);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          best = index;
+        }
+      });
+      return best;
+    }
+
+    // Assetgrafiek op de generieke tijdreeks-engine: koerslijn, gemiddelde
+    // aankoopprijs en aan-/verkoopmarkers met orderdetails in de tooltip.
+    function drawAssetChart(canvas, model) {
+      const pricePoints = model.points.map((point) => ({ t: point.t, v: point.p }));
+      const markers = model.markers.map((marker) => ({
+        index: marker.index,
+        color: marker.side === "sell" ? "#d9577b" : "#1f9d77",
+        data: marker
+      }));
+      const nearest = (hover, tolerance) => {
+        if (hover === null || hover === undefined) return [];
+        const within = markers.filter((marker) => Math.abs(marker.index - hover) <= tolerance);
+        if (!within.length) return [];
+        const best = Math.min(...within.map((marker) => Math.abs(marker.index - hover)));
+        return within.filter((marker) => Math.abs(marker.index - hover) === best);
+      };
+      drawTimeChart(canvas, {
+        series: [{ points: pricePoints, color: "#137c9b", width: 2.5, fill: "rgba(19,124,155,.16)" }],
+        markers,
+        activeMarkers: nearest,
+        avgLine: model.avgPrice > 0 ? { value: model.avgPrice, label: `gem. aankoop ${currency.format(model.avgPrice)}` } : null,
+        formatValue: (value) => currency.format(value),
+        tooltip: (index, tolerance) => {
+          const point = model.points[index];
+          const orders = nearest(index, tolerance).map(({ data }) => `<div class="tooltip-order ${data.side === "sell" ? "sell" : "buy"}">
+            <strong>${data.side === "sell" ? "Verkoop" : "Aankoop"}${data.count > 1 ? ` · ${data.count} orders` : ""} · ${dateNl(data.date)}</strong>
+            <span>Aantal</span><span>${number.format(data.quantity)}</span>
+            <span>Prijs</span><span>${currency.format(data.price)}</span>
+            <span>Totaal</span><span>${currency.format(data.total)}</span>
+          </div>`).join("");
+          return `<strong>${dateNlFromMs(point.t)}</strong>${currency.format(point.p)}${orders}`;
+        },
+        emptyTitle: "Geen koershistorie",
+        emptyNote: "Voor deze periode zijn geen datapunten beschikbaar."
+      });
+    }
+
+    function updateAssetChartMeta(model, history, range, note) {
+      const target = document.getElementById("assetChartMeta");
+      if (!target) return;
+      if (!model.points || model.points.length < 2) {
+        target.innerHTML = `<span>${esc(note || "Geen koershistorie beschikbaar voor deze periode.")}</span>`;
+        return;
+      }
+      const first = model.points[0];
+      const last = model.points[model.points.length - 1];
+      const change = first.p > 0 ? (last.p - first.p) / first.p : 0;
+      const buys = model.markers.filter((marker) => marker.side !== "sell").length;
+      const sells = model.markers.filter((marker) => marker.side === "sell").length;
+      const periodLabel = range.key === "max" ? "de hele periode" : range.label;
+      const sourceLabel = history.source === "transacties"
+        ? "Bron: eigen transactieprijzen"
+        : history.cachedAt
+          ? `Bron: ${history.source} (opgehaald ${dateTimeNl(history.cachedAt)})`
+          : `Bron: ${history.source} (live)`;
+      target.innerHTML = [
+        `<span><strong class="${change >= 0 ? "gain" : "loss"}">${change >= 0 ? "+" : ""}${pct.format(change)}</strong> in ${esc(periodLabel)}</span>`,
+        `<span>Laag ${currency.format(model.min)} · hoog ${currency.format(model.max)}</span>`,
+        `<span><span class="marker-dot buy"></span>${number.format(buys)} koopmoment${buys === 1 ? "" : "en"} <span class="marker-dot sell"></span>${number.format(sells)} verkoopmoment${sells === 1 ? "" : "en"}</span>`,
+        `<span>${esc(sourceLabel)}</span>`,
+        note ? `<span>${esc(note)}</span>` : ""
+      ].filter(Boolean).join("");
+    }
+
+    function dateNlFromMs(ms) {
+      const date = new Date(ms);
+      if (Number.isNaN(date.getTime())) return "Onbekend";
+      return new Intl.DateTimeFormat("nl-NL", { day: "2-digit", month: "short", year: "numeric" }).format(date);
     }
 
     function closePositionModal() {
@@ -3240,6 +3219,7 @@
     function closeDialog(id) {
       const modal = document.getElementById(id);
       if (!modal) return;
+      hideChartTooltip();
       modal.classList.remove("open");
       if (activeModal === modal) activeModal = null;
       if (!document.querySelector(".modal.open")) {
@@ -3334,30 +3314,10 @@
       render();
     };
 
-    window.markCurrentMonthProcessed = () => {
-      const key = monthKey();
-      const ids = planDiagnostics(totals(), key).matches.map((item) => `${key}:${item.plan.id}`);
-      state.processedMonths = [...new Set([...(state.processedMonths || []), ...ids])];
-      persist();
-      render();
-    };
-
     window.removeWatchlistItem = (id) => {
       state.watchlist = (state.watchlist || []).filter((item) => item.id !== id);
       persist();
       render();
-    };
-
-    window.prefillWatchlist = (ticker, name, type, currentPrice, targetPrice, note) => {
-      switchView("watchlist");
-      const form = document.getElementById("watchlistForm");
-      form.ticker.value = ticker;
-      form.name.value = name;
-      form.type.value = type;
-      form.currentPrice.value = Number(currentPrice || 0).toFixed(4);
-      form.targetPrice.value = Number(targetPrice || 0).toFixed(4);
-      form.note.value = note || "";
-      form.ticker.focus();
     };
 
     window.removeIncomeItem = (id) => {
@@ -3366,34 +3326,8 @@
       render();
     };
 
-    window.removeSalePlan = (ticker) => {
-      delete state.salePlans[ticker];
-      persist();
-      render();
-    };
-
     window.removeAlert = (id) => {
       state.alerts = (state.alerts || []).filter((item) => item.id !== id);
-      persist();
-      render();
-    };
-
-    window.captureSnapshot = () => {
-      const total = totals();
-      state.snapshots = [...(state.snapshots || []), {
-        id: uid(),
-        date: new Date().toISOString(),
-        value: total.value,
-        cost: total.cost,
-        gain: total.gain,
-        positions: total.list.length
-      }];
-      persist();
-      render();
-    };
-
-    window.removeSnapshot = (id) => {
-      state.snapshots = (state.snapshots || []).filter((item) => item.id !== id);
       persist();
       render();
     };
@@ -3730,4 +3664,11 @@
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => drawChartsForView(activeView()), 150);
     });
+    // Startup pas ná alle declaraties, zodat let/const-bindings nooit in de
+    // temporal dead zone geraakt worden tijdens de eerste render.
+    if (applyDcaPlans()) persist();
+    if (captureDailySnapshot()) persist();
+    applySidebarState();
+    render();
+    renderDcaAssetDraft();
     document.querySelector("#dcaForm [name=startDate]").value = todayISO();

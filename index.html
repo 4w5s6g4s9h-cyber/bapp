@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://api.coingecko.com https://open.er-api.com https://query1.finance.yahoo.com https://api.allorigins.win">
   <title>Portfolio Tracker</title>
-  <link rel="stylesheet" href="css/styles.css">
+  <link rel="stylesheet" href="css/styles.css?v=8">
 </head>
 <body>
   <div class="app">
@@ -28,41 +28,17 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 13h8V3H3v10Z"/><path d="M13 21h8V3h-8v18Z"/><path d="M3 21h8v-6H3v6Z"/></svg>
           <span class="nav-label">Dashboard</span>
         </button>
-        <button class="nav-btn" data-view="positions" title="Posities">
+        <button class="nav-btn" data-view="portfolio" title="Portfolio">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5"/><path d="M4 19h16"/><path d="m7 15 4-4 3 3 5-7"/></svg>
-          <span class="nav-label">Posities</span>
-        </button>
-        <button class="nav-btn" data-view="transactions" title="Transacties">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 7h10"/><path d="M7 12h10"/><path d="M7 17h6"/><path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/></svg>
-          <span class="nav-label">Transacties</span>
+          <span class="nav-label">Portfolio</span>
         </button>
         <button class="nav-btn" data-view="analysis" title="Analyse">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-8"/><path d="M18 6h1v1"/></svg>
           <span class="nav-label">Analyse</span>
         </button>
-        <button class="nav-btn" data-view="plans" title="Plannen">
+        <button class="nav-btn" data-view="plan" title="Plan">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6h11"/><path d="M9 12h11"/><path d="M9 18h11"/><path d="M4 6h.01"/><path d="M4 12h.01"/><path d="M4 18h.01"/></svg>
-          <span class="nav-label">Plannen</span>
-        </button>
-        <button class="nav-btn" data-view="dca" title="DCA">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 1v6h6"/><path d="M23 7a10 10 0 1 0 1 7"/><path d="M12 8v5l3 2"/></svg>
-          <span class="nav-label">DCA</span>
-        </button>
-        <button class="nav-btn" data-view="watchlist" title="Watchlist">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/></svg>
-          <span class="nav-label">Watchlist</span>
-        </button>
-        <button class="nav-btn" data-view="allocation" title="Allocatie">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-9-9v9Z"/><path d="M12 3a9 9 0 0 1 9 9h-9Z"/></svg>
-          <span class="nav-label">Allocatie</span>
-        </button>
-        <button class="nav-btn" data-view="income" title="Inkomsten">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H14a3.5 3.5 0 0 1 0 7H6"/></svg>
-          <span class="nav-label">Inkomsten</span>
-        </button>
-        <button class="nav-btn" data-view="strategy" title="Strategie">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M15.09 14c.18-.98.7-1.74 1.41-2.45A6 6 0 1 0 7.5 11.55c.71.71 1.23 1.47 1.41 2.45"/></svg>
-          <span class="nav-label">Strategie</span>
+          <span class="nav-label">Plan</span>
         </button>
         <button class="nav-btn" data-view="settings" title="Instellingen">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H2.8a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V2.8a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.29.42.77.6 1.28.6h.52a2 2 0 1 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15Z"/></svg>
@@ -92,19 +68,19 @@
       <section class="content">
         <section class="view active" id="dashboard">
           <div class="metrics" id="metrics"></div>
-          <div class="status-strip" id="dashboardPriceStatus"></div>
+          <div class="status-strip" id="dashboardSignals"></div>
           <div class="dashboard-grid">
             <article class="panel dashboard-wide">
               <div class="panel-head">
                 <div>
                   <h3>Portefeuillewaarde</h3>
-                  <p>Historie inclusief ingeplande DCA-aankopen tot vandaag.</p>
+                  <p>Waarde en netto inleg door de tijd, op echte koershistorie.</p>
                 </div>
                 <div class="tabs" aria-label="Grafiek periode">
                   <button data-range="1">1M</button>
                   <button data-range="3">3M</button>
-                  <button class="active" data-range="6">6M</button>
-                  <button data-range="12">1J</button>
+                  <button data-range="6">6M</button>
+                  <button class="active" data-range="12">1J</button>
                   <button data-range="36">3J</button>
                   <button data-range="60">Alles</button>
                 </div>
@@ -124,325 +100,169 @@
                 <div class="allocation-legend" id="allocationLegend"></div>
               </div>
             </article>
-            <div class="insights" id="insights"></div>
           </div>
         </section>
 
-        <section class="view" id="positions">
-          <div class="status-strip" id="positionsPriceStatus"></div>
-          <article class="panel">
-            <div class="panel-head">
-              <div>
-                <h3>Open posities</h3>
-                <p>Aantal, gemiddelde aankoopprijs, actuele waarde en rendement.</p>
-              </div>
-            </div>
-            <div class="toolbar">
-              <label>Zoeken
-                <input id="positionSearch" placeholder="Ticker of naam">
-              </label>
-            </div>
-            <div class="chip-row" id="positionChips"></div>
-            <div class="table-wrap" id="positionsTable"></div>
-          </article>
-        </section>
+        <section class="view" id="portfolio">
+          <div class="segmented" id="portfolioSegments" role="tablist" aria-label="Portfolio onderdelen">
+            <button type="button" class="active" data-action="setPortfolioSegment" data-segment="positions">Posities</button>
+            <button type="button" data-action="setPortfolioSegment" data-segment="transactions">Transacties</button>
+            <button type="button" data-action="setPortfolioSegment" data-segment="income">Inkomsten</button>
+          </div>
 
-        <section class="view" id="transactions">
-          <article class="panel">
-            <div class="panel-head">
-              <div>
-                <h3>Transacties</h3>
-                <p>Handmatige aankopen/verkopen en automatisch gegenereerde DCA's.</p>
+          <div class="portfolio-segment" id="portfolioPositions">
+            <article class="panel">
+              <div class="toolbar">
+                <label>Zoeken
+                  <input id="positionSearch" placeholder="Ticker of naam">
+                </label>
               </div>
+              <div class="chip-row" id="positionChips"></div>
+              <div class="table-wrap" id="positionsTable"></div>
+            </article>
+          </div>
+
+          <div class="portfolio-segment" id="portfolioTransactions" hidden>
+            <article class="panel">
+              <div class="toolbar">
+                <label>Zoeken
+                  <input id="transactionSearch" placeholder="Ticker, naam of bron">
+                </label>
+                <label class="compact">Categorie
+                  <select id="transactionTypeFilter">
+                    <option value="all">Alles</option>
+                    <option value="Aandeel">Aandelen</option>
+                    <option value="ETF">ETF's</option>
+                    <option value="Crypto">Crypto</option>
+                  </select>
+                </label>
+                <label class="compact">Actie
+                  <select id="transactionSideFilter">
+                    <option value="all">Alles</option>
+                    <option value="buy">Aankopen</option>
+                    <option value="sell">Verkopen</option>
+                  </select>
+                </label>
+                <label class="compact">Groeperen
+                  <select id="transactionGroup">
+                    <option value="month">Maand</option>
+                    <option value="asset">Asset</option>
+                    <option value="source">Bron</option>
+                    <option value="none">Geen</option>
+                  </select>
+                </label>
+                <label class="compact">Aantal
+                  <select id="transactionLimit">
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                    <option value="250">250</option>
+                    <option value="all">Alles</option>
+                  </select>
+                </label>
+                <button class="ghost-btn toolbar-btn" type="button" data-action="resetTransactionFilters">Reset filters</button>
+              </div>
+              <div class="chip-row" id="transactionChips"></div>
+              <div class="table-wrap" id="transactionsTable"></div>
+            </article>
+          </div>
+
+          <div class="portfolio-segment" id="portfolioIncome" hidden>
+            <div class="grid-2">
+              <article class="panel">
+                <div class="panel-head"><div><h3>Dividend & staking</h3><p>Leg inkomsten vast voor cashflow en jaarrapportage.</p></div></div>
+                <form id="incomeForm">
+                  <div class="form-grid">
+                    <label>Datum<input name="date" type="date" required></label>
+                    <label>Ticker<input name="ticker" required placeholder="BTC"></label>
+                    <label>Type
+                      <select name="kind"><option value="dividend">Dividend</option><option value="staking">Staking</option><option value="interest">Rente</option></select>
+                    </label>
+                    <label>Bedrag EUR<input name="amount" type="number" min="0" step="0.01" required></label>
+                    <label>Belasting/fee<input name="tax" type="number" min="0" step="0.01" value="0"></label>
+                    <label>Bron<input name="source" placeholder="Broker of wallet"></label>
+                  </div>
+                  <button class="primary-btn" type="submit">Inkomst opslaan</button>
+                </form>
+              </article>
+              <article class="panel">
+                <div class="panel-head"><div><h3>Jaarrapport</h3><p>Inkomsten en gerealiseerd resultaat per jaar.</p></div></div>
+                <div class="metrics" id="incomeMetrics"></div>
+                <div class="toolbar">
+                  <label class="compact">Jaar<input id="taxYear" type="number" min="2000" max="2100"></label>
+                </div>
+                <div class="analysis-list" id="taxReport"></div>
+              </article>
             </div>
-            <div class="toolbar">
-              <label>Zoeken
-                <input id="transactionSearch" placeholder="Ticker, naam of bron">
-              </label>
-              <label class="compact">Categorie
-                <select id="transactionTypeFilter">
-                  <option value="all">Alles</option>
-                  <option value="Aandeel">Aandelen</option>
-                  <option value="ETF">ETF's</option>
-                  <option value="Crypto">Crypto</option>
-                </select>
-              </label>
-              <label class="compact">Actie
-                <select id="transactionSideFilter">
-                  <option value="all">Alles</option>
-                  <option value="buy">Aankopen</option>
-                  <option value="sell">Verkopen</option>
-                </select>
-              </label>
-              <label class="compact">Groeperen
-                <select id="transactionGroup">
-                  <option value="month">Maand</option>
-                  <option value="asset">Asset</option>
-                  <option value="source">Bron</option>
-                  <option value="none">Geen</option>
-                </select>
-              </label>
-              <label class="compact">Aantal
-                <select id="transactionLimit">
-                  <option value="50">50</option>
-                  <option value="100">100</option>
-                  <option value="250">250</option>
-                  <option value="all">Alles</option>
-                </select>
-              </label>
-              <button class="ghost-btn toolbar-btn" type="button" data-action="resetTransactionFilters">Reset filters</button>
-            </div>
-            <div class="chip-row" id="transactionChips"></div>
-            <div class="table-wrap" id="transactionsTable"></div>
-          </article>
+            <article class="panel"><div class="table-wrap" id="incomeTable"></div></article>
+          </div>
         </section>
 
         <section class="view" id="analysis">
-          <nav class="analysis-jump-nav" aria-label="Analyse onderdelen">
-            <button type="button" data-analysis-jump="analysisTop" title="Top"><span class="jump-abbr">Top</span><span class="jump-label">Topgrafieken</span></button>
-            <button type="button" data-analysis-jump="analysisSignalsGroup" title="Signalen"><span class="jump-abbr">Sig</span><span class="jump-label">Signalen</span></button>
-            <button type="button" data-analysis-jump="analysisScenarioGroup" title="Scenario's"><span class="jump-abbr">Scn</span><span class="jump-label">Scenario's</span></button>
-            <button type="button" data-analysis-jump="analysisVisualGroup" title="Visuals"><span class="jump-abbr">Viz</span><span class="jump-label">Visuals</span></button>
-            <button type="button" data-analysis-jump="analysisPlanningGroup" title="Planning"><span class="jump-abbr">Plan</span><span class="jump-label">Planning</span></button>
-          </nav>
           <div class="metrics" id="analysisMetrics"></div>
-          <div class="grid-2 analysis-grid">
-            <article class="panel analysis-wide">
-              <div class="panel-head">
-                <div>
-                  <h3>Wat nu?</h3>
-                  <p>Maximaal drie concrete acties op basis van concentratie, koersen en maandplan.</p>
-                </div>
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>Drawdown</h3>
+                <p>Daling ten opzichte van de voorgaande piek, op basis van koershistorie.</p>
               </div>
-              <div class="analysis-list action-grid" id="analysisActionList"></div>
-            </article>
-          </div>
-          <div class="grid-2 analysis-grid analysis-visual-grid" id="analysisTop">
-            <article class="panel">
-              <div class="panel-head">
-                <div>
-                  <h3>Topposities</h3>
-                  <p>Actuele waarde en weging per positie.</p>
-                </div>
-              </div>
-              <div class="chart-wrap"><canvas id="topHoldingsChart"></canvas></div>
-            </article>
-            <article class="panel">
-              <div class="panel-head">
-                <div>
-                  <h3>Categorierendement</h3>
-                  <p>Waarde, kostprijs en rendement per categorie.</p>
-                </div>
-              </div>
-              <div class="chart-wrap"><canvas id="typePerformanceChart"></canvas></div>
-            </article>
-          </div>
+            </div>
+            <div class="chart-wrap analysis-chart"><canvas id="drawdownChart"></canvas></div>
+            <div class="chart-summary" id="drawdownSummary"></div>
+          </article>
           <div class="grid-2 analysis-grid">
             <article class="panel">
               <div class="panel-head">
                 <div>
-                  <h3>Verdeling & rendement</h3>
-                  <p>Samenvatting per categorie en weging.</p>
+                  <h3>Rendement per positie</h3>
+                  <p>Bijdrage aan het totale resultaat in euro's.</p>
+                </div>
+              </div>
+              <div class="attribution-list" id="attributionList"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head">
+                <div>
+                  <h3>Categorieën</h3>
+                  <p>Waarde, weging en rendement per categorie.</p>
                 </div>
               </div>
               <div class="table-wrap compact" id="analysisTypeTable"></div>
             </article>
-            <article class="panel">
-              <div class="panel-head">
-                <div>
-                  <h3>Winnaars & verliezers</h3>
-                  <p>Grootste positieve en negatieve bijdragers.</p>
-                </div>
-              </div>
-              <div class="table-wrap compact" id="analysisMoversTable"></div>
-            </article>
           </div>
-          <div class="grid-2 analysis-grid" id="analysisSignalsGroup">
-            <article class="panel">
-              <div class="panel-head">
-                <div>
-                  <h3>Signalen</h3>
-                  <p>Alleen signalen met besluitwaarde.</p>
-                </div>
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>Correlatie</h3>
+                <p>Samenhang van dagrendementen (1 jaar) tussen je grootste posities. Laag = betere spreiding.</p>
               </div>
-              <div class="analysis-list compact-grid" id="analysisSignals"></div>
-            </article>
-            <article class="panel">
-              <div class="panel-head">
-                <div>
-                  <h3>Koerskwaliteit</h3>
-                  <p>Live, handmatig, oud en ontbrekend.</p>
-                </div>
-              </div>
-              <div class="analysis-list compact-grid" id="analysisPriceQuality"></div>
-            </article>
-            <article class="panel">
-              <div class="panel-head">
-                <div>
-                  <h3>Transactie-analyse</h3>
-                  <p>Koopgedrag en datakwaliteit.</p>
-                </div>
-              </div>
-              <div class="table-wrap compact" id="analysisTransactionTable"></div>
-            </article>
-            <article class="panel">
-              <div class="panel-head">
-                <div>
-                  <h3>Concentratie-impact</h3>
-                  <p>Wat een daling in topposities met de hele portefeuille doet.</p>
-                </div>
-              </div>
-              <div class="analysis-list" id="analysisImpactList"></div>
-            </article>
-          </div>
-          <div class="grid-2 analysis-grid" id="analysisScenarioGroup">
-            <article class="panel analysis-wide">
-              <div class="panel-head">
-                <div>
-                  <h3>Scenario's</h3>
-                  <p>Projecties zonder rendementsaanname.</p>
-                </div>
-              </div>
-              <div class="analysis-list" id="scenarioCards"></div>
-            </article>
-          </div>
-          <div class="grid-2 analysis-grid analysis-visual-grid" id="analysisVisualGroup">
-            <article class="panel">
-              <div class="panel-head">
-                <div>
-                  <h3>Asset scatter</h3>
-                  <p>Grote posities gelabeld; kleine posities als dots.</p>
-                </div>
-              </div>
-              <div class="scatter-wrap" id="analysisScatter"></div>
-            </article>
-            <article class="panel">
-              <div class="panel-head">
-                <div>
-                  <h3>DCA impact</h3>
-                  <p>Live projectie met inleg en rendement.</p>
-                </div>
-              </div>
-              <div class="analysis-sim" id="analysisDcaSimulator"></div>
-            </article>
-          </div>
-          <div class="grid-2 analysis-grid" id="analysisPlanningGroup">
-            <article class="panel">
-              <div class="panel-head">
-                <div>
-                  <h3>DCA plancheck</h3>
-                  <p>Gepland versus werkelijk gekocht, plus maandbedrag.</p>
-                </div>
-              </div>
-              <div class="stat-grid compact-stat-grid" id="analysisDcaPlanCheck"></div>
-              <div class="timeline-bars" id="analysisTimeline"></div>
-            </article>
-            <article class="panel">
-              <div class="panel-head">
-                <div>
-                  <h3>Rebalance planner</h3>
-                  <p>Nieuwe inleg verdeeld naar onderweging.</p>
-                </div>
-              </div>
-              <div class="rebalance-visual" id="analysisRebalancePlanner"></div>
-            </article>
-          </div>
-          <div class="grid-2 analysis-grid">
-            <article class="panel analysis-wide">
-              <div class="panel-head">
-                <div>
-                  <h3>Movers perspectief</h3>
-                  <p>Wissel tussen winst, rendement, weging en volume.</p>
-                </div>
-                <div class="tabs compact-tabs" id="analysisMoverTabs">
-                  <button type="button" data-mover-mode="gain">€</button>
-                  <button type="button" data-mover-mode="pct">%</button>
-                  <button type="button" data-mover-mode="weight">Weging</button>
-                  <button type="button" data-mover-mode="volume">Volume</button>
-                </div>
-              </div>
-              <div class="mover-grid" id="analysisMoverPerspective"></div>
-            </article>
-          </div>
+            </div>
+            <div class="correlation-wrap" id="correlationMatrix"></div>
+          </article>
         </section>
 
-        <section class="view" id="plans">
-          <div class="metrics" id="planMetrics"></div>
-          <div class="plan-grid">
-            <article class="panel">
-              <div class="panel-head">
-                <div>
-                  <h3>Maandplan</h3>
-                  <p>Gepland, werkelijk gekocht en status per aankoopplan.</p>
-                </div>
-                <button class="ghost-btn" type="button" data-action="markCurrentMonthProcessed">Markeer maand als verwerkt</button>
+        <section class="view" id="plan">
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>Doelplanner</h3>
+                <p>Monte-Carlo-simulatie op je eigen rendementshistorie: geen voorspelling, wel een eerlijke bandbreedte.</p>
               </div>
-              <div class="monthly-plan-grid" id="monthlyPlanCards"></div>
-            </article>
-            <article class="panel">
-              <div class="panel-head">
-                <div>
-                  <h3>Focus</h3>
-                  <p>Belangrijkste aandachtspunten voor deze maand.</p>
-                </div>
-              </div>
-              <div class="analysis-list" id="shortTermPlan"></div>
-            </article>
-          </div>
-          <div class="grid-2 analysis-grid">
-            <article class="panel">
-              <div class="panel-head">
-                <div>
-                  <h3>Risico</h3>
-                  <p>Concentratie, crypto-weging en koersleeftijd.</p>
-                </div>
-              </div>
-              <div class="analysis-list" id="riskScoreCards"></div>
-            </article>
-            <article class="panel">
-              <div class="panel-head">
-                <div>
-                  <h3>Lange termijn</h3>
-                  <p>Projectie en spreidingsadvies.</p>
-                </div>
-              </div>
-              <div class="analysis-list" id="longTermPlan"></div>
-            </article>
-          </div>
-          <div class="grid-2 analysis-grid">
-            <article class="panel">
-              <div class="panel-head">
-                <div>
-                  <h3>Scenario simulator</h3>
-                  <p>Pas inleg en rendement aan voor doelprojecties.</p>
-                </div>
-              </div>
-              <div class="simulator-grid">
-                <label>Maandinleg
-                  <input id="simMonthly" type="number" min="0" step="50">
-                </label>
-                <label>Jaarlijks rendement %
-                  <input id="simReturn" type="number" step="0.5">
-                </label>
-                <label>Doelwaarde
-                  <input id="simGoal" type="number" min="0" step="1000">
-                </label>
-              </div>
-              <div class="analysis-list" id="scenarioSimulator"></div>
-            </article>
-            <article class="panel">
-              <div class="panel-head">
-                <div>
-                  <h3>Rebalance voorstel</h3>
-                  <p>Nieuwe inleg sturen naar onderwogen categorieën zonder verkoop.</p>
-                </div>
-              </div>
-              <div class="analysis-list" id="rebalancePlan"></div>
-            </article>
-          </div>
-        </section>
+            </div>
+            <div class="simulator-grid">
+              <label>Maandinleg
+                <input id="mcMonthly" type="number" min="0" step="50">
+              </label>
+              <label>Doelbedrag
+                <input id="mcGoal" type="number" min="0" step="1000">
+              </label>
+              <label>Horizon (jaren)
+                <input id="mcYears" type="number" min="1" max="30" step="1">
+              </label>
+            </div>
+            <div class="chart-wrap"><canvas id="mcChart"></canvas></div>
+            <div class="chart-summary" id="mcSummary"></div>
+          </article>
 
-        <section class="view" id="dca">
           <div class="grid-2">
             <article class="panel">
               <div class="panel-head">
@@ -503,26 +323,23 @@
             </article>
             <div class="cards" id="dcaCards"></div>
           </div>
-          <details class="panel collapsible-panel">
-            <summary class="panel-head">
-              <div>
-                <h3>DCA-suggesties</h3>
-                <p>Suggesties op basis van concentratie, categoriegewicht en bestaande inleg.</p>
-              </div>
-            </summary>
-            <div class="recommendation-grid" id="dcaSuggestions"></div>
-          </details>
-        </section>
 
-        <section class="view" id="watchlist">
           <div class="grid-2">
             <article class="panel">
-              <div class="panel-head">
-                <div>
-                  <h3>Watchlist</h3>
-                  <p>Kandidaten, koopzones en alerts buiten je huidige posities.</p>
+              <div class="panel-head"><div><h3>Doelallocatie</h3><p>Gewenste weging per categorie; nieuwe inleg stuurt bij zonder verkoop.</p></div></div>
+              <form id="allocationForm">
+                <div class="form-grid">
+                  <label>ETF %<input name="ETF" type="number" min="0" max="100" step="1"></label>
+                  <label>Aandelen %<input name="Aandeel" type="number" min="0" max="100" step="1"></label>
+                  <label>Crypto %<input name="Crypto" type="number" min="0" max="100" step="1"></label>
+                  <label>Cash/Gemengd %<input name="Gemengd" type="number" min="0" max="100" step="1"></label>
                 </div>
-              </div>
+                <button class="primary-btn" type="submit">Doelen opslaan</button>
+              </form>
+              <div class="allocation-plan" id="planAllocation"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head"><div><h3>Watchlist</h3><p>Kandidaten en koopzones buiten je huidige posities.</p></div></div>
               <form id="watchlistForm">
                 <div class="form-grid">
                   <label>Ticker<input name="ticker" required placeholder="ASML"></label>
@@ -536,115 +353,13 @@
                 </div>
                 <button class="primary-btn" type="submit">Toevoegen</button>
               </form>
-            </article>
-            <article class="panel">
-              <div class="panel-head"><div><h3>Watchlist-signalen</h3><p>Items rond of onder koopdoel springen eruit.</p></div></div>
-              <div class="analysis-list" id="watchlistSignals"></div>
+              <div class="table-wrap" id="watchlistTable"></div>
             </article>
           </div>
-          <article class="panel">
-            <div class="panel-head"><div><h3>Suggesties uit portfolio</h3><p>Volg bestaande posities met een praktisch koopdoel.</p></div></div>
-            <div class="recommendation-grid" id="watchlistSuggestions"></div>
-          </article>
-          <article class="panel">
-            <div class="table-wrap" id="watchlistTable"></div>
-          </article>
-        </section>
 
-        <section class="view" id="allocation">
-          <div class="metrics" id="allocationMetrics"></div>
           <div class="grid-2">
             <article class="panel">
-              <div class="panel-head"><div><h3>Doelallocatie</h3><p>Stel gewenste weging per categorie in.</p></div></div>
-              <form id="allocationForm">
-                <div class="form-grid">
-                  <label>ETF %<input name="ETF" type="number" min="0" max="100" step="1"></label>
-                  <label>Aandelen %<input name="Aandeel" type="number" min="0" max="100" step="1"></label>
-                  <label>Crypto %<input name="Crypto" type="number" min="0" max="100" step="1"></label>
-                  <label>Cash/Gemengd %<input name="Gemengd" type="number" min="0" max="100" step="1"></label>
-                </div>
-                <button class="primary-btn" type="submit">Doelen opslaan</button>
-              </form>
-            </article>
-            <article class="panel">
-              <div class="panel-head"><div><h3>Rebalance-alerts</h3><p>Waar nieuwe inleg het meeste effect heeft.</p></div></div>
-              <div class="analysis-list" id="allocationSignals"></div>
-            </article>
-          </div>
-          <article class="panel">
-            <div class="table-wrap" id="allocationTable"></div>
-          </article>
-        </section>
-
-        <section class="view" id="income">
-          <div class="grid-2">
-            <article class="panel">
-              <div class="panel-head"><div><h3>Dividend & staking</h3><p>Leg inkomsten vast voor cashflow en jaarrapportage.</p></div></div>
-              <form id="incomeForm">
-                <div class="form-grid">
-                  <label>Datum<input name="date" type="date" required></label>
-                  <label>Ticker<input name="ticker" required placeholder="BTC"></label>
-                  <label>Type
-                    <select name="kind"><option value="dividend">Dividend</option><option value="staking">Staking</option><option value="interest">Rente</option></select>
-                  </label>
-                  <label>Bedrag EUR<input name="amount" type="number" min="0" step="0.01" required></label>
-                  <label>Belasting/fee<input name="tax" type="number" min="0" step="0.01" value="0"></label>
-                  <label>Bron<input name="source" placeholder="Broker of wallet"></label>
-                </div>
-                <button class="primary-btn" type="submit">Inkomst opslaan</button>
-              </form>
-            </article>
-            <article class="panel">
-              <div class="panel-head"><div><h3>Inkomstenoverzicht</h3><p>Jaar, maandgemiddelde en netto totaal.</p></div></div>
-              <div class="metrics" id="incomeMetrics"></div>
-            </article>
-          </div>
-          <article class="panel"><div class="table-wrap" id="incomeTable"></div></article>
-          <article class="panel">
-            <div class="panel-head"><div><h3>Belastingrapport</h3><p>Praktische jaar-export op basis van lokale data.</p></div></div>
-            <div class="toolbar">
-              <label class="compact">Jaar<input id="taxYear" type="number" min="2000" max="2100"></label>
-            </div>
-            <div class="analysis-list" id="taxReport"></div>
-          </article>
-        </section>
-
-        <section class="view" id="strategy">
-          <div class="grid-2">
-            <article class="panel">
-              <div class="panel-head"><div><h3>Tags & thesis</h3><p>Label posities per strategie, thema of risicoklasse.</p></div></div>
-              <form id="tagForm">
-                <div class="form-grid">
-                  <label>Ticker<input name="ticker" required placeholder="VWCE"></label>
-                  <label>Tags<input name="tags" placeholder="core, long-term"></label>
-                  <label>Thesis<input name="thesis" placeholder="Waarom bezit ik dit?"></label>
-                  <label>Risico<input name="risk" placeholder="Wat kan fout gaan?"></label>
-                </div>
-                <button class="primary-btn" type="submit">Strategie opslaan</button>
-              </form>
-            </article>
-            <article class="panel">
-              <div class="panel-head"><div><h3>Verkoopplanning</h3><p>Doelprijs, stop-loss en beslissing vooraf vastleggen.</p></div></div>
-              <form id="salePlanForm">
-                <div class="form-grid">
-                  <label>Ticker<input name="ticker" required placeholder="TSLA"></label>
-                  <label>Doelprijs<input name="targetPrice" type="number" min="0" step="any"></label>
-                  <label>Stop-loss<input name="stopPrice" type="number" min="0" step="any"></label>
-                  <label>Plan<input name="note" placeholder="Wanneer verkoop ik?"></label>
-                </div>
-                <button class="primary-btn" type="submit">Plan opslaan</button>
-              </form>
-            </article>
-          </div>
-          <div class="grid-2">
-            <article class="panel"><div class="table-wrap" id="strategyTable"></div></article>
-            <article class="panel"><div class="table-wrap" id="salePlanTable"></div></article>
-          </div>
-          <div class="grid-2">
-            <article class="panel">
-              <div class="panel-head">
-                <div><h3>Koersalerts</h3><p>Visuele meldingen bij grenzen.</p></div>
-              </div>
+              <div class="panel-head"><div><h3>Koersalerts</h3><p>Melding wanneer een koers een grens raakt.</p></div></div>
               <form id="alertForm">
                 <div class="form-grid">
                   <label>Ticker<input name="ticker" required placeholder="BTC"></label>
@@ -654,17 +369,11 @@
                 </div>
                 <button class="primary-btn" type="submit">Alert opslaan</button>
               </form>
+              <div class="table-wrap" id="alertTable"></div>
             </article>
-            <article class="panel"><div class="analysis-list" id="alertSignals"></div></article>
-          </div>
-          <div class="grid-2">
-            <article class="panel"><div class="table-wrap" id="alertTable"></div></article>
             <article class="panel">
-              <div class="panel-head">
-                <div><h3>Snapshots</h3><p>Bewaar waardemomenten voor betrouwbaardere historie.</p></div>
-                <button class="ghost-btn" type="button" data-action="captureSnapshot">Snapshot maken</button>
-              </div>
-              <div class="table-wrap" id="snapshotTable"></div>
+              <div class="panel-head"><div><h3>Signalen</h3><p>Geraakte alerts, koopzones en verkoopdoelen.</p></div></div>
+              <div class="analysis-list" id="planSignals"></div>
             </article>
           </div>
         </section>
@@ -701,29 +410,16 @@
             </article>
             <article class="panel settings-card">
               <h3>Opslag & privacy</h3>
-              <p>Data wordt lokaal in je browser opgeslagen. Gebruik export/import voor een back-up of om tussen apparaten te wisselen.</p>
+              <p>Data wordt lokaal in je browser opgeslagen. Gebruik export/import voor een back-up. Start de app via <code>start-app.command</code> in de projectmap zodat live koersen werken.</p>
             </article>
             <article class="panel settings-card">
               <h3>Gemiddelde aankoopkoersen</h3>
               <p>Gebruik positie-detail om gemiddelde aankoopkoersen te corrigeren wanneer een broker-export ze betrouwbaarder bevat dan de transactiereconstructie.</p>
               <div class="empty" id="avgOverrideSummary"></div>
             </article>
-            <article class="panel settings-card">
-              <h3>Suggesties</h3>
-              <p>Dividend- en stakingoverzicht, belastingrapport per jaar, doelallocatie met rebalance-alerts, automatische koersimport, broker-specifieke CSV-imports, en notificaties wanneer DCA's afwijken van je planning.</p>
-            </article>
-            <article class="panel settings-card">
-              <h3>Toolbox roadmap</h3>
-              <div class="stat-list">
-                <div class="stat-row"><strong>Rebalance tool</strong><span class="stat-value">hoog</span><span class="muted">Doelallocatie instellen en berekenen wat je met nieuwe DCA moet bijkopen.</span></div>
-                <div class="stat-row"><strong>Belastingrapport</strong><span class="stat-value">hoog</span><span class="muted">Jaaroverzicht met waarde, transacties, staking en gerealiseerd resultaat.</span></div>
-                <div class="stat-row"><strong>Prijsmonitor</strong><span class="stat-value">midden</span><span class="muted">Koersen verversen, bronleeftijd tonen en afwijkingen markeren.</span></div>
-                <div class="stat-row"><strong>Risicoscore</strong><span class="stat-value">midden</span><span class="muted">Concentratie, crypto-weging, volatiliteit en cashbuffer combineren tot score.</span></div>
-              </div>
-            </article>
             <article class="panel settings-card full-card">
               <h3>Controle</h3>
-              <p>Datakwaliteit, importbronnen en correctieregels staan hier bij je instellingen.</p>
+              <p>Datakwaliteit, importbronnen en correctieregels.</p>
               <div class="metrics" id="auditMetrics"></div>
               <div class="grid-2 analysis-grid">
                 <div class="table-wrap compact" id="auditSourcesTable"></div>
@@ -753,7 +449,7 @@
   </div>
 
   <div class="modal" id="positionModal" role="dialog" aria-modal="true" aria-labelledby="positionTitle">
-    <div class="dialog">
+    <div class="dialog dialog-wide">
       <div class="dialog-title">
         <h3 id="positionTitle">Positie</h3>
         <button class="icon-btn" id="closePositionModal" title="Sluiten">
@@ -814,7 +510,7 @@
   <input id="fileInput" type="file" accept=".json,application/json" hidden>
   <input id="priceFileInput" type="file" accept=".csv,.txt" hidden>
 
-  <script src="js/portfolioMath.js" defer></script>
-  <script src="js/tracker.js" defer></script>
+  <script src="js/portfolioMath.js?v=8" defer></script>
+  <script src="js/tracker.js?v=8" defer></script>
 </body>
 </html>

@@ -219,4 +219,79 @@ assert.notEqual(
   Number(screenshotTotal.list.find((item) => item.ticker === "CR1").value.toFixed(2))
 );
 
+// ---- Rendement- en risicostatistiek ----
+
+const { xirr, timeWeightedReturn, maxDrawdown, monthlyReturns, stdev, correlation, quantile, monteCarloProjection } = PortfolioMath;
+
+// XIRR: -1000 nu, +1100 na precies één jaar = ~10% per jaar.
+const xirrResult = xirr([
+  { date: "2024-01-01", amount: -1000 },
+  { date: "2025-01-01", amount: 1100 }
+]);
+assert.ok(Math.abs(xirrResult - 0.1) < 0.005, `xirr verwacht ~0.10, kreeg ${xirrResult}`);
+assert.equal(xirr([{ date: "2024-01-01", amount: -1000 }]), null);
+assert.equal(xirr([{ date: "2024-01-01", amount: 1000 }, { date: "2025-01-01", amount: 1100 }]), null);
+
+// TWR filtert stortingen uit: 100 -> 110 (10%), dan +90 storting, 200 -> 220 markt (=130 na flow-correctie: (220-90)/110).
+const twr = timeWeightedReturn([
+  { value: 100, invested: 100 },
+  { value: 110, invested: 100 },
+  { value: 220, invested: 190 }
+]);
+assert.ok(Math.abs(twr - 0.3) < 1e-9, `twr verwacht 0.30, kreeg ${twr}`);
+
+// Max drawdown: 100 -> 120 -> 60 -> 90 = -50% vanaf piek 120.
+const dd = maxDrawdown([100, 120, 60, 90]);
+assert.ok(Math.abs(dd.drawdown + 0.5) < 1e-9);
+assert.equal(dd.peakIndex, 1);
+assert.equal(dd.troughIndex, 2);
+
+// Maandrendementen met flow-correctie.
+const returns = monthlyReturns([
+  { date: "2024-01-31", value: 100, invested: 100 },
+  { date: "2024-02-29", value: 110, invested: 100 },
+  { date: "2024-03-31", value: 220, invested: 190 }
+]);
+assert.equal(returns.length, 2);
+assert.ok(Math.abs(returns[0] - 0.1) < 1e-9);
+assert.ok(Math.abs(returns[1] - (130 / 110 - 1)) < 1e-9);
+
+assert.ok(Math.abs(stdev([1, 2, 3, 4]) - Math.sqrt(5 / 3)) < 1e-9);
+assert.ok(Math.abs(correlation([1, 2, 3, 4], [2, 4, 6, 8]) - 1) < 1e-9);
+assert.ok(Math.abs(correlation([1, 2, 3, 4], [8, 6, 4, 2]) + 1) < 1e-9);
+assert.equal(quantile([1, 2, 3, 4, 5], 0.5), 3);
+assert.equal(quantile([1, 2, 3, 4], 0.5), 2.5);
+
+// Monte Carlo: deterministisch met vaste RNG; kwantielen geordend en groei plausibel.
+let seed = 42;
+const fixedRandom = () => {
+  seed = (seed * 1103515245 + 12345) % 2147483648;
+  return seed / 2147483648;
+};
+const projection = monteCarloProjection({
+  startValue: 1000,
+  monthly: 100,
+  months: 24,
+  mu: 0.06,
+  sigma: 0.15,
+  runs: 200,
+  random: fixedRandom
+});
+assert.equal(projection.p50.length, 24);
+assert.equal(projection.method, "normaal");
+const last = projection.p50.length - 1;
+assert.ok(projection.p10[last] <= projection.p50[last] && projection.p50[last] <= projection.p90[last]);
+assert.ok(projection.p50[last] > 1000 + 100 * 12, "mediaan hoort boven ruwweg de helft van de inleg te groeien");
+
+// Bootstrap-modus met 24+ samples.
+const bootstrap = monteCarloProjection({
+  startValue: 1000,
+  monthly: 0,
+  months: 12,
+  samples: Array.from({ length: 30 }, (_, index) => (index % 2 === 0 ? 0.01 : -0.005)),
+  runs: 50,
+  random: fixedRandom
+});
+assert.equal(bootstrap.method, "bootstrap");
+
 console.log("portfolioMath tests passed");
