@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vermogen — Beleggingen Tracker</title>
+<meta name="theme-color" content="#0a0c14">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css?v=11">
+</head>
+<body>
+
+<div class="app">
+  <!-- ============ SIDEBAR ============ -->
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-mark">◈</div>
+      <div class="logo-text">Vermogen<span>.</span></div>
+    </div>
+
+    <nav class="nav">
+      <button class="nav-item active" data-view="dashboard">
+        <span class="nav-icon">▦</span> Dashboard
+      </button>
+      <button class="nav-item" data-view="asset">
+        <span class="nav-icon">◉</span> Asset&nbsp;Analyse
+      </button>
+      <button class="nav-item" data-view="mllab">
+        <span class="nav-icon">⚛</span> ML&nbsp;Lab
+      </button>
+      <button class="nav-item" data-view="backtest">
+        <span class="nav-icon">▶</span> Backtest
+      </button>
+      <button class="nav-item" data-view="dca">
+        <span class="nav-icon">⟳</span> DCA-plannen
+      </button>
+      <button class="nav-item" data-view="insights">
+        <span class="nav-icon">◔</span> Inzichten
+      </button>
+      <button class="nav-item" data-view="transactions">
+        <span class="nav-icon">⇄</span> Transacties
+      </button>
+      <button class="nav-item" data-view="settings">
+        <span class="nav-icon">⚙</span> Instellingen&nbsp;<span class="alert-dot" id="alert-dot" style="display:none"></span>
+      </button>
+    </nav>
+
+    <div class="sidebar-footer">
+      <button class="palette-hint" id="palette-open">⌘K <span>zoeken &amp; acties</span></button>
+      <div class="ai-status">
+        <div class="pulse-dot"></div>
+        <div>
+          <div class="ai-status-title">AI-model</div>
+          <div class="ai-status-sub" id="ai-status-text">stand-by</div>
+        </div>
+      </div>
+      <div class="demo-note" id="mode-note">Lokale data · niets verlaat je browser</div>
+    </div>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <main class="main">
+
+    <!-- lege staat: nog geen data geïmporteerd -->
+    <div id="empty-overlay" style="display:none">
+      <div class="empty-card">
+        <div class="empty-icon">◈</div>
+        <h2>Welkom bij Vermogen.</h2>
+        <p>Er staat nog geen data in de app. Importeer je portfolio-JSON om te beginnen — alles blijft lokaal in je browser (localStorage), er gaat niets naar een server.</p>
+        <button class="btn btn-primary" id="empty-import">⬆ Importeer portfolio-JSON</button>
+        <p class="empty-hint">Je kunt het bestand ook hierheen slepen.</p>
+      </div>
+    </div>
+
+    <!-- ===== DASHBOARD ===== -->
+    <section class="view active" id="view-dashboard">
+      <header class="view-header">
+        <div>
+          <h1>Goedendag 👋 <span class="tag tag-live" id="live-badge" style="display:none">● live koersen</span> <span class="tag tag-alert" id="alert-chip" style="display:none"></span></h1>
+          <p class="subtitle" id="today-date"></p>
+        </div>
+        <button class="btn btn-primary" id="btn-new-tx">+ Nieuwe transactie</button>
+      </header>
+
+      <div class="kpi-grid">
+        <div class="kpi-card kpi-hero">
+          <div class="kpi-label">Totale portefeuillewaarde</div>
+          <div class="kpi-value" id="kpi-total">€ 0</div>
+          <div class="kpi-delta" id="kpi-total-delta"></div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Vandaag</div>
+          <div class="kpi-value sm" id="kpi-day"></div>
+          <div class="kpi-delta" id="kpi-day-pct"></div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Totaal rendement</div>
+          <div class="kpi-value sm" id="kpi-return"></div>
+          <div class="kpi-delta" id="kpi-return-pct"></div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Geïnvesteerd</div>
+          <div class="kpi-value sm" id="kpi-invested"></div>
+          <div class="kpi-delta muted" id="kpi-positions"></div>
+        </div>
+      </div>
+
+      <div class="grid-2-1">
+        <div class="card">
+          <div class="card-head">
+            <h2>Portefeuille-ontwikkeling</h2>
+            <div class="head-controls">
+              <button class="btn btn-ghost btn-xs" id="btn-benchmark">⚖ vs. VWCE</button>
+              <div class="segmented" id="tf-selector">
+                <button data-days="7">1W</button>
+                <button data-days="30">1M</button>
+                <button data-days="91">3M</button>
+                <button data-days="182" class="active">6M</button>
+                <button data-days="365">1J</button>
+                <button data-days="0">Alles</button>
+              </div>
+            </div>
+          </div>
+          <div class="chart-holder" id="portfolio-chart"></div>
+          <div class="brush-holder" id="portfolio-brush" title="Sleep het venster om te zoomen/pannen"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>Allocatie</h2></div>
+          <div id="allocation-donut" class="donut-holder"></div>
+          <div id="allocation-legend" class="donut-legend"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Posities</h2>
+          <span class="hint">klik op een rij voor AI-analyse →</span>
+        </div>
+        <div class="table-wrap">
+          <table class="holdings-table" id="holdings-table">
+            <thead>
+              <tr id="holdings-head">
+                <th class="sortable" data-sort="name">Asset</th><th class="sortable" data-sort="price">Koers</th><th class="sortable" data-sort="day">24u</th><th class="sortable" data-sort="qty">Aantal</th>
+                <th class="sortable" data-sort="value">Waarde</th><th class="sortable" data-sort="gainPct">Rendement</th><th>7 dagen</th><th class="sortable" data-sort="signal">AI-signaal</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Watchlist</h2>
+          <div class="head-controls watch-search-wrap">
+            <input type="text" id="watch-search" class="input" placeholder="🔎 Zoek asset… (naam of ticker, bv. 'philips' of NKE)" autocomplete="off" style="min-width:320px">
+            <div id="watch-suggest" class="suggest-box" style="display:none"></div>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="holdings-table" id="watch-table">
+            <thead>
+              <tr><th>Asset</th><th>Koers</th><th>24u</th><th>30 dagen</th><th>90 dagen</th><th>AI-signaal</th><th></th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="explain" id="watch-empty" style="display:none">Nog leeg — kies hierboven een asset om te volgen zonder te kopen. Handig voor posities die je hebt verkocht of overweegt.</p>
+      </div>
+    </section>
+
+    <!-- ===== ASSET ANALYSE ===== -->
+    <section class="view" id="view-asset">
+      <header class="view-header">
+        <div>
+          <h1 id="asset-title">Asset Analyse</h1>
+          <p class="subtitle" id="asset-subtitle"></p>
+        </div>
+        <select id="asset-select" class="select"></select>
+      </header>
+
+      <div class="kpi-grid four">
+        <div class="kpi-card"><div class="kpi-label">Koers</div><div class="kpi-value sm" id="a-price"></div><div class="kpi-delta" id="a-day"></div></div>
+        <div class="kpi-card"><div class="kpi-label">Volatiliteit (1j)</div><div class="kpi-value sm" id="a-vol"></div><div class="kpi-delta muted">geannualiseerd</div></div>
+        <div class="kpi-card"><div class="kpi-label">RSI (14)</div><div class="kpi-value sm" id="a-rsi"></div><div class="kpi-delta" id="a-rsi-label"></div></div>
+        <div class="kpi-card signal-card"><div class="kpi-label">AI-signaal</div><div class="kpi-value sm" id="a-signal"></div><div class="kpi-delta" id="a-signal-conf"></div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Koers &amp; AI-voorspelling <span class="tag tag-ai">neuraal netwerk</span></h2>
+          <div class="head-controls">
+            <div class="segmented" id="chart-mode">
+              <button data-mode="line" class="active">Lijn</button>
+              <button data-mode="candles">Candles</button>
+              <button data-mode="compare">Vergelijk</button>
+            </div>
+            <button class="btn btn-ghost btn-xs" id="btn-retrain">↻ Hertrain</button>
+          </div>
+        </div>
+        <div class="compare-chips" id="compare-chips" style="display:none"></div>
+        <div class="chart-holder tall" id="asset-chart"></div>
+        <div class="forecast-note" id="forecast-note"></div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head"><h2>RSI (14)</h2></div>
+          <div class="chart-holder short" id="rsi-chart"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>MACD</h2></div>
+          <div class="chart-holder short" id="macd-chart"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== ML LAB ===== -->
+    <section class="view" id="view-mllab">
+      <header class="view-header">
+        <div>
+          <h1>ML Lab <span class="tag tag-ai">live in je browser</span></h1>
+          <p class="subtitle">Een echt neuraal netwerk met backpropagation — geen API, alles draait lokaal.</p>
+        </div>
+      </header>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head">
+            <h2>Neuraal netwerk — training</h2>
+            <button class="btn btn-primary" id="btn-train">▶ Start training</button>
+          </div>
+          <div class="nn-meta">
+            <div><span class="nn-meta-label">Architectuur</span><span class="mono">20 → 24 → 12 → 1</span></div>
+            <div><span class="nn-meta-label">Epoch</span><span class="mono" id="nn-epoch">0 / 150</span></div>
+            <div><span class="nn-meta-label">Loss (MSE)</span><span class="mono" id="nn-loss">—</span></div>
+            <div><span class="nn-meta-label">Dataset</span><span class="mono" id="nn-samples">—</span></div>
+          </div>
+          <div class="chart-holder short" id="loss-chart"></div>
+          <p class="explain">Het netwerk leert het rendement van morgen te voorspellen op basis van de laatste 20 dagrendementen van <b id="nn-asset-name">—</b>. Je ziet de verliesfunctie live dalen tijdens het trainen.</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>Netwerk-visualisatie</h2></div>
+          <div id="nn-viz" class="nn-viz-holder"></div>
+          <p class="explain">Lijndikte = gewichtsterkte, kleur = teken (groen positief, rood negatief). De gewichten updaten live tijdens het trainen.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Model-arena <span class="tag tag-ai">walk-forward validatie</span></h2>
+          <button class="btn btn-primary" id="btn-arena">⚔ Vergelijk modellen</button>
+        </div>
+        <p class="explain" style="margin-top:0">Drie voorspellers strijden op data die ze nooit gezien hebben: getraind op de eerste 80% van <b id="arena-asset-name">—</b>, beoordeeld op de laatste 20%. Zo zie je eerlijk of het neurale netwerk het simpele model verslaat.</p>
+        <div id="arena-results" class="arena-results"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Monte Carlo — vermogensprojectie</h2>
+          <span class="hint" id="mc-meta"></span>
+        </div>
+        <div class="mc-controls">
+          <div class="control">
+            <label>Horizon: <b id="mc-years-label">10 jaar</b></label>
+            <input type="range" id="mc-years" min="1" max="30" value="10">
+          </div>
+          <div class="control">
+            <label>Maandelijkse inleg: <b id="mc-monthly-label">€ 250</b></label>
+            <input type="range" id="mc-monthly" min="0" max="2000" step="50" value="250">
+          </div>
+          <div class="control">
+            <label>Simulaties: <b id="mc-sims-label">500</b></label>
+            <input type="range" id="mc-sims" min="100" max="2000" step="100" value="500">
+          </div>
+        </div>
+        <div class="chart-holder tall"><canvas id="mc-canvas"></canvas></div>
+        <div class="mc-results" id="mc-results"></div>
+      </div>
+    </section>
+
+    <!-- ===== BACKTEST ===== -->
+    <section class="view" id="view-backtest">
+      <header class="view-header">
+        <div>
+          <h1>Backtest <span class="tag tag-ai">AI-signaal vs. de markt</span></h1>
+          <p class="subtitle">Had het AI-signaal je geld opgeleverd? Getest over 2 jaar historie, zonder look-ahead, met 0,15% transactiekosten.</p>
+        </div>
+        <div class="head-controls">
+          <select id="bt-asset" class="select"></select>
+          <button class="btn btn-ghost" id="bt-tune">🎯 Auto-tune</button>
+          <button class="btn btn-primary" id="bt-play">▶ Afspelen</button>
+        </div>
+      </header>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Equity-curve (start = 100)</h2>
+          <div class="control" style="min-width:230px">
+            <label>Signaaldrempel: <b id="bt-threshold-label">0,05</b></label>
+            <input type="range" id="bt-threshold" min="-0.2" max="0.35" step="0.01" value="0.05">
+          </div>
+        </div>
+        <div class="chart-holder tall"><canvas id="bt-canvas"></canvas></div>
+        <p class="explain">▲▼ = in-/uitstapmomenten van de klassieke strategie. <b>Klassiek</b> springt in/uit op één drempel; <b>Hysterese</b> gebruikt een dode zone (instappen boven drempel + 0,10, uitstappen onder drempel − 0,10) tegen heen-en-weer gehandel; <b>Trend + vol-target</b> is alleen long in een opwaartse trend (SMA50 &gt; SMA200) en verkleint de positie als de volatiliteit oploopt. Verschuif de drempel om te zien hoe gevoelig de resultaten zijn — dat is meteen een les in overfitting.</p>
+      </div>
+
+      <div id="bt-tune-result"></div>
+
+      <div class="card">
+        <div class="card-head"><h2>Resultaten</h2></div>
+        <div class="table-wrap">
+          <table class="holdings-table" id="bt-metrics">
+            <thead>
+              <tr><th>Strategie</th><th>Rendement</th><th>vs. B&amp;H</th><th>Max. DD</th><th>Sharpe</th><th>Trades</th><th>Win-rate</th><th>In de markt</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Oordeel</h2></div>
+        <div id="bt-verdict" class="ai-insights"></div>
+      </div>
+    </section>
+
+    <!-- ===== INZICHTEN ===== -->
+    <section class="view" id="view-insights">
+      <header class="view-header">
+        <div>
+          <h1>Inzichten</h1>
+          <p class="subtitle">Risico- en prestatie-analyse van je portefeuille</p>
+        </div>
+      </header>
+
+      <div class="kpi-grid four">
+        <div class="kpi-card"><div class="kpi-label">Volatiliteit (1j)</div><div class="kpi-value sm" id="i-vol"></div><div class="kpi-delta muted">portefeuille, geannualiseerd</div></div>
+        <div class="kpi-card"><div class="kpi-label">Sharpe-ratio</div><div class="kpi-value sm" id="i-sharpe"></div><div class="kpi-delta" id="i-sharpe-label"></div></div>
+        <div class="kpi-card"><div class="kpi-label">Max. drawdown</div><div class="kpi-value sm" id="i-dd"></div><div class="kpi-delta muted">grootste piek-dal daling</div></div>
+        <div class="kpi-card"><div class="kpi-label">Diversificatiescore</div><div class="kpi-value sm" id="i-div"></div><div class="kpi-delta" id="i-div-label"></div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Efficient frontier <span class="tag tag-ai">Markowitz</span></h2>
+          <button class="btn btn-ghost btn-xs" id="btn-max-sharpe">◆ Toon max-Sharpe advies</button>
+        </div>
+        <div class="chart-holder tall"><canvas id="ef-canvas"></canvas></div>
+        <p class="explain">Elke stip is een mogelijke verdeling van jouw huidige assets (3.500 gesimuleerde portefeuilles). De cyaan lijn is de efficient frontier: het maximale verwachte rendement per risiconiveau. <b>Klik op een punt</b> voor een concreet herbalanceringsadvies.</p>
+        <div id="ef-advice"></div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head"><h2>Correlatiematrix</h2></div>
+          <div id="corr-heatmap"></div>
+          <p class="explain">Paars = beweegt samen, cyaan = beweegt tegengesteld. Veel donkerpaars buiten de diagonaal betekent: je posities zijn in feite dezelfde gok.</p>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Stress-test</h2></div>
+          <div class="stress-buttons" id="stress-buttons"></div>
+          <div id="stress-result"></div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head"><h2>Rendement per jaar <span class="tag tag-ai">tijdgewogen</span></h2></div>
+          <div id="twr-bars" class="bars-holder"></div>
+          <p class="explain">TWR corrigeert voor je stortingen en opnames: dit is het rendement van je beleggingskeuzes zelf, vergelijkbaar met een fonds-rendement.</p>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Rendement per positie</h2></div>
+          <div id="returns-bars" class="bars-holder"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Risico vs. rendement</h2></div>
+          <div class="chart-holder" id="scatter-chart"></div>
+          <p class="explain">Elke bol is een positie (grootte = weging). Linksboven = de droom: veel rendement, weinig risico.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>AI-observaties <span class="tag tag-ai">automatisch gegenereerd</span></h2></div>
+        <div id="ai-insights" class="ai-insights"></div>
+      </div>
+    </section>
+
+    <!-- ===== TRANSACTIES ===== -->
+    <section class="view" id="view-transactions">
+      <header class="view-header">
+        <div>
+          <h1>Transacties</h1>
+          <p class="subtitle" id="tx-count"></p>
+        </div>
+        <div class="head-controls">
+          <button class="btn btn-ghost" id="btn-import">⬆ Importeer JSON/CSV</button>
+          <input type="file" id="import-file" accept=".json,.csv,application/json,text/csv" style="display:none">
+          <button class="btn btn-primary" id="btn-new-tx2">+ Nieuwe transactie</button>
+        </div>
+      </header>
+      <div id="import-report"></div>
+      <div class="card drop-target" id="tx-card">
+        <div class="table-wrap">
+          <table class="holdings-table" id="tx-table">
+            <thead><tr><th>Datum</th><th>Type</th><th>Asset</th><th>Aantal</th><th>Koers</th><th>Totaal</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <p class="explain">💡 Sleep een bestand hierheen of gebruik de knop. <b>JSON</b> = volledige (her)import; <b>CSV</b> (DEGIRO Transactions.csv of Bitvavo Volledige geschiedenis.csv) = aanvullen — alleen nieuwe transacties worden toegevoegd, dubbele rijen worden automatisch overgeslagen. Zo houd je de app bij met een periodieke export van je broker.</p>
+    </section>
+
+    <!-- ===== DCA-PLANNEN ===== -->
+    <section class="view" id="view-dca">
+      <header class="view-header">
+        <div>
+          <h1>DCA-plannen <span class="tag tag-ai">automatisch periodiek inleggen</span></h1>
+          <p class="subtitle">Vervallen termijnen worden bij het openen van de app automatisch als transacties geboekt.</p>
+        </div>
+      </header>
+
+      <div class="card">
+        <div class="card-head"><h2>Nieuw plan</h2></div>
+        <div class="dca-form">
+          <div class="form-row"><label>Naam</label><input type="text" id="dca-name" class="input" placeholder="bv. Maandelijks VWCE"></div>
+          <div class="form-row"><label>Asset</label><select id="dca-asset" class="select full"></select></div>
+          <div class="form-row"><label>Bedrag per maand (€)</label><input type="number" id="dca-amount" class="input" min="10" step="10" value="100"></div>
+          <div class="form-row"><label>Dag van de maand (1–28)</label><input type="number" id="dca-day" class="input" min="1" max="28" value="1"></div>
+          <div class="form-row"><label>Modus</label>
+            <div class="segmented full" id="dca-mode">
+              <button data-mode="fixed" class="active">Vast bedrag</button>
+              <button data-mode="ai">AI-gestuurd</button>
+            </div>
+          </div>
+        </div>
+        <p class="explain" id="dca-mode-explain">Vast bedrag: elke maand exact hetzelfde bedrag — klassieke DCA.</p>
+        <div id="dca-preview"></div>
+        <div class="modal-actions" style="justify-content:flex-start;margin-top:14px">
+          <button class="btn btn-primary" id="dca-create">+ Plan aanmaken</button>
+        </div>
+      </div>
+
+      <div id="dca-plans"></div>
+    </section>
+
+    <!-- ===== INSTELLINGEN ===== -->
+    <section class="view" id="view-settings">
+      <header class="view-header">
+        <div>
+          <h1>Instellingen</h1>
+          <p class="subtitle">Data, koershistorie en alerts — alles blijft lokaal in je browser</p>
+        </div>
+      </header>
+
+      <div class="card">
+        <div class="card-head"><h2>📁 Databeheer</h2></div>
+        <div class="settings-actions">
+          <button class="btn btn-primary" id="set-import">⬆ Importeer JSON/CSV</button>
+          <button class="btn btn-ghost" id="set-export">⬇ Exporteer backup</button>
+          <button class="btn btn-ghost btn-danger" id="set-clear">🗑 Alles wissen</button>
+        </div>
+        <p class="explain">JSON-import vervangt de huidige data; CSV-import (DEGIRO/Bitvavo) vult aan met alleen nieuwe transacties. De backup-export bevat je transacties, koershistorie, watchlist en alerts in één JSON die je later weer kunt importeren. <b>Privacy:</b> alle data staat uitsluitend in de localStorage van deze browser — je kunt de app-code veilig op GitHub zetten zolang je je eigen JSON-bestanden niet meecommit.</p>
+        <div id="set-data-info"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>📈 Koershistorie</h2>
+          <button class="btn btn-primary" id="set-fetch-hist">📡 Haal echte crypto-historie op</button>
+        </div>
+        <p class="explain">Eén klik haalt alles op: crypto via CoinGecko en aandelen/ETF's via Yahoo Finance (365 dagen dagelijks, automatische beurskeuze en USD→EUR via ECB-koersen). Gratis, geen API-key; alleen tickersymbolen verlaten je browser. Handig ritme: een paar keer per dag klikken is meer dan genoeg. Eigen koershistorie in je import-JSON (veld <span class="mono">koershistorie</span>/<span class="mono">prices</span>) wordt ook herkend.</p>
+        <div id="hist-progress"></div>
+        <div class="table-wrap">
+          <table class="holdings-table" id="hist-table">
+            <thead><tr><th>Asset</th><th>Type</th><th>Koers nu</th><th>Historie</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>🔔 Alerts</h2></div>
+        <div class="alert-form">
+          <select id="al-asset" class="select"></select>
+          <select id="al-metric" class="select">
+            <option value="price">Koers (€)</option>
+            <option value="change24">24u-verandering (%)</option>
+            <option value="rsi">RSI (14)</option>
+            <option value="weight">Weging in portefeuille (%)</option>
+          </select>
+          <select id="al-op" class="select"><option value=">">stijgt boven</option><option value="<">zakt onder</option></select>
+          <input type="number" id="al-value" class="input" placeholder="waarde" step="any" style="width:110px">
+          <button class="btn btn-primary" id="al-add">+ Alert</button>
+        </div>
+        <div id="alert-list" class="ai-insights" style="margin-top:16px"></div>
+        <p class="explain">Alerts worden gecontroleerd bij het openen van de app en na elke live koersupdate. Er is geen server, dus meldingen verschijnen alleen in de app zelf.</p>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- ===== TRANSACTIE MODAL ===== -->
+<div class="modal-backdrop" id="tx-modal">
+  <div class="modal">
+    <h2>Nieuwe transactie</h2>
+    <div class="form-row">
+      <label>Type</label>
+      <div class="segmented full" id="tx-type">
+        <button data-type="buy" class="active">Kopen</button>
+        <button data-type="sell">Verkopen</button>
+      </div>
+    </div>
+    <div class="form-row"><label>Asset</label><select id="tx-asset" class="select full"></select></div>
+    <div class="form-row"><label>Aantal</label><input type="number" id="tx-qty" class="input" min="0" step="any" value="1"></div>
+    <div class="form-row"><label>Koers (€)</label><input type="number" id="tx-price" class="input" min="0" step="any"></div>
+    <div class="modal-total" id="tx-total">Totaal: —</div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="tx-cancel">Annuleren</button>
+      <button class="btn btn-primary" id="tx-save">Opslaan</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== COMMAND PALETTE ===== -->
+<div class="modal-backdrop" id="palette">
+  <div class="palette-box">
+    <input type="text" id="palette-input" class="palette-input" placeholder="Typ een commando of asset… (esc om te sluiten)" autocomplete="off">
+    <div class="palette-list" id="palette-list"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script src="js/data.js?v=11"></script>
+<script src="js/ml.js?v=11"></script>
+<script src="js/charts.js?v=11"></script>
+<script src="js/quant.js?v=11"></script>
+<script src="js/backtest.js?v=11"></script>
+<script src="js/catalog.js?v=11"></script>
+<script src="js/dca.js?v=11"></script>
+<script src="js/importer.js?v=11"></script>
+<script src="js/alerts.js?v=11"></script>
+<script src="js/app.js?v=11"></script>
+</body>
+</html>

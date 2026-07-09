@@ -1,0 +1,13 @@
+{
+  "name": "Vermogen — Beleggingen Tracker",
+  "short_name": "Vermogen",
+  "description": "Beleggingen tracker met interactieve grafieken en machine learning in de browser",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#0a0c14",
+  "theme_color": "#0a0c14",
+  "lang": "nl",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
