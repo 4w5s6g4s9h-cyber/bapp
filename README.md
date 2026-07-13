@@ -1,48 +1,80 @@
-# Vermogen. — Beleggingen Tracker
+# Vermogen — lokale beleggingstracker
 
-Een volledig client-side beleggingstracker met interactieve grafieken en échte machine learning in de browser. Geen dependencies, geen build-stap, geen API-keys.
+Vermogen is een statische browserapp voor het importeren en analyseren van een eigen portefeuille. Er is geen applicatiebackend, account of cloudsynchronisatie. Portfoliodata staat in `localStorage`; externe koersdata is standaard uitgeschakeld en vereist expliciete toestemming.
+
+> Experimentele analyse, geen beleggingsadvies. Gereconstrueerde koersen worden alleen voor visualisatie gebruikt en zijn uitgesloten van ML, backtests, DCA-simulaties en risico-advies.
 
 ## Starten
 
 ```bash
 python3 -m http.server 8642
-# open http://localhost:8642
 ```
 
-(Elke statische webserver werkt; er is geen backend. De app is een PWA: installeerbaar en offline bruikbaar. Openen via `file://` kan ook — alleen de PWA/service-worker staat dan uit.)
+Open daarna `http://localhost:8642`. Een HTTP-server is nodig voor betrouwbaar PWA- en service-workergedrag.
 
-**Privacy:** de app bevat géén data. Je importeert je portfolio-JSON via Instellingen; alles blijft in de localStorage van je browser. De code kan veilig op GitHub (`.gitignore` sluit portfolio-bestanden uit).
+Voor ontwikkeling en controle is Node.js 20 of nieuwer nodig:
 
-## Features
+```bash
+npm run check
+```
 
-- **Dashboard** — animated KPI's, interactieve portefeuillegrafiek met **zoom/pan-brush** en **benchmark-vergelijking** ("wat als alles in VWCE?"), allocatie-donut (dust-posities gegroepeerd als "Overig"), positietabel met sparklines en AI-signalen, een **watchlist** met vrij zoekveld (catalogus van ±45 populaire assets, elke beurs-ticker via Yahoo-lookup, crypto via CoinGecko-search) en **sorteerbare positietabel** (klik op een kolomkop).
-- **Asset Analyse** — lijn/**candlestick**/**vergelijk**-weergave (genormaliseerd op 100), 30-dagen AI-voorspelling met ~80%-betrouwbaarheidsband, **anomaliedetectie** (>3σ dagen gemarkeerd), RSI & MACD.
-- **ML Lab** — neuraal netwerk (20→24→12→1, backpropagation) dat live traint met loss-curve en gewichts-visualisatie; **Model-arena** met walk-forward validatie (NN vs. ridge-regressie vs. naïef momentum, out-of-sample); Monte Carlo-vermogensprojectie met sliders.
-- **Backtest** — drie strategieën naast kopen-en-vasthouden, zonder look-ahead, met transactiekosten: **Klassiek** (één drempel), **Hysterese** (dode zone tegen whipsaw) en **Trend + vol-target** (trendfilter + positiegrootte omgekeerd evenredig met volatiliteit). Resultaten-tabel met rendement, drawdown, Sharpe, trades, win-rate en marktblootstelling; instelbare drempel, dag-voor-dag playback en **🎯 Auto-tune**: walk-forward drempeloptimalisatie (70% in-sample, 30% out-of-sample) die eerlijk toont hoeveel van het in-sample resultaat overfitting was.
-- **Inzichten** — **efficient frontier (Markowitz)** met 3.500 gesimuleerde portefeuilles en klikbaar herbalanceringsadvies, **correlatie-heatmap**, **stress-tests** (Crash 2008, crypto-winter, rente +2%, zwarte zwaan) met hersteltijd-schatting, risicometrieken en AI-observaties.
-- **Transacties + JSON-import** — importeer je eigen portfolio/transactiegeschiedenis (knop of drag-and-drop). De parser is tolerant: NL/EN veldnamen, `dd-mm-jjjj`-datums, komma-decimalen, totaalbedrag i.p.v. koers, geneste structuren en optionele koershistorie. Ontbrekende historie wordt gereconstrueerd rond je transactiekoersen (Brownian bridge). In import-modus worden crypto-koersen **live** bijgewerkt via CoinGecko. Transacties met koers 0 (staking rewards/airdrops) tellen mee in aantallen met kostprijs €0, en het `currentPrice`-veld wordt als koersanker op de snapshotdatum gebruikt.
-- **Instellingen** — import/export (backup-JSON met alles erin), alles wissen, en **echte koershistorie**: crypto via CoinGecko én aandelen/ETF's via Yahoo Finance (chart-API via publieke CORS-proxy, automatische beurskeuze .AS/.DE/… en USD→EUR-conversie via frankfurter.dev, ECB-koersen). Statusoverzicht per asset (echt vs. gereconstrueerd). Geen API-keys nodig; alleen tickersymbolen verlaten de browser.
-- **TWR** — tijdgewogen rendement (totaal, YTD en per kalenderjaar in Inzichten), gecorrigeerd voor stortingen/opnames — de eerlijke maatstaf naast geldgewogen rendement.
-- **Alerts** — regels op koers, 24u-verandering, RSI of portefeuilleweging; gecheckt bij openen en na live koersupdates; badge + toast in de app (geen server, dus geen push).
-- **DCA-plannen** — meerdere plannen (vast bedrag of AI-gestuurd: maandbedrag schaalt 0,5×–1,75× mee met het ensemble-signaal, contrair). Vervallen termijnen worden bij het openen van de app automatisch als transacties geboekt; simulatie-preview toont wat het plan de afgelopen 12 maanden had gedaan.
-- **Command palette** — ⌘K/Ctrl-K voor navigatie, assets en acties.
+De runtime-app zelf heeft geen npm-dependencies en geen buildstap.
+
+## Belangrijkste functies
+
+- Dashboard met posities, allocatie, cashflow-gecorrigeerd dagresultaat, TWR en watchlist.
+- JSON-import en aanvullende DEGIRO/Bitvavo-CSV-import met strikte validatie, transactiededupe en rollback bij opslagfouten.
+- Volledige versie-2-backup en restore van transacties, assets, koersen, herkomst, watchlist, alerts en DCA-plannen.
+- Expliciete koersherkomst per dag. Analyses vereisen minimaal 90% echte dekking in hun analysevenster.
+- Assetweergave, RSI/MACD, experimentele neurale projectie en een model-arena met vier expanding-window walk-forward-folds.
+- Backtests over 730 kalenderdagen, transactiekosten en aparte in-/out-of-sample auto-tune.
+- Cashflow-gecorrigeerde volatiliteit, Sharpe, drawdown, correlatie en Markowitz-verkenning.
+- DCA-plannen als lokale boekhoudautomatisering. Er worden geen echte brokerorders geplaatst; een termijn wordt alleen geboekt als voor die dag een echte koers bekend is.
+- In-app alerts; geen achtergrondserver en dus geen push wanneer de app gesloten is.
+- Offline shell via een service worker die uitsluitend succesvolle same-origin-responses cachet.
+
+## Privacy en externe data
+
+Zonder toestemming doet de app geen koersnetwerkcalls. Na het aanzetten van **Instellingen → Privacy en netwerk** kunnen uitsluitend assetzoektermen, tickers of externe asset-id's naar deze diensten gaan:
+
+- CoinGecko voor crypto;
+- Yahoo Finance voor aandelen en ETF's;
+- Frankfurter voor conversie naar EUR.
+
+Transacties, aantallen, kostprijzen en portefeuillewaarden worden niet in deze calls meegestuurd. Directe Yahoo-calls kunnen door browser-CORS worden geblokkeerd; eigen geïmporteerde koershistorie is dan de betrouwbare route.
+
+`localStorage` is niet versleuteld en wordt gedeeld door pagina's op dezelfde origin. Gebruik de app daarom op een vertrouwd apparaat en host haar bij voorkeur op een eigen origin. Backupbestanden bevatten financiële data en horen niet in Git of gedeelde opslag.
+
+## Data-integriteit
+
+- Asset-id's, datums, getallen, reekslengtes, kleuren en externe antwoorden worden gevalideerd.
+- Een restore accepteert alleen backup-schema 2 en schakelt netwerktoestemming opnieuw uit.
+- Een generieke import kan ontbrekende historie reconstrueren om een grafiek te tonen. De provenance-array blijft dan `false`, zodat die waarden niet teruglekken in financiële analyses.
+- Stortingen en opnames worden uit dagrendement en TWR gefilterd. Bitvavo asset-transfers zonder kostprijs worden bij CSV-import gewaardeerd op de beschikbare dagkoers en expliciet als transfer bewaard.
+- Aandelen in een vreemde valuta worden alleen geregistreerd als ook een geldige EUR-reeks beschikbaar is; anders faalt de import veilig.
 
 ## Architectuur
 
-| Bestand | Rol |
+| Bestand | Verantwoordelijkheid |
 |---|---|
-| `js/data.js` | Seeded marktsimulatie (GBM met regimes/jumps), portefeuillemodel, transacties |
-| `js/ml.js` | Neuraal netwerk + backprop, voorspelling, ridge-regressie, model-arena, anomalieën, indicatoren, Monte Carlo |
-| `js/quant.js` | Efficient frontier, herbalanceringsadvies, stress-scenario's, correlatie, benchmark |
-| `js/backtest.js` | Signaal-backtester met playback |
-| `js/importer.js` | JSON-import (tolerante parser), historie-synthese, live koersen, demo/import-modus |
-| `js/charts.js` | Eigen SVG/canvas grafiek-engine (lijn, candles, donut, scatter, heatmap, brush, frontier, fan-chart) |
-| `js/alerts.js` | Alertregels: opslag + evaluatie |
-| `js/catalog.js` | Watchlist-catalogus + watch-only assets |
-| `js/dca.js` | DCA-plannen: uitvoering, AI-multiplier, simulatie |
-| `js/app.js` | State, views, instellingen, command palette, interactie |
-| `sw.js` + `manifest.webmanifest` | PWA (offline, installeerbaar) |
+| `js/data.js` | Datumgrid, assets, provenance, gevalideerde transacties, holdings, cashflows en portefeuillewaarden |
+| `js/importer.js` | JSON/CSV-import, backup/restore, atomaire opslag en opt-in koersbronnen |
+| `js/ml.js` | Indicatoren, neuraal netwerk, walk-forward model-arena en Monte Carlo |
+| `js/quant.js` | TWR, correlatie, efficient frontier, benchmark en stressscenario's |
+| `js/backtest.js` | Signaalstrategieën, kosten, playback en auto-tune |
+| `js/catalog.js` | Watchlistcatalogus en gevalideerde watch-only assets |
+| `js/dca.js` | DCA-plannen, historische simulatie en lokale termijnboeking |
+| `js/alerts.js` | Validatie en evaluatie van lokale alerts |
+| `js/charts.js` | SVG- en canvasweergaven |
+| `js/app.js` | UI-state, toegangscontroles voor analyses en interactie |
+| `sw.js` | Offline app-shellcache |
 
-**Onderhoud:** bij het wijzigen van JS/CSS de `?v=`-versieparameter in `index.html` en de cache-naam + lijst in `sw.js` ophogen (cache-busting).
+De scripts zijn klassieke browserscripts en delen bewust één globale runtime. Dat houdt deployment simpel, maar maakt modulegrenzen minder afdwingbaar dan met ES-modules.
 
-**Let op:** demo-marktdata is gesimuleerd; import-modus gebruikt jouw echte transacties. Dit is een demo — geen beleggingsadvies.
+## Testen en deployment
+
+`npm run check` voert unit-/regressietests en een publieke-buildcontrole uit. De controle faalt bij onder meer een syntaxfout, cacheversiemismatch, ontbrekend publiek bestand of gevolgd privépaddata. GitHub Actions draait dezelfde controle bij pushes en pull requests.
+
+Deployment is een statische publicatie van de repository-root, bijvoorbeeld via GitHub Pages. Publiceer pas nadat `npm run check` slaagt. Stel daarnaast in de repository-instellingen branch protection in met de CI-job als verplichte statuscheck; dat kan niet vanuit deze lokale repository worden afgedwongen.
+
+Zie [docs/PROJECT_REVIEW.md](docs/PROJECT_REVIEW.md) voor de kritische beoordeling, uitgevoerde verbeteringen en resterende risico's.

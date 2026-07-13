@@ -9,10 +9,31 @@
 const DCA_KEY = 'vermogen_dca_v1';
 
 function loadDcaPlans() {
-  try { return JSON.parse(localStorage.getItem(DCA_KEY)) || []; }
+  try {
+    const parsed = JSON.parse(localStorage.getItem(DCA_KEY)) || [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.slice(0, 100).map((plan, index) => {
+      const asset = normalizeAssetId(plan?.asset);
+      const amount = Number(plan?.amount), day = Number(plan?.day);
+      const created = new Date(plan?.createdAt);
+      if (!asset || !Number.isFinite(amount) || amount < 10 || amount > 1e7
+          || !Number.isInteger(day) || day < 1 || day > 28 || !Number.isFinite(created.getTime())) return null;
+      const lastRun = plan.lastRun && Number.isFinite(new Date(plan.lastRun).getTime()) ? new Date(plan.lastRun).toISOString() : null;
+      return {
+        id: cleanDisplayText(plan.id || `plan-${index}`, 100),
+        name: cleanDisplayText(plan.name || `${asset} DCA`, 80),
+        asset, amount, day, mode: plan.mode === 'ai' ? 'ai' : 'fixed',
+        active: plan.active !== false, createdAt: created.toISOString(), lastRun,
+        ...(plan.blockedAt ? { blockedAt: String(plan.blockedAt) } : {}),
+      };
+    }).filter(Boolean);
+  }
   catch (e) { return []; }
 }
-function saveDcaPlans(plans) { localStorage.setItem(DCA_KEY, JSON.stringify(plans)); }
+function saveDcaPlans(plans) {
+  if (!Array.isArray(plans)) throw new Error('DCA-plannen moeten een lijst zijn.');
+  localStorage.setItem(DCA_KEY, JSON.stringify(plans));
+}
 
 /**
  * AI-multiplier voor een inlegmoment (contrair: méér inleggen als het
@@ -21,7 +42,9 @@ function saveDcaPlans(plans) { localStorage.setItem(DCA_KEY, JSON.stringify(plan
 function dcaAiMultiplier(assetId, idx) {
   const prices = MARKET.prices[assetId];
   if (!prices) return 1;
-  const upto = prices.slice(0, Math.max(idx + 1, 60));
+  // Nooit koersen ná het inlegmoment gebruiken. Bij weinig historie vallen
+  // langlopende indicatoren vanzelf terug naar een neutrale score.
+  const upto = prices.slice(0, Math.max(1, idx + 1));
   const sig = computeSignal(upto);
   let mult = 1;
   if (sig.label === 'Koop') mult = 1.25;
@@ -55,7 +78,8 @@ function executeDuePlans(txs) {
       const due = nextDcaDate(plan, cursor);
       if (due > now) break;
       const idx = dateToIndex(due.toISOString());
-      const price = MARKET.prices[plan.asset] ? MARKET.prices[plan.asset][idx] : null;
+      const isReal = MARKET.provenance[plan.asset]?.[idx] === true;
+      const price = isReal && MARKET.prices[plan.asset] ? MARKET.prices[plan.asset][idx] : null;
       if (price && price > 0) {
         const mult = plan.mode === 'ai' ? dcaAiMultiplier(plan.asset, idx) : 1;
         const amount = plan.amount * mult;
@@ -65,9 +89,16 @@ function executeDuePlans(txs) {
           type: 'buy',
           asset: plan.asset,
           qty: amount / price,
-          price: round2(price),
+          price: +price.toPrecision(12),
           dca: { plan: plan.name, mult },
         });
+        delete plan.blockedAt;
+      } else {
+        // Geen fictieve transactie boeken op een gereconstrueerde koers.
+        // Laat de termijn openstaan zodat deze na een echte historie-import
+        // alsnog verwerkt kan worden.
+        plan.blockedAt = due.toISOString();
+        break;
       }
       plan.lastRun = due.toISOString();
       cursor = due;
@@ -102,7 +133,8 @@ function dcaPlanStats(plan, txs) {
  */
 function simulateDca(assetId, amount, day, months = 12) {
   const prices = MARKET.prices[assetId];
-  if (!prices) return null;
+  const days = Math.min(HISTORY_DAYS, Math.ceil(months * 31));
+  if (!prices || !hasReliableHistory(assetId, days)) return null;
   const now = new Date();
 
   const runMode = (mode) => {

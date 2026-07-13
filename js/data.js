@@ -1,7 +1,10 @@
 /* ============================================================
-   data.js — marktsimulatie & portefeuillemodel
-   Gesimuleerde maar realistische marktdata (seeded GBM met
-   regimes en jumps), zodat de app deterministisch en offline werkt.
+   data.js — kernmodel, marktgrid en portefeuilleberekeningen
+
+   Het datumgrid bevat kalenderdagen. Daarom annualiseren alle
+   afgeleide statistieken met CALENDAR_DAYS_PER_YEAR. Per koerspunt
+   wordt daarnaast provenance bijgehouden: alleen aantoonbaar echte
+   historie mag financiële analyses en signalen voeden.
    ============================================================ */
 
 // ---------- Seeded RNG ----------
@@ -30,9 +33,11 @@ function gaussianFactory(rng) {
 }
 
 // ---------- Assets ----------
-// Er is geen demo-data meer: assets komen uitsluitend uit de JSON-import
-// van de gebruiker. Alles blijft in localStorage — niets verlaat de browser.
+// Er is geen ingebouwde portfoliodata: assets komen uit een import of uit
+// een expliciete externe koersopdracht. Externe netwerkcalls zijn opt-in.
 const HISTORY_DAYS = 1095; // ~3 jaar datumgrid
+const CALENDAR_DAYS_PER_YEAR = 365;
+const ANALYSIS_MIN_COVERAGE = 0.90;
 
 const ASSETS = [];
 
@@ -49,24 +54,123 @@ function generateDates() {
   return dates;
 }
 
-const MARKET = { dates: generateDates(), prices: {} };
+const MARKET = { dates: generateDates(), prices: {}, provenance: {} };
 
 // Kleuren voor geïmporteerde assets
 const CUSTOM_COLORS = ['#f472b6', '#4ade80', '#38bdf8', '#facc15', '#c084fc', '#fb923c', '#2dd4bf', '#a3e635', '#f87171', '#818cf8', '#e879f9', '#fde047'];
 
-/** Registreert een extra (geïmporteerd) asset met een prijsreeks op het datumgrid. */
-function registerAsset(asset, prices) {
-  if (assetById(asset.id)) { MARKET.prices[asset.id] = prices; return; }
-  ASSETS.push(asset);
-  MARKET.prices[asset.id] = prices;
+/** Veilige instrumentcode voor opslag, selectors en datakoppelingen. */
+function normalizeAssetId(value) {
+  const cleaned = String(value ?? '')
+    .normalize('NFKC')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9.-]/g, '')
+    .slice(0, 12);
+  if (!cleaned || ['__PROTO__', 'PROTOTYPE', 'CONSTRUCTOR'].includes(cleaned)) return null;
+  return cleaned;
+}
+
+function cleanDisplayText(value, maxLength = 80) {
+  return String(value ?? '')
+    .normalize('NFKC')
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .replace(/[<>]/g, '')
+    .trim()
+    .slice(0, maxLength);
+}
+
+function escapeHTML(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[ch]));
+}
+
+function safeColor(value, fallback = '#7c6bff') {
+  const color = String(value || '');
+  return /^(#[0-9a-f]{3,8}|(?:rgb|hsl)a?\([0-9.,%\s-]+\))$/i.test(color) ? color : fallback;
+}
+
+function normalizePriceSeries(prices) {
+  if (!Array.isArray(prices) || prices.length !== HISTORY_DAYS) return null;
+  const out = prices.map(Number);
+  return out.every(p => Number.isFinite(p) && p > 0) ? out : null;
+}
+
+function normalizeProvenance(provenance, fallback = false) {
+  if (!Array.isArray(provenance) || provenance.length !== HISTORY_DAYS) {
+    return new Array(HISTORY_DAYS).fill(Boolean(fallback));
+  }
+  return provenance.map(value => value === true);
+}
+
+/** Registreert of actualiseert een asset inclusief koersprovenance. */
+function registerAsset(asset, prices, provenance = null) {
+  const id = normalizeAssetId(asset?.id);
+  const series = normalizePriceSeries(prices);
+  if (!id || !series) throw new Error(`Ongeldige asset of koersreeks: ${id || 'onbekend'}`);
+  const normalized = {
+    ...asset,
+    id,
+    name: cleanDisplayText(asset.name || id, 80) || id,
+    type: ['Crypto', 'ETF', 'Aandeel'].includes(asset.type) ? asset.type : 'Aandeel',
+    color: safeColor(asset.color, CUSTOM_COLORS[ASSETS.length % CUSTOM_COLORS.length]),
+    currency: cleanDisplayText(asset.currency || 'EUR', 8).toUpperCase(),
+    isin: cleanDisplayText(asset.isin || '', 16).toUpperCase(),
+    venue: cleanDisplayText(asset.venue || '', 16).toUpperCase(),
+    yahoo: cleanDisplayText(asset.yahoo || '', 32),
+  };
+  const existing = assetById(id);
+  if (existing) Object.assign(existing, normalized);
+  else ASSETS.push(normalized);
+  MARKET.prices[id] = series;
+  // Afwezigheid van expliciete herkomst is nooit bewijs van echte historie.
+  MARKET.provenance[id] = normalizeProvenance(provenance, false);
 }
 
 function assetById(id) { return ASSETS.find(a => a.id === id); }
 function lastPrice(id) { return MARKET.prices[id][HISTORY_DAYS - 1]; }
 function priceAt(id, i) { return MARKET.prices[id][i]; }
 
+function marketCoverage(assetId, start = 0, end = HISTORY_DAYS - 1) {
+  const provenance = MARKET.provenance[assetId];
+  if (!provenance) return 0;
+  const i0 = Math.max(0, start), i1 = Math.min(HISTORY_DAYS - 1, end);
+  if (i1 < i0) return 0;
+  let real = 0;
+  for (let i = i0; i <= i1; i++) if (provenance[i]) real++;
+  return real / (i1 - i0 + 1);
+}
+
+function hasReliableHistory(assetId, days = 365, minCoverage = ANALYSIS_MIN_COVERAGE) {
+  const start = Math.max(0, HISTORY_DAYS - days);
+  return marketCoverage(assetId, start, HISTORY_DAYS - 1) >= minCoverage;
+}
+
+function historyCoverageLabel(assetId, days = 365) {
+  return `${Math.round(marketCoverage(assetId, Math.max(0, HISTORY_DAYS - days), HISTORY_DAYS - 1) * 100)}% echt`;
+}
+
 // ---------- Transacties (localStorage) ----------
 const TX_KEY = 'vermogen_transactions_v3';
+
+function normalizeStoredTransaction(tx) {
+  if (!tx || typeof tx !== 'object') return null;
+  const date = new Date(tx.date);
+  const asset = normalizeAssetId(tx.asset);
+  const qty = Number(tx.qty), price = Number(tx.price);
+  if (!Number.isFinite(date.getTime()) || !asset || !['buy', 'sell'].includes(tx.type)
+      || !Number.isFinite(qty) || qty <= 0 || !Number.isFinite(price) || price < 0) return null;
+  const out = {
+    id: cleanDisplayText(tx.id || `tx-${date.getTime()}-${asset}`, 100),
+    date: date.toISOString(), type: tx.type, asset, qty, price,
+  };
+  if (tx.transfer === true) out.transfer = true;
+  if (tx.dca && typeof tx.dca === 'object') {
+    out.dca = { plan: cleanDisplayText(tx.dca.plan || '', 80), mult: Number(tx.dca.mult) || 1 };
+  }
+  return out;
+}
 
 function loadTransactions() {
   try {
@@ -75,8 +179,11 @@ function loadTransactions() {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
         // overblijfsels van de oude demo-versie opruimen
-        const clean = parsed.filter(tx => !String(tx.id).startsWith('seed-'));
-        if (clean.length !== parsed.length) saveTransactions(clean);
+        const clean = parsed
+          .filter(tx => !String(tx.id).startsWith('seed-'))
+          .map(normalizeStoredTransaction)
+          .filter(Boolean);
+        if (clean.length !== parsed.length || JSON.stringify(clean) !== JSON.stringify(parsed)) saveTransactions(clean);
         return clean;
       }
     }
@@ -85,7 +192,10 @@ function loadTransactions() {
 }
 
 function saveTransactions(txs) {
-  localStorage.setItem(TX_KEY, JSON.stringify(txs));
+  if (!Array.isArray(txs)) throw new Error('Transacties moeten een lijst zijn.');
+  const clean = txs.map(normalizeStoredTransaction);
+  if (clean.some(tx => tx === null)) throw new Error('Een transactie is ongeldig.');
+  localStorage.setItem(TX_KEY, JSON.stringify(clean));
 }
 
 // ---------- Portefeuille-berekeningen ----------
@@ -129,6 +239,54 @@ function computePortfolioSeries(txs) {
     values[i] = v;
   }
   return { values, timeline };
+}
+
+/** Externe cashflow per dag: aankopen positief, verkopen negatief. */
+function computeCashflowSeries(txs) {
+  const flows = new Array(HISTORY_DAYS).fill(0);
+  for (const tx of txs) {
+    const amount = Number(tx.qty) * Number(tx.price);
+    if (!Number.isFinite(amount)) continue;
+    flows[dateToIndex(tx.date)] += (tx.type === 'buy' ? 1 : -1) * amount;
+  }
+  return flows;
+}
+
+/**
+ * Cashflow-neutrale dagrendementen. Een flow wordt aan het begin van de dag
+ * verondersteld: V_t / (V_t-1 + flow_t) - 1. Dit voorkomt dat een aankoop
+ * als winst en een verkoop als verlies wordt weergegeven.
+ */
+function cashflowAdjustedReturns(txs, values) {
+  const flows = computeCashflowSeries(txs);
+  const returns = new Array(HISTORY_DAYS).fill(null);
+  for (let i = 0; i < HISTORY_DAYS; i++) {
+    const previous = i === 0 ? 0 : values[i - 1];
+    const base = previous + flows[i];
+    if (base > 1e-9 && Number.isFinite(values[i])) returns[i] = values[i] / base - 1;
+  }
+  return { returns, flows };
+}
+
+function cumulativeFromReturns(returns) {
+  const out = new Array(returns.length).fill(null);
+  let wealth = 1, started = false;
+  for (let i = 0; i < returns.length; i++) {
+    const r = returns[i];
+    if (r === null || !Number.isFinite(r)) continue;
+    started = true;
+    wealth *= 1 + r;
+    out[i] = wealth;
+  }
+  return started ? out : new Array(returns.length).fill(null);
+}
+
+function dailyPortfolioPnl(txs, values, index = HISTORY_DAYS - 1) {
+  const flows = computeCashflowSeries(txs);
+  const previous = index > 0 ? values[index - 1] : 0;
+  const pnl = values[index] - previous - flows[index];
+  const base = previous + flows[index];
+  return { pnl, pct: base > 1e-9 ? pnl / base : 0, flow: flows[index] };
 }
 
 // Huidige posities met gemiddelde koopprijs (moving average cost basis)

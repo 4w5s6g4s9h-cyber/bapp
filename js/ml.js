@@ -172,7 +172,9 @@ function forecastPrices(model, lastClose, horizon = 30) {
     const ret = predNorm * ds.std + ds.mean;
     logP += ret;
     cumVar += (residStd * ds.std) ** 2;
-    const band = 1.28 * Math.sqrt(cumVar); // ~80% interval
+    // Indicatieve residuband. Dit is geen gekalibreerd betrouwbaarheidsinterval:
+    // model- en regimesonzekerheid zitten niet in deze eenvoudige band.
+    const band = 1.28 * Math.sqrt(cumVar);
     median.push(Math.exp(logP));
     upper.push(Math.exp(logP + band));
     lower.push(Math.exp(logP - band));
@@ -231,18 +233,18 @@ function macd(values, fast = 12, slow = 26, signalP = 9) {
   return { macdLine, signal, hist };
 }
 
-function annualizedVol(prices, days = 252) {
+function annualizedVol(prices, days = CALENDAR_DAYS_PER_YEAR) {
   const slice = prices.slice(-days - 1);
   const rets = [];
   for (let i = 1; i < slice.length; i++) rets.push(Math.log(slice[i] / slice[i - 1]));
   const mean = rets.reduce((s, r) => s + r, 0) / rets.length;
   const varr = rets.reduce((s, r) => s + (r - mean) ** 2, 0) / rets.length;
-  return Math.sqrt(varr * 252);
+  return Math.sqrt(varr * CALENDAR_DAYS_PER_YEAR);
 }
 
-function annualizedReturn(prices, days = 252) {
+function annualizedReturn(prices, days = CALENDAR_DAYS_PER_YEAR) {
   const slice = prices.slice(-days - 1);
-  return Math.pow(slice[slice.length - 1] / slice[0], 252 / (slice.length - 1)) - 1;
+  return Math.pow(slice[slice.length - 1] / slice[0], CALENDAR_DAYS_PER_YEAR / (slice.length - 1)) - 1;
 }
 
 function maxDrawdown(values) {
@@ -259,10 +261,16 @@ function sharpeRatio(values, rf = 0.02) {
   for (let i = 1; i < values.length; i++) {
     if (values[i - 1] > 0) rets.push(values[i] / values[i - 1] - 1);
   }
-  if (!rets.length) return 0;
+  return sharpeFromReturns(rets, rf);
+}
+
+/** Sharpe op reeds cashflow-gecorrigeerde kalenderdagrendementen. */
+function sharpeFromReturns(returns, rf = 0.02) {
+  const rets = returns.filter(r => Number.isFinite(r));
+  if (rets.length < 2) return 0;
   const mean = rets.reduce((s, r) => s + r, 0) / rets.length;
   const std = Math.sqrt(rets.reduce((s, r) => s + (r - mean) ** 2, 0) / rets.length) || 1e-9;
-  return ((mean * 252) - rf) / (std * Math.sqrt(252));
+  return ((mean * CALENDAR_DAYS_PER_YEAR) - rf) / (std * Math.sqrt(CALENDAR_DAYS_PER_YEAR));
 }
 
 // ---------- Ensemble-signaal ----------
@@ -291,8 +299,8 @@ function computeSignal(prices, nnForecastPct = null) {
     : 0.35 * rsiScore + 0.42 * trendScore + 0.23 * macdScore;
 
   const label = score > 0.18 ? 'Koop' : score < -0.18 ? 'Verkoop' : 'Houd';
-  const confidence = Math.min(97, Math.round(52 + Math.abs(score) * 55));
-  return { score, label, confidence, rsi: lastRsi, trendScore };
+  const strength = Math.min(100, Math.round(Math.abs(score) * 100));
+  return { score, label, strength, rsi: lastRsi, trendScore };
 }
 
 // ---------- Monte Carlo ----------
@@ -399,42 +407,75 @@ function ridgeRegression(X, y, lambda = 1.0) {
 }
 
 /**
- * Model-arena: walk-forward vergelijking van drie voorspellers.
- * Train op eerste 80%, evalueer op laatste 20% (out-of-sample).
+ * Model-arena: vier echte expanding-window folds. Elke fold bepaalt
+ * normalisatie uitsluitend uit het trainingsvenster, traint opnieuw en
+ * evalueert op het chronologisch volgende, onaangeraakte testvenster.
  */
 function modelArena(prices, window = 20) {
-  const ds = buildDataset(prices, window);
-  const n = ds.X.length;
-  const split = Math.floor(n * 0.8);
-
-  // 1) neuraal netwerk (compact, alleen op trainingsdeel)
-  const rng = mulberry32(99);
-  const net = new NeuralNet([window, 16, 8, 1], rng);
-  const order = Array.from({ length: split }, (_, i) => i);
-  for (let e = 0; e < 60; e++) {
-    for (let i = split - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
-    for (const k of order) net.trainSample(ds.X[k], ds.Y[k], 0.01);
-  }
-  // 2) ridge-regressie
-  const w = ridgeRegression(ds.X.slice(0, split), ds.Y.slice(0, split), 1.0);
-
-  const evalModel = (predict) => {
-    let hit = 0, mae = 0, cnt = 0;
-    for (let k = split; k < n; k++) {
-      const p = predict(k), a = ds.Y[k];
-      if (Math.sign(p) === Math.sign(a) && a !== 0) hit++;
-      mae += Math.abs(p - a); cnt++;
-    }
-    return { hit: (hit / cnt) * 100, mae: mae / cnt };
+  const rets = [];
+  for (let i = 1; i < prices.length; i++) rets.push(Math.log(prices[i] / prices[i - 1]));
+  const sampleCount = rets.length - window;
+  if (sampleCount < 100) throw new Error('Minimaal 121 koersdagen nodig voor walk-forward validatie.');
+  const foldCount = 4;
+  const initialTrainSamples = Math.max(60, Math.floor(sampleCount * 0.6));
+  const testSize = Math.max(10, Math.floor((sampleCount - initialTrainSamples) / foldCount));
+  const totals = {
+    'Neuraal netwerk': { hit: 0, error: 0, count: 0 },
+    'Ridge-regressie': { hit: 0, error: 0, count: 0 },
+    'Naïef momentum': { hit: 0, error: 0, count: 0 },
   };
 
-  const results = [
-    { name: 'Neuraal netwerk', ...evalModel(k => net.predict(ds.X[k])) },
-    { name: 'Ridge-regressie', ...evalModel(k => { let s = w[0]; for (let i = 0; i < window; i++) s += w[i + 1] * ds.X[k][i]; return s; }) },
-    { name: 'Naïef momentum', ...evalModel(k => ds.X[k][window - 1]) },
-  ];
+  const record = (name, predicted, actual) => {
+    const acc = totals[name];
+    if (Math.sign(predicted) === Math.sign(actual) && actual !== 0) acc.hit++;
+    acc.error += Math.abs(predicted - actual);
+    acc.count++;
+  };
+
+  for (let fold = 0; fold < foldCount; fold++) {
+    const trainEnd = window + initialTrainSamples + fold * testSize;
+    const testEnd = fold === foldCount - 1 ? rets.length : Math.min(rets.length, trainEnd + testSize);
+    if (testEnd <= trainEnd) continue;
+
+    const trainReturns = rets.slice(0, trainEnd);
+    const mean = trainReturns.reduce((sum, value) => sum + value, 0) / trainReturns.length;
+    const std = Math.sqrt(trainReturns.reduce((s, r) => s + (r - mean) ** 2, 0) / trainReturns.length) || 1e-8;
+    const feature = k => rets.slice(k - window, k).map(r => (r - mean) / std);
+    const target = k => (rets[k] - mean) / std;
+    const X = [], Y = [];
+    for (let k = window; k < trainEnd; k++) { X.push(feature(k)); Y.push(target(k)); }
+
+    const rng = mulberry32(99 + fold);
+    const net = new NeuralNet([window, 16, 8, 1], rng);
+    const order = Array.from({ length: X.length }, (_, i) => i);
+    for (let epoch = 0; epoch < 45; epoch++) {
+      for (let i = order.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        [order[i], order[j]] = [order[j], order[i]];
+      }
+      const lr = 0.01 * (1 - 0.5 * epoch / 45);
+      for (const k of order) net.trainSample(X[k], Y[k], lr);
+    }
+    const weights = ridgeRegression(X, Y, 1.0);
+
+    for (let k = trainEnd; k < testEnd; k++) {
+      const x = feature(k), actual = rets[k];
+      const nnPred = net.predict(x) * std + mean;
+      let ridgePredNorm = weights[0];
+      for (let i = 0; i < window; i++) ridgePredNorm += weights[i + 1] * x[i];
+      record('Neuraal netwerk', nnPred, actual);
+      record('Ridge-regressie', ridgePredNorm * std + mean, actual);
+      record('Naïef momentum', rets[k - 1], actual);
+    }
+  }
+
+  const results = Object.entries(totals).map(([name, result]) => ({
+    name,
+    hit: result.count ? result.hit / result.count * 100 : 0,
+    mae: result.count ? result.error / result.count * 100 : 0,
+  }));
   const best = [...results].sort((a, b) => b.hit - a.hit)[0];
-  return { results, best, testDays: n - split };
+  return { results, best, testDays: totals['Neuraal netwerk'].count, folds: foldCount };
 }
 
 /** Anomaliedetectie: dagen met |z-score| van het rendement > drempel. */

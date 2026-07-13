@@ -15,10 +15,27 @@ const ALERT_METRICS = {
 };
 
 function loadAlerts() {
-  try { return JSON.parse(localStorage.getItem(ALERT_KEY)) || []; }
+  try {
+    const parsed = JSON.parse(localStorage.getItem(ALERT_KEY)) || [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.slice(0, 250).map((rule, index) => {
+      const asset = normalizeAssetId(rule?.asset);
+      const threshold = Number(rule?.threshold);
+      if (!asset || !Object.hasOwn(ALERT_METRICS, rule?.metric) || !['>', '<'].includes(rule?.op) || !Number.isFinite(threshold)) return null;
+      return {
+        id: cleanDisplayText(rule.id || `alert-${index}`, 100), asset,
+        metric: rule.metric, op: rule.op, threshold,
+        triggered: rule.triggered === true,
+        value: Number.isFinite(Number(rule.value)) ? Number(rule.value) : null,
+      };
+    }).filter(Boolean);
+  }
   catch (e) { return []; }
 }
-function saveAlerts(alerts) { localStorage.setItem(ALERT_KEY, JSON.stringify(alerts)); }
+function saveAlerts(alerts) {
+  if (!Array.isArray(alerts)) throw new Error('Alerts moeten een lijst zijn.');
+  localStorage.setItem(ALERT_KEY, JSON.stringify(alerts));
+}
 
 /** Huidige waarde van een metric voor een asset. */
 function alertMetricValue(rule, positions, total) {
@@ -26,13 +43,16 @@ function alertMetricValue(rule, positions, total) {
   if (!prices) return null;
   const last = prices[HISTORY_DAYS - 1];
   switch (rule.metric) {
-    case 'price': return last;
-    case 'change24': return (last / prices[HISTORY_DAYS - 2] - 1) * 100;
+    case 'price': return MARKET.provenance[rule.asset]?.[HISTORY_DAYS - 1] ? last : null;
+    case 'change24': return MARKET.provenance[rule.asset]?.[HISTORY_DAYS - 1] && MARKET.provenance[rule.asset]?.[HISTORY_DAYS - 2]
+      ? (last / prices[HISTORY_DAYS - 2] - 1) * 100 : null;
     case 'rsi': {
+      if (!hasReliableHistory(rule.asset, 365)) return null;
       const r = rsi(prices, 14);
       return r[r.length - 1];
     }
     case 'weight': {
+      if (!MARKET.provenance[rule.asset]?.[HISTORY_DAYS - 1]) return null;
       const pos = positions.find(p => p.asset.id === rule.asset);
       return pos && total > 0 ? (pos.value / total) * 100 : 0;
     }
@@ -64,5 +84,6 @@ function checkAlerts(txs) {
 
 function describeAlert(rule) {
   const m = ALERT_METRICS[rule.metric];
+  if (!m) return 'Ongeldige alert';
   return `${rule.asset} · ${m.label} ${rule.op} ${m.fmt(rule.threshold)}`;
 }

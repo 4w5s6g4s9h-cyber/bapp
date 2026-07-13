@@ -8,7 +8,7 @@ const state = {
   showBenchmark: false,
   chartMode: 'line',        // line | candles | compare
   compareSet: new Set(),
-  selectedAsset: 'NVDA',
+  selectedAsset: null,
   models: {},               // assetId -> getraind model
   training: null,
   mcTimer: null,
@@ -21,9 +21,23 @@ const state = {
 
 const $ = sel => document.querySelector(sel);
 const $$ = sel => document.querySelectorAll(sel);
+const prefersReducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+
+function analysisAvailable(assetId, days = 365) {
+  return Boolean(assetId && MARKET.prices[assetId] && hasReliableHistory(assetId, days));
+}
+
+function portfolioAnalysisAvailable(positions, days = 365) {
+  return positions.length > 0 && positions.every(p => analysisAvailable(p.asset.id, days));
+}
+
+function unavailableHTML(days = 365) {
+  return `<div class="palette-empty">Analyse geblokkeerd: minimaal 90% echte koersdekking over ${days} kalenderdagen nodig. Importeer historie of haal die na toestemming op bij Instellingen.</div>`;
+}
 
 /* ---------- helpers ---------- */
 function animateValue(el, from, to, fmt, dur = 700) {
+  if (prefersReducedMotion) { setValueNow(el, fmt(to)); return; }
   if (el._anim) cancelAnimationFrame(el._anim);
   const t0 = performance.now();
   function frame(t) {
@@ -109,10 +123,13 @@ function renderDashboard(animate = true) {
   const { values } = state.portfolio;
   const positions = computePositions(state.txs);
   const total = values[values.length - 1];
-  const yesterday = values[values.length - 2] || total;
   const invested = totalInvested(state.txs);
-  const dayDelta = total - yesterday;
-  const dayPct = yesterday > 0 ? (dayDelta / yesterday) * 100 : 0;
+  const todayResult = dailyPortfolioPnl(state.txs, values);
+  const dayDelta = todayResult.pnl;
+  const dayPct = todayResult.pct * 100;
+  const currentReliable = positions.length > 0 && positions.every(p => MARKET.provenance[p.asset.id]?.[HISTORY_DAYS - 1]);
+  const dayReliable = currentReliable && positions.every(p => MARKET.provenance[p.asset.id]?.[HISTORY_DAYS - 2]);
+  const historyReliable = portfolioAnalysisAvailable(positions, 730);
   const totReturn = total - invested;
   const totPct = invested > 0 ? (totReturn / invested) * 100 : 0;
 
@@ -123,27 +140,30 @@ function renderDashboard(animate = true) {
   prevTotal = total;
 
   const deltaEl = $('#kpi-total-delta');
-  deltaEl.textContent = `${fmtSignedEUR(dayDelta)} (${fmtPct(dayPct)}) vandaag`;
-  deltaEl.className = 'kpi-delta ' + (dayDelta >= 0 ? 'up' : 'down');
+  deltaEl.textContent = dayReliable ? `${fmtSignedEUR(dayDelta)} (${fmtPct(dayPct)}) vandaag` : 'dagresultaat niet beschikbaar zonder echte dagkoersen';
+  deltaEl.className = 'kpi-delta ' + (dayReliable ? (dayDelta >= 0 ? 'up' : 'down') : 'muted');
 
-  $('#kpi-day').textContent = fmtSignedEUR(dayDelta);
+  $('#kpi-day').textContent = dayReliable ? fmtSignedEUR(dayDelta) : '—';
   const dayPctEl = $('#kpi-day-pct');
-  dayPctEl.textContent = fmtPct(dayPct);
-  dayPctEl.className = 'kpi-delta ' + (dayDelta >= 0 ? 'up' : 'down');
+  dayPctEl.textContent = dayReliable ? fmtPct(dayPct) : 'onvoldoende echte koersdekking';
+  dayPctEl.className = 'kpi-delta ' + (dayReliable ? (dayDelta >= 0 ? 'up' : 'down') : 'muted');
 
   $('#kpi-return').textContent = fmtSignedEUR(totReturn);
   const retEl = $('#kpi-return-pct');
   state.twr = twrSeries(state.txs, values);
-  const twrTotal = state.twr[HISTORY_DAYS - 1];
+  const twrStartBoundary = HISTORY_DAYS - 730;
+  const twrStart = state.twr.findIndex((value, index) => index >= twrStartBoundary && value !== null);
+  const twrTotal = twrStart >= 0 ? twrBetween(state.twr, twrStart, HISTORY_DAYS - 1) : null;
   const ytdIdx = MARKET.dates.findIndex(d => d.getFullYear() === new Date().getFullYear());
   const twrYtd = ytdIdx >= 0 ? twrBetween(state.twr, Math.max(ytdIdx, state.twr.findIndex(v => v !== null)), HISTORY_DAYS - 1) : null;
-  if (twrTotal !== null) {
-    retEl.textContent = `TWR ${fmtPct(twrTotal * 100, 1)} (3j)` + (twrYtd !== null ? ` · YTD ${fmtPct(twrYtd * 100, 1)}` : '');
+  if (twrTotal !== null && historyReliable) {
+    retEl.textContent = `TWR ${fmtPct(twrTotal * 100, 1)} (2j)` + (twrYtd !== null ? ` · YTD ${fmtPct(twrYtd * 100, 1)}` : '');
     retEl.title = 'Tijdgewogen rendement: gecorrigeerd voor je stortingen en opnames. Geldgewogen: ' + fmtPct(totPct, 1);
     retEl.className = 'kpi-delta ' + (twrTotal >= 0 ? 'up' : 'down');
   } else {
-    retEl.textContent = fmtPct(totPct);
-    retEl.className = 'kpi-delta ' + (totReturn >= 0 ? 'up' : 'down');
+    retEl.textContent = currentReliable ? `${fmtPct(totPct)} geldgewogen` : 'historisch rendement geblokkeerd';
+    retEl.title = currentReliable ? 'Geldgewogen resultaat ten opzichte van netto-inleg; onvoldoende echte historie voor TWR.' : 'De huidige waardering bevat gereconstrueerde koersen.';
+    retEl.className = 'kpi-delta ' + (currentReliable ? (totReturn >= 0 ? 'up' : 'down') : 'muted');
   }
 
   $('#kpi-invested').textContent = fmtEUR.format(invested);
@@ -163,10 +183,13 @@ function renderPortfolioChart() {
   const labels = MARKET.dates.slice(start, end + 1);
   const up = slice[slice.length - 1] >= slice[0];
 
-  const series = [{ name: 'Portefeuille', color: up ? '#34d399' : '#fb7185', values: slice, fill: true, width: 2.4 }];
+  const reliable = portfolioAnalysisAvailable(computePositions(state.txs), Math.min(730, end - start + 1));
+  const series = [{ name: reliable ? 'Portefeuille' : 'Portefeuille (deels gereconstrueerd)', color: up ? '#34d399' : '#fb7185', values: slice, fill: true, width: 2.4 }];
   if (state.showBenchmark) {
     const bench = benchmarkSeries(state.txs, 'VWCE');
-    if (bench) series.push({ name: 'Alles-in-VWCE', color: '#fbbf24', values: bench.slice(start, end + 1), dash: '6 5', width: 1.8 });
+    if (bench && reliable && analysisAvailable('VWCE', Math.min(730, end - start + 1))) {
+      series.push({ name: 'Alles-in-VWCE', color: '#fbbf24', values: bench.slice(start, end + 1), dash: '6 5', width: 1.8 });
+    }
   }
   renderLineChart($('#portfolio-chart'), { labels, series, yFmt: v => compactEUR(v) });
 }
@@ -194,6 +217,7 @@ $('#tf-selector').addEventListener('click', e => {
 });
 
 $('#btn-benchmark').addEventListener('click', () => {
+  if (!assetById('VWCE') || !analysisAvailable('VWCE', 730)) { toast('⚠️ Benchmark vereist minimaal 90% echte VWCE-historie over twee jaar'); return; }
   state.showBenchmark = !state.showBenchmark;
   $('#btn-benchmark').classList.toggle('on', state.showBenchmark);
   renderPortfolioChart();
@@ -216,12 +240,16 @@ function renderHoldings(positions) {
   // rijen verrijken en sorteren op de gekozen kolom
   const rows = positions.map(p => {
     const prices = MARKET.prices[p.asset.id];
-    const sig = computeSignal(prices, state.models[p.asset.id]?.forecastPct ?? null);
+    const reliable = analysisAvailable(p.asset.id, 365);
+    const sig = reliable ? computeSignal(prices, state.models[p.asset.id]?.forecastPct ?? null) : { label: '—', score: 0 };
+    const day = MARKET.provenance[p.asset.id]?.[HISTORY_DAYS - 1] && MARKET.provenance[p.asset.id]?.[HISTORY_DAYS - 2]
+      ? (prices[prices.length - 1] / prices[prices.length - 2] - 1) * 100 : null;
     return {
       p, sig,
       name: p.asset.name.toLowerCase(),
       price: p.price,
-      day: (prices[prices.length - 1] / prices[prices.length - 2] - 1) * 100,
+      day: day ?? -Infinity,
+      dayDisplay: day,
       qty: p.qty, value: p.value, gainPct: p.gainPct,
       signal: sig.score,
     };
@@ -234,23 +262,23 @@ function renderHoldings(positions) {
   });
 
   for (const row of rows) {
-    const p = row.p, sig = row.sig, day = row.day;
+    const p = row.p, sig = row.sig, day = row.dayDisplay;
     const prices = MARKET.prices[p.asset.id];
     const spark = prices.slice(-7);
 
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td><div class="asset-cell">
-        <div class="asset-dot" style="background:${p.asset.color}">${p.asset.id.slice(0, 4)}</div>
-        <div><div class="asset-name">${p.asset.name}</div><div class="asset-ticker">${p.asset.id} · ${p.asset.type}</div></div>
+        <div class="asset-dot" style="background:${p.asset.color}">${escapeHTML(p.asset.id.slice(0, 4))}</div>
+        <div><div class="asset-name">${escapeHTML(p.asset.name)}</div><div class="asset-ticker">${escapeHTML(p.asset.id)} · ${escapeHTML(p.asset.type)}</div></div>
       </div></td>
       <td>${fmtEUR2.format(p.price)}</td>
-      <td><span class="pct ${day >= 0 ? 'up' : 'down'}">${fmtPct(day)}</span></td>
+      <td>${day === null ? '<span class="muted">—</span>' : `<span class="pct ${day >= 0 ? 'up' : 'down'}">${fmtPct(day)}</span>`}</td>
       <td>${fmtNum.format(p.qty)}</td>
       <td><b>${fmtEUR.format(p.value)}</b></td>
       <td><span class="pct ${p.gain >= 0 ? 'up' : 'down'}">${fmtSignedEUR(p.gain)}<br><span style="font-size:11px">${fmtPct(p.gainPct, 1)}</span></span></td>
       <td>${sparklineSVG(spark)}</td>
-      <td><span class="signal-badge signal-${sig.label.toLowerCase()}">${sig.label}</span></td>`;
+      <td>${sig.label === '—' ? '<span class="muted" title="Onvoldoende echte koershistorie">—</span>' : `<span class="signal-badge signal-${sig.label.toLowerCase()}">${sig.label}</span>`}</td>`;
     tr.addEventListener('click', () => {
       state.selectedAsset = p.asset.id;
       gotoView('asset');
@@ -284,22 +312,24 @@ function renderWatchlist() {
     if (!a) continue;
     const prices = MARKET.prices[id];
     const last = prices[prices.length - 1];
-    const day = (last / prices[prices.length - 2] - 1) * 100;
-    const m1 = (last / prices[prices.length - 31] - 1) * 100;
-    const m3 = (last / prices[prices.length - 91] - 1) * 100;
-    const sig = computeSignal(prices, state.models[id]?.forecastPct ?? null);
+    const real = MARKET.provenance[id] || [];
+    const day = real[HISTORY_DAYS - 1] && real[HISTORY_DAYS - 2] ? (last / prices[prices.length - 2] - 1) * 100 : null;
+    const m1 = marketCoverage(id, HISTORY_DAYS - 31) >= ANALYSIS_MIN_COVERAGE ? (last / prices[prices.length - 31] - 1) * 100 : null;
+    const m3 = marketCoverage(id, HISTORY_DAYS - 91) >= ANALYSIS_MIN_COVERAGE ? (last / prices[prices.length - 91] - 1) * 100 : null;
+    const sig = analysisAvailable(id, 365) ? computeSignal(prices, state.models[id]?.forecastPct ?? null) : null;
+    const metric = value => value === null ? '<span class="muted">—</span>' : `<span class="pct ${value >= 0 ? 'up' : 'down'}">${fmtPct(value, 1)}</span>`;
 
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td><div class="asset-cell">
-        <div class="asset-dot" style="background:${a.color}">${a.id.slice(0, 4)}</div>
-        <div><div class="asset-name">${a.name}</div><div class="asset-ticker">${a.id} · ${a.type}${held.has(id) ? ' · in bezit' : ''}</div></div>
+        <div class="asset-dot" style="background:${a.color}">${escapeHTML(a.id.slice(0, 4))}</div>
+        <div><div class="asset-name">${escapeHTML(a.name)}</div><div class="asset-ticker">${escapeHTML(a.id)} · ${escapeHTML(a.type)}${held.has(id) ? ' · in bezit' : ''}</div></div>
       </div></td>
       <td>${fmtEUR2.format(last)}</td>
-      <td><span class="pct ${day >= 0 ? 'up' : 'down'}">${fmtPct(day)}</span></td>
-      <td><span class="pct ${m1 >= 0 ? 'up' : 'down'}">${fmtPct(m1, 1)}</span></td>
-      <td><span class="pct ${m3 >= 0 ? 'up' : 'down'}">${fmtPct(m3, 1)}</span></td>
-      <td><span class="signal-badge signal-${sig.label.toLowerCase()}">${sig.label}</span></td>
+      <td>${metric(day)}</td>
+      <td>${metric(m1)}</td>
+      <td>${metric(m3)}</td>
+      <td>${sig ? `<span class="signal-badge signal-${sig.label.toLowerCase()}">${sig.label}</span>` : '<span class="muted">—</span>'}</td>
       <td><button class="tx-del" title="Niet meer volgen">★</button></td>`;
     tr.addEventListener('click', e => {
       if (e.target.closest('.tx-del')) return;
@@ -334,12 +364,14 @@ async function addEntryToWatch(entry) {
 }
 
 async function searchCryptoAndWatch(query) {
+  if (!networkConsentEnabled()) { toast('⚠️ Sta eerst externe koersdata toe bij Instellingen'); return; }
   try {
-    const res = await fetch(`https://api.coingecko.com/api/v3/search?query=${encodeURIComponent(query)}`);
+    const res = await fetch(`https://api.coingecko.com/api/v3/search?query=${encodeURIComponent(query)}`, { credentials: 'omit', referrerPolicy: 'no-referrer' });
+    if (!res.ok) throw new Error('Netwerkfout');
     const data = await res.json();
     const coin = data.coins?.[0];
     if (!coin) { toast(`⚠️ Geen crypto gevonden voor "${query}"`); return; }
-    await addEntryToWatch({ id: coin.symbol.toUpperCase().slice(0, 12), name: coin.name, type: 'Crypto', cg: coin.id });
+    await addEntryToWatch({ id: normalizeAssetId(coin.symbol), name: cleanDisplayText(coin.name, 80), type: 'Crypto', cg: cleanDisplayText(coin.id, 100) });
   } catch (e) { toast('⚠️ CoinGecko-zoekopdracht mislukt'); }
 }
 
@@ -380,7 +412,7 @@ function buildWatchSuggestions(q) {
     box.style.display = '';
     box.innerHTML = items.map((it, i) => `
       <div class="suggest-item" data-i="${i}">
-        <span>${it.icon}</span>${it.label}<span class="s-type">${it.type}</span>
+        <span>${escapeHTML(it.icon)}</span>${escapeHTML(it.label)}<span class="s-type">${escapeHTML(it.type)}</span>
       </div>`).join('');
     box.querySelectorAll('.suggest-item').forEach(el => {
       el.addEventListener('mousedown', e => { // mousedown: vóór blur
@@ -446,16 +478,34 @@ function renderAssetView() {
   const dayEl = $('#a-day');
   dayEl.textContent = fmtPct(day) + ' vandaag';
   dayEl.className = 'kpi-delta ' + (day >= 0 ? 'up' : 'down');
-  $('#a-vol').textContent = (annualizedVol(prices) * 100).toFixed(1).replace('.', ',') + '%';
+  const reliable = analysisAvailable(asset.id, 500);
+  $('#a-vol').textContent = reliable ? (annualizedVol(prices) * 100).toFixed(1).replace('.', ',') + '%' : '—';
 
   const r = rsi(prices, 14);
   const lastRsi = r[r.length - 1];
-  $('#a-rsi').textContent = lastRsi.toFixed(0);
+  $('#a-rsi').textContent = reliable ? lastRsi.toFixed(0) : '—';
   const rsiLabel = $('#a-rsi-label');
-  rsiLabel.textContent = lastRsi > 70 ? 'overbought' : lastRsi < 30 ? 'oversold' : 'neutraal';
-  rsiLabel.className = 'kpi-delta ' + (lastRsi > 70 ? 'down' : lastRsi < 30 ? 'up' : 'muted');
+  rsiLabel.textContent = reliable ? (lastRsi > 70 ? 'overbought' : lastRsi < 30 ? 'oversold' : 'neutraal') : historyCoverageLabel(asset.id, 500);
+  rsiLabel.className = 'kpi-delta ' + (reliable && lastRsi > 70 ? 'down' : reliable && lastRsi < 30 ? 'up' : 'muted');
 
   renderCompareChips();
+  if (!reliable) {
+    if (state.training) { state.training.cancel(); state.training = null; }
+    delete state.models[asset.id];
+    const histDays = 240;
+    renderLineChart($('#asset-chart'), {
+      labels: MARKET.dates.slice(-histDays),
+      series: [{ name: asset.name, color: asset.color, values: prices.slice(-histDays), fill: true, width: 2.2 }],
+      yFmt: v => compactEUR(v),
+    });
+    $('#forecast-note').innerHTML = `⚠️ <b>Alleen koersweergave:</b> ${historyCoverageLabel(asset.id, 500)} over de laatste 500 dagen. ML, indicatoren en signalen vereisen minimaal 90% aantoonbaar echte historie.`;
+    $('#rsi-chart').innerHTML = unavailableHTML(500);
+    $('#macd-chart').innerHTML = unavailableHTML(500);
+    $('#a-signal').textContent = '—';
+    $('#a-signal-conf').textContent = 'onvoldoende echte historie';
+    setAIStatus('analyse geblokkeerd');
+    return;
+  }
   renderRsiChart(prices);
   renderMacdChart(prices);
 
@@ -492,6 +542,10 @@ function renderCompareChips() {
 }
 
 function trainAssetModel(asset) {
+  if (!analysisAvailable(asset.id, 500)) {
+    setAIStatus('analyse geblokkeerd');
+    return;
+  }
   if (state.training) state.training.cancel();
   const prices = MARKET.prices[asset.id];
   setAIStatus(`traint op ${asset.id}…`);
@@ -530,7 +584,7 @@ function drawAssetChart(asset, model) {
       candles: synthOHLC(prices.slice(-n - 1), asset.seed || 3).slice(1),
       yFmt: v => compactEUR(v),
     });
-    note.innerHTML = `🕯️ <b>Candlestick-weergave</b> (100 dagen): groen = slot boven opening, rood = eronder. Hover over een candle voor open/hoog/laag/slot. Schakel terug naar <b>Lijn</b> voor de AI-voorspelling.`;
+    note.innerHTML = `🕯️ <b>Afgeleide candlesticks</b> (100 dagen): alleen slotkoersen zijn brondata; open/hoog/laag zijn indicatief uit opeenvolgende slotkoersen opgebouwd. Schakel terug naar <b>Lijn</b> voor de ML-projectie.`;
     return;
   }
 
@@ -589,10 +643,10 @@ function drawAssetChart(asset, model) {
     note.innerHTML =
       `🧠 <b>AI-voorspelling (30 dagen):</b> het neurale netwerk verwacht een koers rond <b>${fmtEUR2.format(model.forecast.median[model.forecast.median.length - 1])}</b> ` +
       `(<b class="${pct >= 0 ? 'pct up' : 'pct down'}">${fmtPct(pct, 1)}</b>). ` +
-      `De paarse band toont het ~80%-betrouwbaarheidsinterval. Getraind op ${model.samples} samples · eind-loss ${model.losses[model.losses.length - 1].toFixed(4)}.` +
-      anomTxt + ` <i>Demo — geen beleggingsadvies.</i>`;
+      `De paarse band is een indicatieve residuband, geen gekalibreerd betrouwbaarheidsinterval. Getraind op ${model.samples} samples · eind-loss ${model.losses[model.losses.length - 1].toFixed(4)}.` +
+      anomTxt + ` <i>Experimenteel — geen beleggingsadvies.</i>`;
   } else {
-    note.innerHTML = `⏳ Het neurale netwerk traint nu op <b>${asset.name}</b> — de voorspelling verschijnt zodra de training klaar is…` + anomTxt;
+      note.innerHTML = `⏳ Het neurale netwerk traint nu op <b>${escapeHTML(asset.name)}</b> — de voorspelling verschijnt zodra de training klaar is…` + anomTxt;
   }
 }
 
@@ -601,8 +655,8 @@ function updateSignalUI(asset, model) {
   const sig = computeSignal(prices, model?.forecastPct ?? null);
   $('#a-signal').innerHTML = `<span class="signal-badge signal-${sig.label.toLowerCase()}">${sig.label}</span>`;
   $('#a-signal-conf').textContent = model
-    ? `${sig.confidence}% zekerheid · incl. NN`
-    : `${sig.confidence}% zekerheid · technisch`;
+    ? `${sig.strength}% signaalsterkte · incl. NN`
+    : `${sig.strength}% signaalsterkte · technisch`;
   $('#a-signal-conf').className = 'kpi-delta muted';
 }
 
@@ -669,6 +723,7 @@ function renderLossChart(losses) {
 $('#btn-train').addEventListener('click', () => {
   if (labTraining) { labTraining.cancel(); labTraining = null; }
   const asset = assetById(state.selectedAsset) || ASSETS[0];
+  if (!analysisAvailable(asset.id, 500)) { toast('⚠️ Training vereist minimaal 90% echte historie over 500 dagen'); return; }
   const prices = MARKET.prices[asset.id];
   const btn = $('#btn-train');
   btn.textContent = '⏳ Trainen…';
@@ -704,9 +759,12 @@ $('#btn-train').addEventListener('click', () => {
 $('#btn-arena').addEventListener('click', () => {
   const asset = assetById(state.selectedAsset) || ASSETS[0];
   const holder = $('#arena-results');
+  if (!analysisAvailable(asset.id, 500)) { holder.innerHTML = unavailableHTML(500); return; }
   holder.innerHTML = '<div class="palette-empty">⚔ De drie modellen trainen en strijden nu…</div>';
   setTimeout(() => {
-    const arena = modelArena(MARKET.prices[asset.id].slice(-500));
+    let arena;
+    try { arena = modelArena(MARKET.prices[asset.id].slice(-500)); }
+    catch (e) { holder.innerHTML = `<div class="palette-empty">${escapeHTML(e.message)}</div>`; return; }
     const colors = { 'Neuraal netwerk': 'linear-gradient(90deg,#7c6bff,#22d3ee)', 'Ridge-regressie': 'linear-gradient(90deg,#22d3ee,#34d399)', 'Naïef momentum': 'linear-gradient(90deg,#5c6580,#9aa3bd)' };
     holder.innerHTML = `
       <div class="arena-grid">
@@ -722,7 +780,7 @@ $('#btn-arena').addEventListener('click', () => {
     })));
     const nn = arena.results[0], naive = arena.results[2];
     const verdict = nn.hit > naive.hit + 2
-      ? `Het neurale netwerk voorspelt de richting in <b>${nn.hit.toFixed(0)}%</b> van de ${arena.testDays} out-of-sample dagen goed — beter dan naïef momentum (${naive.hit.toFixed(0)}%). Dat is een echte, zij het bescheiden, voorsprong.`
+      ? `Het neurale netwerk voorspelt de richting in <b>${nn.hit.toFixed(0)}%</b> van de ${arena.testDays} out-of-sample dagen goed over ${arena.folds} folds — beter dan naïef momentum (${naive.hit.toFixed(0)}%). Dat is een bescheiden historische voorsprong, geen garantie.`
       : nn.hit > naive.hit - 2
         ? `Het verschil tussen het neurale netwerk (${nn.hit.toFixed(0)}%) en naïef momentum (${naive.hit.toFixed(0)}%) is verwaarloosbaar over ${arena.testDays} testdagen. Eerlijke les: koersvoorspelling is bruut moeilijk, en complexiteit is geen garantie.`
         : `Naïef momentum (${naive.hit.toFixed(0)}%) verslaat het neurale netwerk (${nn.hit.toFixed(0)}%) op deze ${arena.testDays} testdagen. Dit heet overfitting — het netwerk leerde patronen die niet generaliseren. Daarom is walk-forward validatie onmisbaar.`;
@@ -748,19 +806,26 @@ function runMonteCarlo() {
   if (!state.portfolio) state.portfolio = computePortfolioSeries(state.txs);
   const values = state.portfolio.values;
   const startValue = values[values.length - 1];
+  const positions = computePositions(state.txs);
+  if (startValue <= 0 || !portfolioAnalysisAvailable(positions, 730)) {
+    $('#mc-meta').textContent = 'onvoldoende echte historie';
+    $('#mc-results').innerHTML = unavailableHTML(730);
+    const ctx = $('#mc-canvas').getContext('2d');
+    ctx.clearRect(0, 0, $('#mc-canvas').width, $('#mc-canvas').height);
+    return;
+  }
 
-  const slice = values.slice(-504).filter(v => v > 0);
-  const rets = [];
-  for (let i = 1; i < slice.length; i++) rets.push(Math.log(slice[i] / slice[i - 1]));
+  const adjusted = cashflowAdjustedReturns(state.txs, values).returns.slice(-731);
+  const rets = adjusted.filter(r => Number.isFinite(r) && r > -1).map(r => Math.log1p(r));
   const mean = rets.reduce((s, r) => s + r, 0) / (rets.length || 1);
   const std = Math.sqrt(rets.reduce((s, r) => s + (r - mean) ** 2, 0) / (rets.length || 1));
-  const mu = Math.max(-0.1, Math.min(0.14, mean * 252 * 0.6));
-  const sigma = Math.max(0.08, Math.min(0.45, std * Math.sqrt(252)));
+  const mu = Math.max(-0.1, Math.min(0.14, mean * CALENDAR_DAYS_PER_YEAR * 0.6));
+  const sigma = Math.max(0.08, Math.min(0.45, std * Math.sqrt(CALENDAR_DAYS_PER_YEAR)));
 
   const mc = monteCarlo({ startValue, monthly, years, sims, mu, sigma });
   renderMonteCarlo($('#mc-canvas'), mc, startValue);
 
-  $('#mc-meta').textContent = `μ ${(mu * 100).toFixed(1).replace('.', ',')}% · σ ${(sigma * 100).toFixed(1).replace('.', ',')}% (geschat uit je portefeuille)`;
+  $('#mc-meta').textContent = `μ ${(mu * 100).toFixed(1).replace('.', ',')}% · σ ${(sigma * 100).toFixed(1).replace('.', ',')}% (cashflow-gecorrigeerd; historisch scenario)`;
 
   const last = mc.bands;
   const end = i => last[i][last[i].length - 1];
@@ -795,6 +860,14 @@ function runBacktest(animate) {
   if (!ASSETS.length) return;
   if (state.backtest.playing) { state.backtest.playing.cancel(); state.backtest.playing = null; }
   const assetId = btAsset.value || state.selectedAsset;
+  if (!analysisAvailable(assetId, 730)) {
+    $('#bt-metrics tbody').innerHTML = '';
+    $('#bt-verdict').innerHTML = unavailableHTML(730);
+    $('#bt-tune-result').innerHTML = '';
+    const ctx = $('#bt-canvas').getContext('2d');
+    ctx.clearRect(0, 0, $('#bt-canvas').width, $('#bt-canvas').height);
+    return;
+  }
   const threshold = parseFloat($('#bt-threshold').value);
   $('#bt-threshold-label').textContent = threshold.toFixed(2).replace('.', ',');
 
@@ -866,26 +939,45 @@ function runBacktest(animate) {
    ============================================================ */
 function renderInsights() {
   if (!state.portfolio) state.portfolio = computePortfolioSeries(state.txs);
-  const values = state.portfolio.values.filter(v => v > 0);
   const positions = computePositions(state.txs);
   if (!positions.length) return;
-  const total = values[values.length - 1];
-
-  const vol = (() => {
-    const slice = values.slice(-253);
-    const rets = [];
-    for (let i = 1; i < slice.length; i++) rets.push(Math.log(slice[i] / slice[i - 1]));
-    const mean = rets.reduce((s, r) => s + r, 0) / rets.length;
-    return Math.sqrt(rets.reduce((s, r) => s + (r - mean) ** 2, 0) / rets.length * 252);
-  })();
-
-  const sharpe = sharpeRatio(values.slice(-253));
-  const mdd = maxDrawdown(values);
+  const total = state.portfolio.values[HISTORY_DAYS - 1];
 
   const weights = positions.map(p => p.value / total);
   const hhi = weights.reduce((s, w) => s + w * w, 0);
   const nAssets = positions.length;
   const divScore = nAssets > 1 ? Math.round((1 - (hhi - 1 / nAssets) / (1 - 1 / nAssets)) * 100) : 0;
+
+  $('#i-div').textContent = divScore + '/100';
+  const divLabel = $('#i-div-label');
+  divLabel.textContent = divScore > 70 ? 'goed gespreid' : divScore > 45 ? 'kan beter' : 'geconcentreerd';
+  divLabel.className = 'kpi-delta ' + (divScore > 70 ? 'up' : divScore > 45 ? 'muted' : 'down');
+
+  renderStressButtons(positions);
+  renderReturnBars($('#returns-bars'), positions.map(p => ({ name: p.asset.id, pct: p.gainPct })));
+
+  if (!portfolioAnalysisAvailable(positions, 730)) {
+    $('#i-vol').textContent = '—';
+    $('#i-sharpe').textContent = '—';
+    $('#i-dd').textContent = '—';
+    $('#i-sharpe-label').textContent = 'onvoldoende echte historie';
+    $('#i-sharpe-label').className = 'kpi-delta muted';
+    $('#ef-advice').innerHTML = unavailableHTML(730);
+    $('#corr-heatmap').innerHTML = unavailableHTML(730);
+    $('#twr-bars').innerHTML = unavailableHTML(730);
+    $('#scatter-chart').innerHTML = unavailableHTML(730);
+    $('#ai-insights').innerHTML = unavailableHTML(730);
+    state.ef = null;
+    return;
+  }
+
+  const adjusted = cashflowAdjustedReturns(state.txs, state.portfolio.values).returns.slice(-731);
+  const rets = adjusted.filter(r => Number.isFinite(r));
+  const mean = rets.reduce((s, r) => s + r, 0) / rets.length;
+  const vol = Math.sqrt(rets.reduce((s, r) => s + (r - mean) ** 2, 0) / rets.length * CALENDAR_DAYS_PER_YEAR);
+  const sharpe = sharpeFromReturns(rets);
+  const wealth = cumulativeFromReturns(adjusted).filter(v => Number.isFinite(v));
+  const mdd = maxDrawdown(wealth);
 
   $('#i-vol').textContent = (vol * 100).toFixed(1).replace('.', ',') + '%';
   $('#i-sharpe').textContent = sharpe.toFixed(2).replace('.', ',');
@@ -893,19 +985,11 @@ function renderInsights() {
   shLabel.textContent = sharpe > 1.5 ? 'uitstekend' : sharpe > 1 ? 'goed' : sharpe > 0.5 ? 'redelijk' : 'matig';
   shLabel.className = 'kpi-delta ' + (sharpe > 1 ? 'up' : sharpe > 0.5 ? 'muted' : 'down');
   $('#i-dd').textContent = '−' + (mdd * 100).toFixed(1).replace('.', ',') + '%';
-  $('#i-div').textContent = divScore + '/100';
-  const divLabel = $('#i-div-label');
-  divLabel.textContent = divScore > 70 ? 'goed gespreid' : divScore > 45 ? 'kan beter' : 'geconcentreerd';
-  divLabel.className = 'kpi-delta ' + (divScore > 70 ? 'up' : divScore > 45 ? 'muted' : 'down');
-
   renderFrontierSection(positions);
   renderCorrelation(positions);
-  renderStressButtons(positions);
-
-  renderReturnBars($('#returns-bars'), positions.map(p => ({ name: p.asset.id, pct: p.gainPct })));
 
   if (!state.twr) state.twr = twrSeries(state.txs, state.portfolio.values);
-  const years = twrPerYear(state.twr);
+  const years = twrPerYear(state.twr, HISTORY_DAYS - 730);
   if (years.length) renderReturnBars($('#twr-bars'), years.map(y => ({ name: String(y.year), pct: y.pct })));
 
   const points = positions.map(p => {
@@ -1097,13 +1181,16 @@ function renderImportReport() {
   const holder = $('#import-report');
   if (!IMPORT_REPORT || !state.txs.length) { holder.innerHTML = ''; return; }
   const r = IMPORT_REPORT;
+  const symbols = Array.isArray(r.symbols) ? r.symbols.map(normalizeAssetId).filter(Boolean).map(escapeHTML) : [];
+  const histMatched = Math.max(0, Number(r.histMatched) || 0);
+  const synthesized = Math.max(0, Number(r.synthesized) || 0);
   holder.innerHTML = `
     <div class="import-report-card">
       <div style="font-size:17px">📥</div>
       <div>
-        <b>Import geslaagd</b> — ${r.txCount} transacties over ${r.assetCount} assets (${r.symbols.join(', ')}).
-        ${r.histMatched ? `Voor ${r.histMatched} asset(s) is echte koershistorie uit het bestand gebruikt. ` : ''}
-        ${r.synthesized ? `Voor ${r.synthesized} asset(s) is de historie gereconstrueerd rond je transactiekoersen (Brownian bridge) — trends kloppen, de dagelijkse wiebels zijn benaderd.` : ''}
+        <b>Import geslaagd</b> — ${Number(r.txCount) || 0} transacties over ${Number(r.assetCount) || 0} assets (${symbols.join(', ')}).
+        ${histMatched ? `Voor ${histMatched} asset(s) is echte koershistorie uit het bestand gebruikt. ` : ''}
+        ${synthesized ? `Voor ${synthesized} asset(s) is de historie gereconstrueerd rond transactiekoersen. Deze reeks is alleen voor visualisatie en uitgesloten van analyse.` : ''}
       </div>
     </div>`;
 }
@@ -1111,6 +1198,7 @@ function renderImportReport() {
 /* ---------- import-flow ---------- */
 function handleImportFile(file) {
   if (!file) return;
+  if (file.size > MAX_IMPORT_BYTES) { toast('⚠️ Bestand is groter dan de veilige limiet van 8 MB'); return; }
   const reader = new FileReader();
   reader.onload = () => {
     if (/\.csv$/i.test(file.name)) {
@@ -1121,7 +1209,8 @@ function handleImportFile(file) {
       const skipped = result.skippedAssets.length
         ? ` · ${result.skippedAssets.length} onbekende assets overgeslagen (${result.skippedAssets.slice(0, 5).join(', ')}${result.skippedAssets.length > 5 ? '…' : ''})`
         : '';
-      toast(`📥 ${result.bron}: ${result.added} nieuwe transacties toegevoegd, ${result.dedupe} al bekend${skipped}`);
+      const transfers = result.transfers ? ` · ${result.transfers} storting/opname verwerkt${result.estimatedTransfers ? ` (${result.estimatedTransfers} gewaardeerd op de beschikbare dagkoers)` : ''}` : '';
+      toast(`📥 ${result.bron}: ${result.added} nieuwe transacties toegevoegd, ${result.dedupe} al bekend${skipped}${transfers}`);
       if (result.added) setTimeout(() => location.reload(), 1600);
       return;
     }
@@ -1152,16 +1241,40 @@ dropCard.addEventListener('drop', e => {
 const txModal = $('#tx-modal');
 let txType = 'buy';
 const txAssetSelect = $('#tx-asset');
+let modalReturnFocus = null;
+
+function focusableIn(root) {
+  return [...root.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])')];
+}
+
+function closeTxModal() {
+  txModal.classList.remove('open');
+  txModal.setAttribute('aria-hidden', 'true');
+  modalReturnFocus?.focus?.();
+}
 
 function openTxModal() {
+  if (!ASSETS.length) { toast('⚠️ Importeer eerst een portfolio'); return; }
+  modalReturnFocus = document.activeElement;
   txModal.classList.add('open');
+  txModal.setAttribute('aria-hidden', 'false');
   $('#tx-price').value = round2(lastPrice(txAssetSelect.value));
   updateTxTotal();
+  setTimeout(() => $('#tx-qty').focus(), 0);
 }
 $('#btn-new-tx').addEventListener('click', openTxModal);
 $('#btn-new-tx2').addEventListener('click', openTxModal);
-$('#tx-cancel').addEventListener('click', () => txModal.classList.remove('open'));
-txModal.addEventListener('click', e => { if (e.target === txModal) txModal.classList.remove('open'); });
+$('#tx-cancel').addEventListener('click', closeTxModal);
+txModal.addEventListener('click', e => { if (e.target === txModal) closeTxModal(); });
+txModal.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { e.preventDefault(); closeTxModal(); return; }
+  if (e.key !== 'Tab') return;
+  const items = focusableIn(txModal);
+  if (!items.length) return;
+  const first = items[0], last = items[items.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+});
 
 $('#tx-type').addEventListener('click', e => {
   const btn = e.target.closest('button');
@@ -1202,7 +1315,7 @@ $('#tx-save').addEventListener('click', () => {
   });
   saveTransactions(state.txs);
   invalidateDerived();
-  txModal.classList.remove('open');
+  closeTxModal();
   toast(`${txType === 'buy' ? '✅ Gekocht' : '✅ Verkocht'}: ${fmtNum.format(qty)} × ${asset}`);
   renderDashboard(true);
   const activeView = document.querySelector('.view.active').id;
@@ -1269,13 +1382,19 @@ function fuzzyScore(query, label) {
 }
 
 function openPalette() {
+  modalReturnFocus = document.activeElement;
   palette.classList.add('open');
+  palette.setAttribute('aria-hidden', 'false');
   paletteInput.value = '';
   paletteSel = 0;
   renderPaletteList('');
   setTimeout(() => paletteInput.focus(), 30);
 }
-function closePalette() { palette.classList.remove('open'); }
+function closePalette() {
+  palette.classList.remove('open');
+  palette.setAttribute('aria-hidden', 'true');
+  modalReturnFocus?.focus?.();
+}
 
 function renderPaletteList(query) {
   const matches = paletteCommands()
@@ -1287,7 +1406,7 @@ function renderPaletteList(query) {
   paletteList.innerHTML = matches.length
     ? matches.map((c, i) => `
       <div class="palette-item ${i === paletteSel ? 'sel' : ''}" data-i="${i}">
-        <span class="p-icon">${c.icon}</span>${c.label}<span class="p-hint">${c.hint}</span>
+        <span class="p-icon">${escapeHTML(c.icon)}</span>${escapeHTML(c.label)}<span class="p-hint">${escapeHTML(c.hint)}</span>
       </div>`).join('')
     : '<div class="palette-empty">Geen resultaten</div>';
   paletteList._matches = matches;
@@ -1309,6 +1428,14 @@ paletteInput.addEventListener('keydown', e => {
   else if (e.key === 'Escape') closePalette();
 });
 palette.addEventListener('click', e => { if (e.target === palette) closePalette(); });
+palette.addEventListener('keydown', e => {
+  if (e.key !== 'Tab') return;
+  const items = focusableIn(palette);
+  if (!items.length) return;
+  const first = items[0], last = items[items.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+});
 $('#palette-open').addEventListener('click', openPalette);
 window.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
@@ -1370,9 +1497,15 @@ $('#empty-import').addEventListener('click', () => $('#import-file').click());
 
 /* ---------- instellingen ---------- */
 function renderSettings() {
+  const consent = networkConsentEnabled();
+  $('#set-network-consent').checked = consent;
+  $('#set-fetch-hist').disabled = !consent;
+  $('#mode-note').textContent = `Portfoliodata lokaal · netwerk ${consent ? 'aan' : 'uit'}`;
   // databeheer-info
+  const importedAt = IMPORT_REPORT?.date && Number.isFinite(new Date(IMPORT_REPORT.date).getTime())
+    ? ` · geïmporteerd op ${fmtDate.format(new Date(IMPORT_REPORT.date))}` : '';
   $('#set-data-info').innerHTML = state.txs.length
-    ? `<p class="explain">Huidige data: <b>${state.txs.length} transacties</b> over <b>${ASSETS.length} assets</b>${IMPORT_REPORT ? ` · geïmporteerd op ${fmtDate.format(new Date(IMPORT_REPORT.date))}` : ''}.</p>`
+    ? `<p class="explain">Huidige data: <b>${state.txs.length} transacties</b> over <b>${ASSETS.length} assets</b>${importedAt}.</p>`
     : '<p class="explain">Nog geen data geïmporteerd.</p>';
 
   // koershistorie-status
@@ -1383,8 +1516,8 @@ function renderSettings() {
     const tr = document.createElement('tr');
     tr.style.cursor = 'default';
     tr.innerHTML = `
-      <td><div class="asset-cell"><div class="asset-dot" style="background:${a.color};width:26px;height:26px;border-radius:8px;font-size:9px">${a.id.slice(0, 3)}</div>${a.name}</div></td>
-      <td>${a.type}</td>
+      <td><div class="asset-cell"><div class="asset-dot" style="background:${a.color};width:26px;height:26px;border-radius:8px;font-size:9px">${escapeHTML(a.id.slice(0, 3))}</div>${escapeHTML(a.name)}</div></td>
+      <td>${escapeHTML(a.type)}</td>
       <td>${fmtEUR2.format(lastPrice(a.id))}</td>
       <td><span class="pct ${st.cls === 'up' ? 'up' : ''}" style="${st.cls !== 'up' ? 'color:var(--text-3)' : ''}">${st.label}</span></td>`;
     tbody.appendChild(tr);
@@ -1402,6 +1535,17 @@ function renderSettings() {
   renderAlertList();
 }
 
+$('#set-network-consent').addEventListener('change', e => {
+  setNetworkConsent(e.target.checked);
+  renderSettings();
+  if (e.target.checked) {
+    toast('🔐 Externe koersdata toegestaan; er wordt pas opgehaald na een expliciete actie of nieuwe start');
+  } else {
+    $('#live-badge').style.display = 'none';
+    toast('🔒 Externe koersdata uitgezet');
+  }
+});
+
 $('#set-import').addEventListener('click', () => $('#import-file').click());
 $('#set-export').addEventListener('click', () => {
   if (!state.txs.length) { toast('⚠️ Nog geen data om te exporteren'); return; }
@@ -1415,14 +1559,15 @@ $('#set-clear').addEventListener('click', () => {
 });
 
 $('#set-fetch-hist').addEventListener('click', async () => {
+  if (!networkConsentEnabled()) { toast('⚠️ Sta eerst externe koersdata toe'); return; }
   const btn = $('#set-fetch-hist');
   btn.disabled = true;
   const prog = $('#hist-progress');
   const cryptoRes = await fetchLiveHistory((done, total, id) => {
-    if (id) prog.innerHTML = `<p class="explain">📡 Crypto ${done + 1}/${total}: <b>${id}</b>… (CoinGecko)</p>`;
+    if (id) prog.innerHTML = `<p class="explain">📡 Crypto ${done + 1}/${total}: <b>${escapeHTML(id)}</b>… (CoinGecko)</p>`;
   });
   const stockRes = await fetchStockHistory((done, total, id) => {
-    if (id) prog.innerHTML = `<p class="explain">📡 Aandelen/ETF ${done + 1}/${total}: <b>${id}</b>… (Yahoo Finance via proxy)</p>`;
+    if (id) prog.innerHTML = `<p class="explain">📡 Aandelen/ETF ${done + 1}/${total}: <b>${escapeHTML(id)}</b>… (rechtstreeks via Yahoo Finance)</p>`;
   });
   btn.disabled = false;
   const updated = [...(cryptoRes.updated || []), ...(stockRes.updated || [])];
@@ -1433,12 +1578,12 @@ $('#set-fetch-hist').addEventListener('click', async () => {
     delete state.models; state.models = {};
     toast(`📈 Echte historie geladen: ${updated.length} assets`);
     prog.innerHTML = failed.length
-      ? `<p class="explain">✅ ${updated.join(', ')} bijgewerkt. ⚠️ Niet gevonden op Yahoo: ${failed.join(', ')} (delisted of onbekende beurs — die blijven gereconstrueerd).</p>`
+      ? `<p class="explain">✅ ${updated.map(escapeHTML).join(', ')} bijgewerkt. ⚠️ Niet beschikbaar via Yahoo: ${failed.map(escapeHTML).join(', ')}; die blijven gereconstrueerd en zijn uitgesloten van analyse.</p>`
       : '<p class="explain">✅ Alle assets bijgewerkt.</p>';
     renderSettings();
   } else {
-    toast('⚠️ Ophalen mislukt (rate limit of proxy offline? probeer later opnieuw)');
-    prog.innerHTML = '';
+    toast('⚠️ Ophalen mislukt; controleer toestemming, netwerk/CORS of rate limits');
+    prog.innerHTML = `<p class="explain">⚠️ ${escapeHTML(cryptoRes.error || stockRes.error || 'Geen geldige koersreeksen ontvangen.')}</p>`;
   }
 });
 
@@ -1514,8 +1659,8 @@ $('#al-add').addEventListener('click', () => {
    renderen nooit de event-listeners hierboven kan blokkeren.
    ============================================================ */
 try {
-  state.watchlist = loadWatchlist();
   loadWatchAssets();      // watch-only assets (catalogus) registreren
+  state.watchlist = loadWatchlist();
   applyLiveHistory();     // eerder opgehaalde echte koershistorie toepassen
   const dcaBooked = executeDuePlans(state.txs);
   if (dcaBooked.length) setTimeout(() => toast(`⟳ ${dcaBooked.length} DCA-termijn${dcaBooked.length > 1 ? 'en' : ''} geboekt`), 1200);
@@ -1525,12 +1670,13 @@ try {
   else if (ASSETS.length) state.selectedAsset = ASSETS[0].id;
   renderDashboard(true);
   updateEmptyOverlay();
+  $('#mode-note').textContent = `Portfoliodata lokaal · netwerk ${networkConsentEnabled() ? 'aan' : 'uit'}`;
   initLivePrices();
   runAlertCheck(false);
   // warm alvast een model op voor de grootste positie (achtergrond)
   setTimeout(() => {
     const pos2 = computePositions(state.txs);
-    if (pos2.length) trainAssetModel(pos2[0].asset);
+    if (pos2.length && analysisAvailable(pos2[0].asset.id, 500)) trainAssetModel(pos2[0].asset);
   }, 800);
 } catch (e) {
   console.error('Init-fout:', e);
@@ -1543,6 +1689,7 @@ try {
 $('#bt-tune').addEventListener('click', () => {
   if (!ASSETS.length) return;
   const assetId = $('#bt-asset').value || state.selectedAsset;
+  if (!analysisAvailable(assetId, 730)) { $('#bt-tune-result').innerHTML = unavailableHTML(730); return; }
   const a = assetById(assetId);
   const tune = autoTuneBacktest(assetId);
   const best = [...tune.results].sort((x, y) => y.oosRet - x.oosRet)[0];
@@ -1621,7 +1768,7 @@ function renderDcaPreview() {
   const holder = $('#dca-preview');
   if (!asset || amount <= 0) { holder.innerHTML = ''; return; }
   const sim = simulateDca(asset, amount, day, 12);
-  if (!sim) { holder.innerHTML = ''; return; }
+  if (!sim) { holder.innerHTML = unavailableHTML(Math.min(HISTORY_DAYS, Math.ceil(12 * 31))); return; }
   const a = assetById(asset);
   const card = (title, s) => `
     <div class="dca-preview-card">
@@ -1632,7 +1779,7 @@ function renderDcaPreview() {
       </div>
     </div>`;
   holder.innerHTML = `
-    <p class="explain" style="margin-bottom:0">📊 <b>Simulatie:</b> was dit plan 12 maanden geleden gestart op ${a.name}:</p>
+    <p class="explain" style="margin-bottom:0">📊 <b>Simulatie:</b> was dit plan 12 maanden geleden gestart op ${escapeHTML(a.name)}:</p>
     <div class="dca-preview-grid">
       ${card('Vast bedrag', sim.fixed)}
       ${card('AI-gestuurd', sim.ai)}
@@ -1646,7 +1793,7 @@ $('#dca-create').addEventListener('click', () => {
   const plans = loadDcaPlans();
   plans.push({
     id: 'plan-' + Date.now(),
-    name: name || `${fmtEUR.format(amount)}/mnd → ${asset}`,
+    name: cleanDisplayText(name || `${fmtEUR.format(amount)}/mnd → ${asset}`, 80),
     asset, amount, day,
     mode: dcaMode,
     active: true,
@@ -1677,12 +1824,12 @@ function renderDcaPlans() {
     card.innerHTML = `
       <div class="asset-dot" style="background:${a.color}">${a.id.slice(0, 4)}</div>
       <div class="dca-plan-info">
-        <div class="dca-plan-title">${plan.name}
+        <div class="dca-plan-title">${escapeHTML(plan.name)}
           <span class="tag ${plan.mode === 'ai' ? 'tag-ai' : 'tag-dca'}">${plan.mode === 'ai' ? 'AI-gestuurd' : 'vast'}</span>
           ${plan.active ? '' : '<span class="tag tag-paused">gepauzeerd</span>'}
         </div>
-        <div class="dca-plan-sub">${fmtEUR.format(plan.amount)}/maand → ${a.name} · dag ${plan.day}<br>
-        volgende: <b>${fmtDate.format(next)}</b>${plan.mode === 'ai' ? ` · verwacht ${fmtEUR.format(plan.amount * mult)} (signaal ${mult}×)` : ''}</div>
+        <div class="dca-plan-sub">${fmtEUR.format(plan.amount)}/maand → ${escapeHTML(a.name)} · dag ${plan.day}<br>
+        volgende: <b>${fmtDate.format(next)}</b>${plan.mode === 'ai' ? ` · verwacht ${fmtEUR.format(plan.amount * mult)} (signaal ${mult}×)` : ''}${plan.blockedAt ? '<br><span class="pct down">wacht op echte koersdata voor een openstaande termijn</span>' : ''}</div>
       </div>
       <div class="dca-stat"><div class="v">${stats.runs}</div><div class="l">termijnen</div></div>
       <div class="dca-stat"><div class="v">${fmtEUR.format(stats.invested)}</div><div class="l">ingelegd</div></div>

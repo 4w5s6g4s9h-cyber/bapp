@@ -27,15 +27,16 @@ function realizedVol20(prices, i) {
   }
   if (n < 5) return 0.3;
   const mean = sum / n;
-  return Math.sqrt(Math.max(0, sum2 / n - mean * mean) * 252);
+  return Math.sqrt(Math.max(0, sum2 / n - mean * mean) * CALENDAR_DAYS_PER_YEAR);
 }
 
 /**
  * Draait alle strategieën over de laatste `days` dagen.
  * Retourneert { dates, buyhold, strategies:[{id,name,color,curve,trades,metrics}] }.
  */
-function computeBacktest(assetId, { days = 504, threshold = 0.05 } = {}) {
+function computeBacktest(assetId, { days = 730, threshold = 0.05 } = {}) {
   const all = MARKET.prices[assetId];
+  days = Math.min(days, all.length);
   const scores = dailySignalScores(all);
   const s50 = sma(all, 50), s200 = sma(all, 200);
   const start = all.length - days;
@@ -144,8 +145,9 @@ function playBacktest(canvas, bt, { speed = 4, onDone } = {}) {
    (in-sample) en toont wat die keuze daarna waard was op de
    laatste 30% (out-of-sample) — de enige eerlijke maatstaf.
    ============================================================ */
-function autoTuneBacktest(assetId, { days = 504 } = {}) {
+function autoTuneBacktest(assetId, { days = 730 } = {}) {
   const all = MARKET.prices[assetId];
+  days = Math.min(days, all.length);
   const scores = dailySignalScores(all);
   const start = all.length - days;
   const prices = all.slice(start);
@@ -177,7 +179,7 @@ function autoTuneBacktest(assetId, { days = 504 } = {}) {
     results.push(best);
   }
 
-  const bhIS = (prices[isEnd] / prices[0] - 1) * 100;
+  const bhIS = (prices[isEnd - 1] / prices[0] - 1) * 100;
   const bhOOS = (prices[days - 1] / prices[isEnd] - 1) * 100;
   const isDays = isEnd, oosDays = days - isEnd;
   return { results, bhIS, bhOOS, isDays, oosDays };

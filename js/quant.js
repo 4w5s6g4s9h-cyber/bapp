@@ -7,7 +7,7 @@
    ============================================================ */
 
 // ---------- rendementenmatrix & statistiek ----------
-function returnsMatrix(ids, days = 504) {
+function returnsMatrix(ids, days = 730) {
   return ids.map(id => {
     const p = MARKET.prices[id].slice(-(days + 1));
     const r = new Array(p.length - 1);
@@ -24,7 +24,7 @@ function covariance(a, b, ma, mb) {
   return s / a.length;
 }
 
-function correlationMatrix(ids, days = 504) {
+function correlationMatrix(ids, days = 730) {
   const R = returnsMatrix(ids, days);
   const means = R.map(meanOf);
   const n = ids.length;
@@ -54,12 +54,12 @@ function efficientFrontier(positions, nSamples = 3500) {
 
   const R = returnsMatrix(ids);
   const means = R.map(meanOf);
-  const mu = means.map(m => m * 252);
+  const mu = means.map(m => m * CALENDAR_DAYS_PER_YEAR);
   const n = ids.length;
   const cov = Array.from({ length: n }, () => new Array(n));
   for (let i = 0; i < n; i++)
     for (let j = i; j < n; j++) {
-      cov[i][j] = cov[j][i] = covariance(R[i], R[j], means[i], means[j]) * 252;
+      cov[i][j] = cov[j][i] = covariance(R[i], R[j], means[i], means[j]) * CALENDAR_DAYS_PER_YEAR;
     }
 
   const portStats = (w) => {
@@ -176,24 +176,8 @@ function benchmarkSeries(txs, benchId = 'VWCE') {
  * Retourneert een cumulatieve reeks (fractie, 0 = startpunt) op het datumgrid.
  */
 function twrSeries(txs, values) {
-  const flows = new Array(HISTORY_DAYS).fill(0);
-  for (const tx of txs) {
-    flows[dateToIndex(tx.date)] += (tx.type === 'buy' ? 1 : -1) * tx.qty * tx.price;
-  }
-  const series = new Array(HISTORY_DAYS).fill(null);
-  let cum = 1, started = false;
-  for (let i = 1; i < HISTORY_DAYS; i++) {
-    const v0 = values[i - 1], v1 = values[i];
-    if (!started) {
-      if (v0 > 0) { started = true; series[i - 1] = 0; }
-      else continue;
-    }
-    // flow aan het begin van dag i: koop verhoogt de basis vóór het dagrendement
-    const base = v0 + flows[i];
-    if (base > 1e-9) cum *= v1 / base;
-    series[i] = cum - 1;
-  }
-  return series;
+  const cumulative = cumulativeFromReturns(cashflowAdjustedReturns(txs, values).returns);
+  return cumulative.map(v => v === null ? null : v - 1);
 }
 
 /** TWR tussen twee gridindices (fractie). */
@@ -204,17 +188,17 @@ function twrBetween(series, i0, i1) {
 }
 
 /** TWR per kalenderjaar binnen het datavenster. */
-function twrPerYear(series) {
+function twrPerYear(series, fromIndex = 0) {
   const out = [];
   let year = null, startIdx = null;
-  for (let i = 0; i < HISTORY_DAYS; i++) {
+  for (let i = Math.max(0, fromIndex); i < HISTORY_DAYS; i++) {
     if (series[i] === null) continue;
     const y = MARKET.dates[i].getFullYear();
     if (y !== year) {
-      if (year !== null) out.push({ year, pct: twrBetween(series, startIdx, i - 1) * 100, partial: startIdx > 0 && out.length === 0 });
+      if (year !== null) out.push({ year, pct: twrBetween(series, startIdx, i - 1) * 100, partial: startIdx > fromIndex && out.length === 0 });
       year = y; startIdx = i;
     }
   }
-  if (year !== null) out.push({ year, pct: twrBetween(series, startIdx, HISTORY_DAYS - 1) * 100, partial: out.length === 0 && startIdx > 0 });
+  if (year !== null) out.push({ year, pct: twrBetween(series, startIdx, HISTORY_DAYS - 1) * 100, partial: out.length === 0 && startIdx > fromIndex });
   return out.filter(r => r.pct !== null);
 }

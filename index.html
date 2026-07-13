@@ -3,14 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://api.coingecko.com https://query1.finance.yahoo.com https://api.frankfurter.dev; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'; worker-src 'self'">
 <title>Vermogen — Beleggingen Tracker</title>
 <meta name="theme-color" content="#0a0c14">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="css/style.css?v=11">
+<link rel="stylesheet" href="css/style.css?v=12">
 </head>
 <body>
 
@@ -58,7 +56,7 @@
           <div class="ai-status-sub" id="ai-status-text">stand-by</div>
         </div>
       </div>
-      <div class="demo-note" id="mode-note">Lokale data · niets verlaat je browser</div>
+      <div class="demo-note" id="mode-note">Portfoliodata lokaal · netwerk uit</div>
     </div>
   </aside>
 
@@ -70,7 +68,7 @@
       <div class="empty-card">
         <div class="empty-icon">◈</div>
         <h2>Welkom bij Vermogen.</h2>
-        <p>Er staat nog geen data in de app. Importeer je portfolio-JSON om te beginnen — alles blijft lokaal in je browser (localStorage), er gaat niets naar een server.</p>
+        <p>Er staat nog geen data in de app. Importeer je portfolio-JSON om te beginnen. Portfoliodata wordt lokaal in deze browser opgeslagen; externe koersdata staat standaard uit.</p>
         <button class="btn btn-primary" id="empty-import">⬆ Importeer portfolio-JSON</button>
         <p class="empty-hint">Je kunt het bestand ook hierheen slepen.</p>
       </div>
@@ -257,7 +255,7 @@
           <h2>Model-arena <span class="tag tag-ai">walk-forward validatie</span></h2>
           <button class="btn btn-primary" id="btn-arena">⚔ Vergelijk modellen</button>
         </div>
-        <p class="explain" style="margin-top:0">Drie voorspellers strijden op data die ze nooit gezien hebben: getraind op de eerste 80% van <b id="arena-asset-name">—</b>, beoordeeld op de laatste 20%. Zo zie je eerlijk of het neurale netwerk het simpele model verslaat.</p>
+        <p class="explain" style="margin-top:0">Drie voorspellers strijden in vier chronologische walk-forward-rondes op <b id="arena-asset-name">—</b>. Elke ronde traint alleen op het verleden en test op het direct volgende, onaangeraakte venster; normalisatie komt uitsluitend uit trainingsdata.</p>
         <div id="arena-results" class="arena-results"></div>
       </div>
 
@@ -456,7 +454,7 @@
       <header class="view-header">
         <div>
           <h1>Instellingen</h1>
-          <p class="subtitle">Data, koershistorie en alerts — alles blijft lokaal in je browser</p>
+          <p class="subtitle">Portfoliodata lokaal; externe koerscalls alleen na toestemming</p>
         </div>
       </header>
 
@@ -467,16 +465,24 @@
           <button class="btn btn-ghost" id="set-export">⬇ Exporteer backup</button>
           <button class="btn btn-ghost btn-danger" id="set-clear">🗑 Alles wissen</button>
         </div>
-        <p class="explain">JSON-import vervangt de huidige data; CSV-import (DEGIRO/Bitvavo) vult aan met alleen nieuwe transacties. De backup-export bevat je transacties, koershistorie, watchlist en alerts in één JSON die je later weer kunt importeren. <b>Privacy:</b> alle data staat uitsluitend in de localStorage van deze browser — je kunt de app-code veilig op GitHub zetten zolang je je eigen JSON-bestanden niet meecommit.</p>
+        <p class="explain">JSON-import vervangt portfoliodata; CSV-import (DEGIRO/Bitvavo) vult aan. Een versie-2-backup bevat transacties, assets, koershistorie en herkomst, watchlist, alerts en DCA-plannen. <b>Let op:</b> localStorage is gekoppeld aan de website-origin en is niet versleuteld; gebruik een privéapparaat en commit of deel je backup niet.</p>
         <div id="set-data-info"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>🔐 Privacy en netwerk</h2></div>
+        <label class="consent-row" for="set-network-consent">
+          <input type="checkbox" id="set-network-consent">
+          <span><b>Externe koersdata toestaan</b><br><span class="explain">Stuurt uitsluitend assetzoektermen, tickers of externe asset-id's naar CoinGecko, Yahoo Finance en zo nodig Frankfurter voor EUR-wisselkoersen. Transacties, aantallen en portefeuillewaarden worden niet meegestuurd. Staat standaard uit en wordt na backupherstel opnieuw uitgezet.</span></span>
+        </label>
       </div>
 
       <div class="card">
         <div class="card-head">
           <h2>📈 Koershistorie</h2>
-          <button class="btn btn-primary" id="set-fetch-hist">📡 Haal echte crypto-historie op</button>
+          <button class="btn btn-primary" id="set-fetch-hist">📡 Haal echte historie op</button>
         </div>
-        <p class="explain">Eén klik haalt alles op: crypto via CoinGecko en aandelen/ETF's via Yahoo Finance (365 dagen dagelijks, automatische beurskeuze en USD→EUR via ECB-koersen). Gratis, geen API-key; alleen tickersymbolen verlaten je browser. Handig ritme: een paar keer per dag klikken is meer dan genoeg. Eigen koershistorie in je import-JSON (veld <span class="mono">koershistorie</span>/<span class="mono">prices</span>) wordt ook herkend.</p>
+        <p class="explain">Na expliciete toestemming haalt deze knop maximaal circa drie jaar op: crypto via CoinGecko en aandelen/ETF's rechtstreeks via Yahoo Finance, met EUR-conversie via Frankfurter. Browser-CORS kan Yahoo blokkeren; importeer dan eigen koershistorie. Gereconstrueerde reeksen worden duidelijk gemarkeerd en niet gebruikt voor ML, backtests of risicoadvies.</p>
         <div id="hist-progress"></div>
         <div class="table-wrap">
           <table class="holdings-table" id="hist-table">
@@ -509,9 +515,9 @@
 </div>
 
 <!-- ===== TRANSACTIE MODAL ===== -->
-<div class="modal-backdrop" id="tx-modal">
-  <div class="modal">
-    <h2>Nieuwe transactie</h2>
+<div class="modal-backdrop" id="tx-modal" role="dialog" aria-modal="true" aria-labelledby="tx-modal-title" aria-hidden="true">
+  <div class="modal" tabindex="-1">
+    <h2 id="tx-modal-title">Nieuwe transactie</h2>
     <div class="form-row">
       <label>Type</label>
       <div class="segmented full" id="tx-type">
@@ -520,8 +526,8 @@
       </div>
     </div>
     <div class="form-row"><label>Asset</label><select id="tx-asset" class="select full"></select></div>
-    <div class="form-row"><label>Aantal</label><input type="number" id="tx-qty" class="input" min="0" step="any" value="1"></div>
-    <div class="form-row"><label>Koers (€)</label><input type="number" id="tx-price" class="input" min="0" step="any"></div>
+    <div class="form-row"><label for="tx-qty">Aantal</label><input type="number" id="tx-qty" class="input" min="0" step="any" value="1"></div>
+    <div class="form-row"><label for="tx-price">Koers (€)</label><input type="number" id="tx-price" class="input" min="0" step="any"></div>
     <div class="modal-total" id="tx-total">Totaal: —</div>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="tx-cancel">Annuleren</button>
@@ -531,24 +537,24 @@
 </div>
 
 <!-- ===== COMMAND PALETTE ===== -->
-<div class="modal-backdrop" id="palette">
-  <div class="palette-box">
+<div class="modal-backdrop" id="palette" role="dialog" aria-modal="true" aria-label="Opdrachten zoeken" aria-hidden="true">
+  <div class="palette-box" tabindex="-1">
     <input type="text" id="palette-input" class="palette-input" placeholder="Typ een commando of asset… (esc om te sluiten)" autocomplete="off">
     <div class="palette-list" id="palette-list"></div>
   </div>
 </div>
 
-<div id="toast" class="toast"></div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<script src="js/data.js?v=11"></script>
-<script src="js/ml.js?v=11"></script>
-<script src="js/charts.js?v=11"></script>
-<script src="js/quant.js?v=11"></script>
-<script src="js/backtest.js?v=11"></script>
-<script src="js/catalog.js?v=11"></script>
-<script src="js/dca.js?v=11"></script>
-<script src="js/importer.js?v=11"></script>
-<script src="js/alerts.js?v=11"></script>
-<script src="js/app.js?v=11"></script>
+<script src="js/data.js?v=12"></script>
+<script src="js/ml.js?v=12"></script>
+<script src="js/charts.js?v=12"></script>
+<script src="js/quant.js?v=12"></script>
+<script src="js/backtest.js?v=12"></script>
+<script src="js/catalog.js?v=12"></script>
+<script src="js/dca.js?v=12"></script>
+<script src="js/importer.js?v=12"></script>
+<script src="js/alerts.js?v=12"></script>
+<script src="js/app.js?v=12"></script>
 </body>
 </html>

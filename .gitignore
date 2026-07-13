@@ -1,10 +1,15 @@
 # Persoonlijke financiële data — nooit committen
 portfolio.json
 portfolio-*.json
+Portfolio*.json
 Portfolio JSON/
 vermogen-backup-*.json
 Uitdraai en huidige portfolio bitvavo:degiro/
+**/Transactions.csv
+**/Volledige geschiedenis.csv
 
 # Systeem
 .DS_Store
 .claude/
+node_modules/
+.pnpm-store/

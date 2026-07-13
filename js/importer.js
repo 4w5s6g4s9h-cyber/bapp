@@ -11,6 +11,51 @@
 
 const CUSTOM_KEY = 'vermogen_custom_v1';
 const MODE_KEY = 'vermogen_mode';
+const BACKUP_SCHEMA_VERSION = 2;
+const NETWORK_CONSENT_KEY = 'vermogen_network_consent_v1';
+const MAX_IMPORT_BYTES = 8 * 1024 * 1024;
+const MAX_IMPORT_TRANSACTIONS = 25000;
+const MAX_IMPORT_ASSETS = 250;
+
+function storageKeys() {
+  const keys = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key !== null) keys.push(key);
+  }
+  return keys;
+}
+
+/** Past meerdere localStorage-mutaties toe met volledige rollback bij fouten. */
+function commitStorage(updates, { clearNamespace = false } = {}) {
+  const before = new Map(storageKeys().map(key => [key, localStorage.getItem(key)]));
+  try {
+    if (clearNamespace) {
+      for (const key of storageKeys()) if (key.startsWith('vermogen_')) localStorage.removeItem(key);
+    }
+    for (const [key, value] of Object.entries(updates)) {
+      if (value === null || value === undefined) localStorage.removeItem(key);
+      else localStorage.setItem(key, String(value));
+    }
+    for (const [key, value] of Object.entries(updates)) {
+      if (value !== null && value !== undefined && localStorage.getItem(key) !== String(value)) {
+        throw new Error(`Verificatie van opslagkey ${key} mislukt.`);
+      }
+    }
+  } catch (error) {
+    for (const key of storageKeys()) if (key.startsWith('vermogen_')) localStorage.removeItem(key);
+    for (const [key, value] of before) localStorage.setItem(key, value);
+    throw error;
+  }
+}
+
+function networkConsentEnabled() {
+  return localStorage.getItem(NETWORK_CONSENT_KEY) === 'yes';
+}
+
+function setNetworkConsent(enabled) {
+  localStorage.setItem(NETWORK_CONSENT_KEY, enabled ? 'yes' : 'no');
+}
 
 // ---------- waarde-parsers ----------
 function parseNum(v) {
@@ -26,7 +71,8 @@ function parseNum(v) {
   } else if (hasComma) {
     s = s.replace(',', '.');
   }
-  const n = parseFloat(s);
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(s)) return null;
+  const n = Number(s);
   return isFinite(n) ? n : null;
 }
 
@@ -42,8 +88,15 @@ function parseDateFlexible(v) {
   // dd-mm-yyyy / dd/mm/yyyy
   const m = v.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);
   if (m) {
-    const d = new Date(+m[3], +m[2] - 1, +m[1], 12);
-    return isNaN(d) ? null : d;
+    const day = +m[1], month = +m[2], year = +m[3];
+    const d = new Date(year, month - 1, day, 12);
+    return isNaN(d) || d.getFullYear() !== year || d.getMonth() !== month - 1 || d.getDate() !== day ? null : d;
+  }
+  const isoDay = v.match(/^(\d{4})-(\d{2})-(\d{2})(?:$|T)/);
+  if (isoDay) {
+    const year = +isoDay[1], month = +isoDay[2], day = +isoDay[3];
+    const check = new Date(year, month - 1, day, 12);
+    if (check.getFullYear() !== year || check.getMonth() !== month - 1 || check.getDate() !== day) return null;
   }
   const d = new Date(v);
   return isNaN(d) ? null : d;
@@ -67,6 +120,11 @@ const F_TYPE = ['side', 'transactietype', 'ordertype', 'buysell', 'action', 'ric
 const F_SYMBOL = ['asset', 'ticker', 'symbol', 'symbool', 'code', 'product', 'isin', 'fonds', 'name', 'naam', 'instrument', 'coin', 'currency'];
 const F_NAME = ['name', 'naam', 'product', 'description', 'omschrijving', 'instrument'];
 const F_ASSETCLASS = ['assettype', 'assetclass', 'categorie', 'category', 'class', 'type'];
+const F_ISIN = ['isin', 'instrumentid', 'securityid'];
+const F_CURRENCY = ['currency', 'valuta', 'quotecurrency', 'koersvaluta'];
+const F_VENUE = ['venue', 'exchange', 'beurs', 'market'];
+const F_QUOTE_SYMBOL = ['quotesymbol', 'yahoo', 'yahoosymbol', 'marketsymbol'];
+const F_SOURCE_ID = ['id', 'transactionid', 'transaction_id', 'orderid', 'order_id'];
 
 /** Herkent buy/sell in een tekstwaarde; null als het geen order-richting is. */
 function parseSide(v) {
@@ -120,13 +178,20 @@ function normalizeTxCandidate(o) {
   if (!type) type = qty < 0 ? 'sell' : 'buy';
   qty = Math.abs(qty);
 
-  const symbol = String(rawSymbol).trim().toUpperCase().slice(0, 12);
+  const symbol = normalizeAssetId(rawSymbol);
+  if (!symbol) return null;
+  const sourceId = cleanDisplayText(getField(o, F_SOURCE_ID) || '', 80);
   return {
     date: date.toISOString(), type, qty, price,
     asset: symbol,
-    assetName: rawName ? String(rawName).trim().slice(0, 40) : symbol,
+    assetName: cleanDisplayText(rawName || symbol, 80) || symbol,
     assetClass,
     currentPrice: parseNum(getField(o, ['currentprice', 'huidigekoers', 'lastprice', 'laatstekoers'])),
+    isin: cleanDisplayText(getField(o, F_ISIN) || '', 16).toUpperCase(),
+    currency: cleanDisplayText(getField(o, F_CURRENCY) || 'EUR', 8).toUpperCase(),
+    venue: cleanDisplayText(getField(o, F_VENUE) || '', 16).toUpperCase(),
+    quoteSymbol: cleanDisplayText(getField(o, F_QUOTE_SYMBOL) || '', 32),
+    sourceId,
   };
 }
 
@@ -153,9 +218,12 @@ function scanJSON(root) {
   const txs = [];
   const histories = {}; // SYMBOL -> [{idx, price}]
   const seen = new Set();
+  let scannedNodes = 0;
 
-  function visit(node, keyHint) {
+  function visit(node, keyHint, depth = 0) {
     if (node === null || typeof node !== 'object') return;
+    if (depth > 64) throw new Error('JSON is te diep genest.');
+    if (++scannedNodes > 100000) throw new Error('JSON bevat te veel objecten.');
     if (seen.has(node)) return;
     seen.add(node);
 
@@ -180,36 +248,41 @@ function scanJSON(root) {
           }
         }
       }
-      for (const item of node) visit(item, keyHint);
+      for (const item of node) visit(item, keyHint, depth + 1);
       return;
     }
-    for (const [k, v] of Object.entries(node)) visit(v, k);
+    for (const [k, v] of Object.entries(node)) visit(v, k, depth + 1);
   }
   visit(root, '');
 
   // ook: posities zonder transacties (qty + gemiddelde koopprijs) -> synthetische koop-tx
   if (txs.length === 0) {
-    function visitPositions(node) {
+    function visitPositions(node, depth = 0) {
       if (node === null || typeof node !== 'object') return;
+      if (depth > 64) return;
       if (Array.isArray(node)) {
         for (const o of node) {
           if (typeof o !== 'object' || o === null) continue;
           const sym = getField(o, F_SYMBOL);
           const qty = parseNum(getField(o, F_QTY));
           const avg = parseNum(getField(o, ['avgprice', 'averageprice', 'gak', 'costbasis', 'avgcost', 'gemiddeldekoers', 'aankoopkoers']));
-          if (sym && qty && avg && qty > 0 && avg > 0) {
+          const asset = normalizeAssetId(sym);
+          if (asset && qty && avg && qty > 0 && avg > 0) {
             const d = parseDateFlexible(getField(o, ['purchasedate', 'aankoopdatum', 'since', 'firstbuy'])) || new Date(Date.now() - 365 * 86400000);
             txs.push({
               date: d.toISOString(), type: 'buy', qty, price: avg,
-              asset: String(sym).trim().toUpperCase().slice(0, 12),
-              assetName: (getField(o, F_NAME) || sym).toString().slice(0, 40),
+              asset,
+              assetName: cleanDisplayText(getField(o, F_NAME) || sym, 80),
+              isin: cleanDisplayText(getField(o, F_ISIN) || '', 16).toUpperCase(),
+              currency: cleanDisplayText(getField(o, F_CURRENCY) || 'EUR', 8).toUpperCase(),
+              venue: cleanDisplayText(getField(o, F_VENUE) || '', 16).toUpperCase(),
             });
           }
         }
-        node.forEach(visitPositions);
+        node.forEach(item => visitPositions(item, depth + 1));
         return;
       }
-      Object.values(node).forEach(visitPositions);
+      Object.values(node).forEach(value => visitPositions(value, depth + 1));
     }
     visitPositions(root);
   }
@@ -229,12 +302,34 @@ function historyToGrid(points) {
   return grid.some(v => v === null) ? null : grid;
 }
 
+/** Echte brondekking: directe punten en forward-fill tussen eerste/laatste bronpunt. */
+function provenanceFromPoints(points) {
+  const provenance = new Array(HISTORY_DAYS).fill(false);
+  if (!points.length) return provenance;
+  const indices = points.map(p => p.idx).filter(i => Number.isInteger(i)).sort((a, b) => a - b);
+  if (!indices.length) return provenance;
+  const first = Math.max(0, indices[0]), last = Math.min(HISTORY_DAYS - 1, indices[indices.length - 1]);
+  for (let i = first; i <= last; i++) provenance[i] = true;
+  return provenance;
+}
+
+function stableTransactionId(tx, index = 0) {
+  if (tx.sourceId) return `src-${cleanDisplayText(tx.sourceId, 72).replace(/[^A-Za-z0-9._-]/g, '-')}`;
+  const raw = [tx.date, tx.type, tx.asset, Number(tx.qty).toPrecision(12), Number(tx.price).toPrecision(12)].join('|');
+  let hash = 2166136261;
+  for (let i = 0; i < raw.length; i++) {
+    hash ^= raw.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `imp-${(hash >>> 0).toString(16)}-${index}`;
+}
+
 /** Synthetiseert historie rond bekende (transactie)prijspunten. */
 function synthesizeHistory(points, symbol, volGuess) {
   const seed = [...symbol].reduce((s, c) => s * 31 + c.charCodeAt(0), 7) >>> 0;
   const rng = mulberry32(seed);
   const gauss = gaussianFactory(rng);
-  const dVol = volGuess / Math.sqrt(252);
+  const dVol = volGuess / Math.sqrt(CALENDAR_DAYS_PER_YEAR);
   const grid = new Array(HISTORY_DAYS);
 
   const anchors = points.length ? points : [{ idx: HISTORY_DAYS - 1, price: 100 }];
@@ -281,120 +376,212 @@ function guessType(symbol, name) {
 
 function volForType(type) { return type === 'Crypto' ? 0.6 : type === 'ETF' ? 0.15 : 0.3; }
 
-/**
- * Voert een import uit: registreert assets + histories, vervangt
- * transacties, en bewaart alles in localStorage.
- */
+function normalizeBackupTransaction(tx, index) {
+  if (!tx || typeof tx !== 'object') throw new Error(`Ongeldige transactie op positie ${index + 1}.`);
+  const date = parseDateFlexible(tx.date);
+  const asset = normalizeAssetId(tx.asset);
+  const qty = Number(tx.qty), price = Number(tx.price);
+  if (!date || !asset || !['buy', 'sell'].includes(tx.type) || !Number.isFinite(qty) || qty <= 0 || !Number.isFinite(price) || price < 0) {
+    throw new Error(`Ongeldige transactie op positie ${index + 1}.`);
+  }
+  const normalized = {
+    id: cleanDisplayText(tx.id || stableTransactionId({ ...tx, asset }, index), 100),
+    date: date.toISOString(), type: tx.type, asset, qty, price,
+  };
+  if (tx.dca && typeof tx.dca === 'object') {
+    normalized.dca = { plan: cleanDisplayText(tx.dca.plan || '', 80), mult: Number(tx.dca.mult) || 1 };
+  }
+  if (tx.transfer === true) normalized.transfer = true;
+  return normalized;
+}
+
+function restoreBackup(root) {
+  if (root?.schemaVersion !== BACKUP_SCHEMA_VERSION || root?.meta?.kind !== 'vermogen-backup' || !root.state) return null;
+  const state = root.state;
+  if (!Array.isArray(state.transactions) || !Array.isArray(state.assets) || typeof state.prices !== 'object') {
+    throw new Error('Backupstructuur is incompleet.');
+  }
+  if (state.transactions.length > MAX_IMPORT_TRANSACTIONS || state.assets.length > MAX_IMPORT_ASSETS) {
+    throw new Error('Backup overschrijdt de veilige importlimieten.');
+  }
+  const assets = state.assets.map((asset, index) => {
+    const id = normalizeAssetId(asset.id);
+    const prices = normalizePriceSeries(state.prices[id]);
+    if (!id || !prices) throw new Error(`Ongeldige asset of koersreeks op positie ${index + 1}.`);
+    return {
+      ...asset, id,
+      name: cleanDisplayText(asset.name || id, 80) || id,
+      color: safeColor(asset.color, CUSTOM_COLORS[index % CUSTOM_COLORS.length]),
+      type: ['Crypto', 'ETF', 'Aandeel'].includes(asset.type) ? asset.type : 'Aandeel',
+      custom: true,
+    };
+  });
+  const assetIds = new Set(assets.map(a => a.id));
+  if (assetIds.size !== assets.length) throw new Error('Backup bevat dubbele asset-id’s.');
+  const transactions = state.transactions.map(normalizeBackupTransaction);
+  if (transactions.some(tx => !assetIds.has(tx.asset))) throw new Error('Backup bevat transacties zonder assetdefinitie.');
+  const transactionIds = new Set(transactions.map(tx => tx.id));
+  if (transactionIds.size !== transactions.length) throw new Error('Backup bevat dubbele transactie-id’s.');
+
+  const prices = {}, provenance = {};
+  for (const asset of assets) {
+    prices[asset.id] = normalizePriceSeries(state.prices[asset.id]).map(p => +p.toPrecision(10));
+    const sourceFlags = state.provenance?.[asset.id];
+    if (!Array.isArray(sourceFlags) || sourceFlags.length !== HISTORY_DAYS || !sourceFlags.every(value => typeof value === 'boolean')) {
+      throw new Error(`Backup mist geldige koersherkomst voor ${asset.id}.`);
+    }
+    provenance[asset.id] = normalizeProvenance(sourceFlags);
+  }
+  const report = {
+    txCount: transactions.length,
+    assetCount: assets.length,
+    symbols: assets.map(a => a.id),
+    histMatched: assets.filter(a => a.histSource !== 'synth').length,
+    synthesized: assets.filter(a => a.histSource === 'synth').length,
+    restoredBackup: true,
+    date: new Date().toISOString(),
+  };
+  const updates = {
+    [CUSTOM_KEY]: JSON.stringify({ schemaVersion: BACKUP_SCHEMA_VERSION, assets, prices, provenance, report }),
+    [MODE_KEY]: 'import',
+    [TX_KEY]: JSON.stringify(transactions),
+    vermogen_watchlist_v1: JSON.stringify(Array.isArray(state.watchlist) ? state.watchlist.map(normalizeAssetId).filter(id => id && assetIds.has(id)) : []),
+    vermogen_alerts_v1: JSON.stringify(Array.isArray(state.alerts) ? state.alerts : []),
+    vermogen_dca_v1: JSON.stringify(Array.isArray(state.dcaPlans) ? state.dcaPlans : []),
+    vermogen_watchassets_v1: JSON.stringify(Array.isArray(state.watchAssets) ? state.watchAssets : []),
+    vermogen_livehist_v1: JSON.stringify(state.liveHistory && typeof state.liveHistory === 'object' ? state.liveHistory : {}),
+    vermogen_yahoo_v1: JSON.stringify(state.yahooMap && typeof state.yahooMap === 'object' ? state.yahooMap : {}),
+    [NETWORK_CONSENT_KEY]: 'no',
+  };
+  commitStorage(updates, { clearNamespace: true });
+  return { ok: true, txs: transactions, report };
+}
+
+/** Voert een generieke portfolio-import of een volledige backuprestore uit. */
 function importPortfolioJSON(jsonText) {
+  if (typeof jsonText !== 'string' || jsonText.length > MAX_IMPORT_BYTES) {
+    return { ok: false, error: 'Importbestand is groter dan de veilige limiet van 8 MB.' };
+  }
   let root;
   try { root = JSON.parse(jsonText); }
   catch (e) { return { ok: false, error: 'Het bestand is geen geldige JSON: ' + e.message }; }
 
-  const { txs, histories } = scanJSON(root);
-  if (!txs.length) {
-    return { ok: false, error: 'Geen transacties of posities herkend in dit bestand. Verwacht: een array met objecten die datum, aantal, koers/bedrag en een ticker/naam bevatten.' };
+  try {
+    const restored = restoreBackup(root);
+    if (restored) return restored;
+  } catch (e) {
+    return { ok: false, error: 'Backup herstellen mislukt: ' + e.message };
   }
 
-  // per asset: registreren
-  const symbols = [...new Set(txs.map(t => t.asset))];
-  const customAssets = [];
-  const customPrices = {};
-  let histMatched = 0, synthesized = 0;
+  let txs, histories;
+  try { ({ txs, histories } = scanJSON(root)); }
+  catch (e) { return { ok: false, error: 'Importstructuur afgewezen: ' + e.message }; }
+  if (!txs.length) {
+    return { ok: false, error: 'Geen transacties of posities herkend in dit bestand. Verwacht: een array met datum, aantal, koers/bedrag en ticker.' };
+  }
+  if (txs.length > MAX_IMPORT_TRANSACTIONS) return { ok: false, error: `Te veel transacties; maximum is ${MAX_IMPORT_TRANSACTIONS}.` };
 
-  // snapshotdatum = laatste transactiedatum in het bestand; daar horen
-  // eventuele currentPrice-velden bij (koers op exportmoment)
+  const symbols = [...new Set(txs.map(t => t.asset).filter(Boolean))];
+  if (symbols.length > MAX_IMPORT_ASSETS) return { ok: false, error: `Te veel assets; maximum is ${MAX_IMPORT_ASSETS}.` };
+  const customAssets = [], customPrices = {}, customProvenance = {};
+  let histMatched = 0, synthesized = 0;
   const snapshotIdx = Math.max(...txs.map(t => dateToIndex(t.date)));
 
-  symbols.forEach((sym, i) => {
+  for (let i = 0; i < symbols.length; i++) {
+    const sym = symbols[i];
     const symTxs = txs.filter(t => t.asset === sym);
-    const name = symTxs[0]?.assetName || sym;
+    const name = cleanDisplayText(symTxs[0]?.assetName || sym, 80) || sym;
     const type = symTxs.find(t => t.assetClass)?.assetClass || guessType(sym, name);
     const existing = assetById(sym);
-    const color = existing ? existing.color : CUSTOM_COLORS[i % CUSTOM_COLORS.length];
+    const color = existing ? safeColor(existing.color) : CUSTOM_COLORS[i % CUSTOM_COLORS.length];
 
-    // historie: echte punten > synthetisch rond tx-prijzen
-    let grid = null, fromImport = false;
+    let grid = null;
+    let provenance = new Array(HISTORY_DAYS).fill(false);
     const histKey = Object.keys(histories).find(k => k === sym || k.startsWith(sym) || sym.startsWith(k));
     if (histKey && histories[histKey].length >= 20) {
       grid = historyToGrid(histories[histKey]);
-      if (grid) { histMatched++; fromImport = true; }
+      if (grid) {
+        provenance = provenanceFromPoints(histories[histKey]);
+        histMatched++;
+      }
     }
     if (!grid) {
-      const anchors = symTxs
-        .filter(t => t.price > 0) // gratis verkregen (price 0) is geen koersinformatie
+      const anchors = symTxs.filter(t => t.price > 0)
         .map(t => ({ idx: dateToIndex(t.date), price: t.price }))
         .sort((a, b) => a.idx - b.idx);
-      // currentPrice van de meest recente transactie = koers op snapshotdatum
       const withCur = [...symTxs].reverse().find(t => t.currentPrice && t.currentPrice > 0);
       if (withCur) {
         const filtered = anchors.filter(a => a.idx < snapshotIdx);
         filtered.push({ idx: snapshotIdx, price: withCur.currentPrice });
         grid = synthesizeHistory(filtered, sym, volForType(type));
-      } else {
-        grid = synthesizeHistory(anchors, sym, volForType(type));
-      }
+      } else grid = synthesizeHistory(anchors, sym, volForType(type));
       synthesized++;
     }
 
-    const histSource = fromImport ? 'import' : 'synth';
-    if (existing) {
-      MARKET.prices[sym] = grid;
-      existing.histSource = histSource;
-      customPrices[sym] = grid;
-    } else {
-      const asset = { id: sym, name, type, start: grid[0], drift: 0.08, vol: volForType(type), seed: 1, color, custom: true, histSource };
-      registerAsset(asset, grid);
-      customAssets.push(asset);
-      customPrices[sym] = grid;
-    }
-  });
-
-  const cleanTxs = txs
-    .map((t, i) => ({ id: 'imp-' + i, date: t.date, type: t.type, asset: t.asset, qty: t.qty, price: t.price }))
-    .sort((a, b) => new Date(a.date) - new Date(b.date));
-
-  // persist
-  const report = {
-    txCount: cleanTxs.length,
-    assetCount: symbols.length,
-    symbols,
-    histMatched, synthesized,
-    date: new Date().toISOString(),
-  };
-  try {
-    localStorage.setItem(CUSTOM_KEY, JSON.stringify({
-      assets: customAssets,
-      prices: Object.fromEntries(Object.entries(customPrices).map(([k, v]) => [k, v.map(p => +p.toPrecision(6))])),
-      report,
-    }));
-    localStorage.setItem(MODE_KEY, 'import');
-    saveTransactions(cleanTxs);
-  } catch (e) {
-    return { ok: false, error: 'Opslaan mislukt (bestand te groot voor localStorage?): ' + e.message };
+    const metadata = symTxs.find(t => t.isin || t.currency || t.venue || t.quoteSymbol) || {};
+    const histSource = provenance.some(Boolean) ? 'import' : 'synth';
+    const asset = {
+      ...(existing || {}), id: sym, name, type, start: grid[0], drift: 0.08,
+      vol: volForType(type), seed: existing?.seed || 1, color, custom: true, histSource,
+      isin: metadata.isin || existing?.isin || '', currency: metadata.currency || existing?.currency || 'EUR',
+      venue: metadata.venue || existing?.venue || '', yahoo: metadata.quoteSymbol || existing?.yahoo || '',
+    };
+    registerAsset(asset, grid, provenance);
+    customAssets.push({ ...assetById(sym) });
+    customPrices[sym] = grid.map(p => +p.toPrecision(10));
+    customProvenance[sym] = provenance;
   }
 
+  const usedTransactionIds = new Set();
+  const cleanTxs = txs.map((t, i) => {
+    const baseId = stableTransactionId(t, i);
+    let id = baseId, suffix = 1;
+    while (usedTransactionIds.has(id)) id = `${baseId}-${suffix++}`;
+    usedTransactionIds.add(id);
+    return { id, date: t.date, type: t.type, asset: t.asset, qty: t.qty, price: t.price };
+  }).sort((a, b) => new Date(a.date) - new Date(b.date));
+  const report = {
+    txCount: cleanTxs.length, assetCount: symbols.length, symbols,
+    histMatched, synthesized, restoredBackup: false, date: new Date().toISOString(),
+  };
+  try {
+    commitStorage({
+      [CUSTOM_KEY]: JSON.stringify({ schemaVersion: BACKUP_SCHEMA_VERSION, assets: customAssets, prices: customPrices, provenance: customProvenance, report }),
+      [MODE_KEY]: 'import',
+      [TX_KEY]: JSON.stringify(cleanTxs),
+    });
+  } catch (e) {
+    return { ok: false, error: 'Opslaan mislukt; de vorige data is hersteld. ' + e.message };
+  }
   return { ok: true, txs: cleanTxs, report };
 }
 
-/** Laadt eerder geïmporteerde data bij het opstarten (vóór app.js init). */
+/** Laadt eerder geïmporteerde data en herstelt legacy-state zonder assetdefinities. */
 function loadCustomData() {
   if (localStorage.getItem(MODE_KEY) !== 'import') return null;
   try {
     const data = JSON.parse(localStorage.getItem(CUSTOM_KEY));
-    if (!data) return null;
-    for (const asset of data.assets || []) registerAsset(asset, data.prices[asset.id]);
-    for (const [sym, prices] of Object.entries(data.prices || {})) {
-      if (MARKET.prices[sym] && !(data.assets || []).some(a => a.id === sym)) MARKET.prices[sym] = prices;
+    if (!data || typeof data.prices !== 'object') return null;
+    const definitions = new Map((data.assets || []).map(asset => [normalizeAssetId(asset.id), asset]));
+    for (const [rawId, prices] of Object.entries(data.prices)) {
+      const id = normalizeAssetId(rawId);
+      if (!id) continue;
+      const asset = definitions.get(id) || {
+        id, name: id, type: guessType(id, id), color: CUSTOM_COLORS[ASSETS.length % CUSTOM_COLORS.length],
+        custom: true, histSource: data.provenance?.[id]?.some(Boolean) ? 'import' : 'synth',
+      };
+      registerAsset(asset, prices, data.provenance?.[id]);
     }
     return data.report || null;
-  } catch (e) { return null; }
+  } catch (e) {
+    console.error('Opgeslagen portfoliodata is ongeldig:', e);
+    return { error: 'Opgeslagen portfoliodata is beschadigd; importeer een backup om te herstellen.' };
+  }
 }
 
 /** Wist álle app-data (transacties, assets, watchlist, alerts, historie). */
 function clearAllData() {
-  for (const key of Object.keys(localStorage)) {
-    if (key.startsWith('vermogen_')) localStorage.removeItem(key);
-  }
+  for (const key of storageKeys()) if (key.startsWith('vermogen_')) localStorage.removeItem(key);
   location.reload();
 }
 
@@ -411,6 +598,7 @@ const COINGECKO_IDS = {
 };
 
 async function fetchLivePrices() {
+  if (!networkConsentEnabled()) return null;
   const wanted = ASSETS.filter(a => a.type === 'Crypto' && COINGECKO_IDS[a.id]);
   if (!wanted.length) return null;
   const ids = [...new Set(wanted.map(a => COINGECKO_IDS[a.id]))].join(',');
@@ -427,6 +615,8 @@ async function fetchLivePrices() {
       if (eur && eur > 0) {
         // alleen "vandaag" bijwerken; historie blijft zoals geïmporteerd
         MARKET.prices[a.id][HISTORY_DAYS - 1] = eur;
+        if (!MARKET.provenance[a.id]) MARKET.provenance[a.id] = new Array(HISTORY_DAYS).fill(false);
+        MARKET.provenance[a.id][HISTORY_DAYS - 1] = true;
         updated.push(a.id);
       }
     }
@@ -435,7 +625,7 @@ async function fetchLivePrices() {
 }
 
 /* ============================================================
-   Echte koershistorie (CoinGecko, 365 dagen EOD) + export
+   Echte koershistorie (CoinGecko, maximaal 1.095 dagen) + export
    ============================================================ */
 const LIVEHIST_KEY = 'vermogen_livehist_v1';
 
@@ -455,6 +645,7 @@ function mergeRealHistory(assetId, points) {
     byIdx.set(idx, price); // laatste waarde per dag wint
   }
   const idxs = [...byIdx.keys()].sort((a, b) => a - b);
+  if (!idxs.length) return false;
   const first = idxs[0], last = idxs[idxs.length - 1];
   // schaal het gereconstrueerde stuk vóór het echte venster naar de naad
   const ratio = byIdx.get(first) / series[first];
@@ -469,14 +660,17 @@ function mergeRealHistory(assetId, points) {
   }
   // na het venster (zeldzaam): doortrekken naar de laatste echte koers
   for (let i = last + 1; i < HISTORY_DAYS; i++) series[i] = cur;
+  if (!MARKET.provenance[assetId]) MARKET.provenance[assetId] = new Array(HISTORY_DAYS).fill(false);
+  for (let i = first; i <= last; i++) MARKET.provenance[assetId][i] = true;
   return true;
 }
 
 /**
- * Haalt 365 dagen echte dagkoersen op voor alle crypto-assets (CoinGecko),
+ * Haalt maximaal het volledige analysegrid op voor crypto-assets (CoinGecko),
  * sequentieel met pauze i.v.m. rate limits. onProgress(done, total, id).
  */
 async function fetchLiveHistory(onProgress) {
+  if (!networkConsentEnabled()) return { ok: false, error: 'Externe koersdata staat uit.', updated: [] };
   const wanted = ASSETS.filter(a => a.type === 'Crypto' && COINGECKO_IDS[a.id]);
   if (!wanted.length) return { ok: false, error: 'Geen crypto-assets met een bekende CoinGecko-koppeling.' };
   const store = loadLiveHistory();
@@ -485,22 +679,30 @@ async function fetchLiveHistory(onProgress) {
     const a = wanted[i];
     if (onProgress) onProgress(i, wanted.length, a.id);
     try {
-      const url = `https://api.coingecko.com/api/v3/coins/${COINGECKO_IDS[a.id]}/market_chart?vs_currency=eur&days=365&interval=daily`;
-      const res = await fetch(url);
-      if (res.status === 429) { await new Promise(r => setTimeout(r, 12000)); i--; continue; }
+      const url = `https://api.coingecko.com/api/v3/coins/${COINGECKO_IDS[a.id]}/market_chart?vs_currency=eur&days=${HISTORY_DAYS}&interval=daily`;
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 12000);
+      const res = await fetch(url, { signal: ctrl.signal, credentials: 'omit', referrerPolicy: 'no-referrer' });
+      clearTimeout(timer);
+      if (res.status === 429) continue;
       if (!res.ok) continue;
       const data = await res.json();
-      if (data.prices && data.prices.length > 30) {
+      if (Array.isArray(data.prices) && data.prices.length > 30 && data.prices.length <= 2000) {
         // compact opslaan: [dagindex, koers]
-        const compact = data.prices.map(([ts, p]) => [dateToIndex(new Date(ts).toISOString()), +p.toPrecision(6)]);
+        const compact = data.prices
+          .filter(point => Array.isArray(point) && Number.isFinite(Number(point[0])) && Number.isFinite(Number(point[1])) && Number(point[1]) > 0)
+          .map(([ts, p]) => [dateToIndex(new Date(Number(ts)).toISOString()), +Number(p).toPrecision(6)]);
         const dedup = new Map(compact);
-        store[a.id] = { at: Date.now(), points: [...dedup.entries()] };
-        updated.push(a.id);
+        if (dedup.size > 30) {
+          store[a.id] = { at: Date.now(), points: [...dedup.entries()] };
+          updated.push(a.id);
+        }
       }
     } catch (e) { /* netwerk: overslaan */ }
     if (i < wanted.length - 1) await new Promise(r => setTimeout(r, 1500));
   }
-  try { localStorage.setItem(LIVEHIST_KEY, JSON.stringify(store)); } catch (e) { /* quota */ }
+  try { commitStorage({ [LIVEHIST_KEY]: JSON.stringify(store) }); }
+  catch (e) { return { ok: false, error: 'Opslaan van koersdata mislukt.', updated: [] }; }
   applyLiveHistory();
   if (onProgress) onProgress(wanted.length, wanted.length, null);
   return { ok: updated.length > 0, updated };
@@ -510,8 +712,13 @@ async function fetchLiveHistory(onProgress) {
 function applyLiveHistory() {
   const store = loadLiveHistory();
   for (const [id, entry] of Object.entries(store)) {
-    if (!MARKET.prices[id]) continue;
-    mergeRealHistory(id, entry.points.map(([idx, p]) => [MARKET.dates[Math.max(0, Math.min(HISTORY_DAYS - 1, idx))].getTime(), p]));
+    if (!MARKET.prices[id] || !entry || !Array.isArray(entry.points)) continue;
+    const points = entry.points
+      .filter(point => Array.isArray(point) && Number.isInteger(Number(point[0])) && Number.isFinite(Number(point[1])) && Number(point[1]) > 0)
+      .slice(0, 2000)
+      .map(([idx, p]) => [MARKET.dates[Math.max(0, Math.min(HISTORY_DAYS - 1, Number(idx)))].getTime(), Number(p)]);
+    if (!points.length) continue;
+    mergeRealHistory(id, points);
     const a = assetById(id);
     if (a) a.histSource = entry.src === 'yahoo' ? 'yahoo' : 'live';
   }
@@ -519,27 +726,34 @@ function applyLiveHistory() {
 
 /** Status van de koershistorie per asset (voor de instellingen-pagina). */
 function historyStatus(asset) {
-  if (asset.histSource === 'live') return { label: 'echt · CoinGecko (1j)', cls: 'up' };
-  if (asset.histSource === 'yahoo') return { label: 'echt · Yahoo (1j)', cls: 'up' };
-  if (asset.histSource === 'import') return { label: 'echt · uit import', cls: 'up' };
-  return { label: 'gereconstrueerd', cls: 'muted' };
+  const coverage = marketCoverage(asset.id);
+  const pct = Math.round(coverage * 100);
+  if (asset.histSource === 'live') return { label: `CoinGecko · ${pct}% echt`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
+  if (asset.histSource === 'yahoo') return { label: `Yahoo · ${pct}% echt`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
+  if (asset.histSource === 'import') return { label: `import · ${pct}% echt`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
+  return { label: `gereconstrueerd · ${pct}% echt`, cls: 'muted' };
 }
 
 /** Exporteert alle data als downloadbare JSON (zelfde formaat als import). */
 function exportBackup(txs) {
-  const koershistorie = {};
-  for (const a of ASSETS) {
-    const series = MARKET.prices[a.id];
-    koershistorie[a.id] = MARKET.dates
-      .map((d, i) => ({ date: d.toISOString().slice(0, 10), close: +series[i].toPrecision(6) }))
-      .filter((_, i) => i % 1 === 0);
-  }
+  const assets = ASSETS.map(a => ({ ...a }));
+  const prices = Object.fromEntries(ASSETS.map(a => [a.id, MARKET.prices[a.id].map(p => +p.toPrecision(10))]));
+  const provenance = Object.fromEntries(ASSETS.map(a => [a.id, normalizeProvenance(MARKET.provenance[a.id])]));
   const payload = {
-    meta: { app: 'Vermogen', exportedAt: new Date().toISOString(), note: 'Backup — importeerbaar via Instellingen' },
-    transactions: txs,
-    koershistorie,
-    watchlist: JSON.parse(localStorage.getItem('vermogen_watchlist_v1') || '[]'),
-    alerts: loadAlerts().map(({ value, triggered, ...rule }) => rule),
+    schemaVersion: BACKUP_SCHEMA_VERSION,
+    meta: { app: 'Vermogen', kind: 'vermogen-backup', exportedAt: new Date().toISOString(), note: 'Volledige lokale backup' },
+    state: {
+      transactions: txs,
+      assets,
+      prices,
+      provenance,
+      watchlist: JSON.parse(localStorage.getItem('vermogen_watchlist_v1') || '[]'),
+      alerts: loadAlerts().map(({ value, triggered, ...rule }) => rule),
+      dcaPlans: JSON.parse(localStorage.getItem('vermogen_dca_v1') || '[]'),
+      watchAssets: JSON.parse(localStorage.getItem('vermogen_watchassets_v1') || '[]'),
+      liveHistory: loadLiveHistory(),
+      yahooMap: JSON.parse(localStorage.getItem('vermogen_yahoo_v1') || '{}'),
+    },
   };
   const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -551,34 +765,33 @@ function exportBackup(txs) {
 }
 
 /* ============================================================
-   Aandelen/ETF-koershistorie via Yahoo Finance
-   (chart-API via publieke CORS-proxy — geen API-key nodig;
-   alleen tickersymbolen verlaten je browser, nooit je portfolio)
-   + USD→EUR-conversie via frankfurter.dev (ECB-koersen, gratis)
+   Aandelen/ETF-koershistorie via directe Yahoo Finance-call.
+   Generieke publieke CORS-proxy's zijn bewust verwijderd: als de
+   browser Yahoo blokkeert, faalt de functie veilig en blijft import
+   van een eigen koershistorie de betrouwbare route.
    ============================================================ */
 const YAHOO_MAP_KEY = 'vermogen_yahoo_v1'; // gevonden symbolen cachen
 
-const CORS_PROXIES = [
-  u => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
-  u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-];
-
-async function fetchViaProxy(url) {
-  for (const wrap of CORS_PROXIES) {
-    try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 10000);
-      const res = await fetch(wrap(url), { signal: ctrl.signal });
-      clearTimeout(timer);
-      if (res.ok) return await res.json();
-    } catch (e) { /* volgende proxy */ }
+async function fetchJSONDirect(url, timeoutMs = 10000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal, credentials: 'omit', referrerPolicy: 'no-referrer' });
+    if (!res.ok) return null;
+    const type = res.headers.get('content-type') || '';
+    if (type && !/json|javascript|text\/plain/i.test(type)) return null;
+    return await res.json();
+  } catch (e) {
+    return null;
+  } finally {
+    clearTimeout(timer);
   }
-  return null;
 }
 
 /** EUR-koersen per dagindex voor een vreemde valuta (forward-filled). */
 async function fxToEurSeries(currency) {
   if (currency === 'EUR') return null;
+  if (!/^[A-Z]{3}$/.test(currency)) return null;
   const from = MARKET.dates[0].toISOString().slice(0, 10);
   const to = MARKET.dates[HISTORY_DAYS - 1].toISOString().slice(0, 10);
   try {
@@ -587,7 +800,8 @@ async function fxToEurSeries(currency) {
     const data = await res.json();
     const series = new Array(HISTORY_DAYS).fill(null);
     for (const [date, rates] of Object.entries(data.rates || {})) {
-      series[dateToIndex(date)] = rates.EUR;
+      const rate = Number(rates.EUR);
+      if (Number.isFinite(rate) && rate > 0 && rate < 1000) series[dateToIndex(date)] = rate;
     }
     let last = null;
     for (let i = 0; i < HISTORY_DAYS; i++) { if (series[i] !== null) last = series[i]; else series[i] = last; }
@@ -599,20 +813,31 @@ async function fxToEurSeries(currency) {
 
 /** Probeert een Yahoo-symbool te vinden voor een ticker (US, dan EU-beurzen). */
 function yahooCandidates(ticker) {
-  return [ticker, `${ticker}.DE`, `${ticker}.AS`, `${ticker}.MI`, `${ticker}.PA`, `${ticker}.L`];
+  const id = normalizeAssetId(ticker);
+  if (!id) return [];
+  return [id, `${id}.DE`, `${id}.AS`, `${id}.MI`, `${id}.PA`, `${id}.L`];
 }
 
 async function fetchYahooChart(symbol) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1y&interval=1d`;
-  const data = await fetchViaProxy(url);
+  if (!networkConsentEnabled() || typeof symbol !== 'string' || symbol.length > 32) return null;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=3y&interval=1d`;
+  const data = await fetchJSONDirect(url);
   const r = data?.chart?.result?.[0];
-  if (!r || !r.timestamp || !r.indicators?.quote?.[0]?.close) return null;
+  if (!r || !Array.isArray(r.timestamp) || !Array.isArray(r.indicators?.quote?.[0]?.close)) return null;
   const closes = r.indicators.quote[0].close;
+  if (r.timestamp.length !== closes.length || r.timestamp.length > 2000) return null;
   const points = [];
+  let previousTs = 0;
   for (let i = 0; i < r.timestamp.length; i++) {
-    if (closes[i] !== null && closes[i] > 0) points.push([r.timestamp[i] * 1000, closes[i]]);
+    const ts = Number(r.timestamp[i]) * 1000, close = Number(closes[i]);
+    if (!Number.isFinite(ts) || ts <= previousTs) return null;
+    previousTs = ts;
+    if (Number.isFinite(close) && close > 0 && close < 1e9) points.push([ts, close]);
   }
-  return points.length > 30 ? { points, currency: r.meta?.currency || 'USD', name: r.meta?.shortName || r.meta?.longName || null } : null;
+  const currency = cleanDisplayText(r.meta?.currency || '', 3).toUpperCase();
+  if (!/^[A-Z]{3}$/.test(currency)) return null;
+  const name = cleanDisplayText(r.meta?.shortName || r.meta?.longName || symbol, 80);
+  return points.length > 30 ? { points, currency, name } : null;
 }
 
 /**
@@ -620,6 +845,7 @@ async function fetchYahooChart(symbol) {
  * probeert per ticker meerdere beurzen, cachet het gevonden symbool.
  */
 async function fetchStockHistory(onProgress) {
+  if (!networkConsentEnabled()) return { ok: false, updated: [], failed: ASSETS.filter(a => a.type !== 'Crypto').map(a => a.id), error: 'Externe koersdata staat uit.' };
   const wanted = ASSETS.filter(a => a.type !== 'Crypto');
   if (!wanted.length) return { ok: false, updated: [], failed: [] };
   let symMap;
@@ -631,7 +857,8 @@ async function fetchStockHistory(onProgress) {
   for (let i = 0; i < wanted.length; i++) {
     const a = wanted[i];
     if (onProgress) onProgress(i, wanted.length, a.id);
-    const candidates = symMap[a.id] ? [symMap[a.id], ...yahooCandidates(a.id)] : yahooCandidates(a.id);
+    const preferred = a.yahoo || symMap[a.id];
+    const candidates = [...new Set(preferred ? [preferred, ...yahooCandidates(a.id)] : yahooCandidates(a.id))];
     let got = null, gotSym = null;
     for (const sym of candidates) {
       got = await fetchYahooChart(sym);
@@ -644,17 +871,16 @@ async function fetchStockHistory(onProgress) {
     if (got.currency !== 'EUR') {
       if (!(got.currency in fxCache)) fxCache[got.currency] = await fxToEurSeries(got.currency);
       const fx = fxCache[got.currency];
-      if (fx) points = points.map(([ts, p]) => [ts, p * fx[dateToIndex(new Date(ts).toISOString())]]);
+      if (!fx) { failed.push(a.id); continue; }
+      points = points.map(([ts, p]) => [ts, p * fx[dateToIndex(new Date(ts).toISOString())]]);
     }
     const compact = new Map(points.map(([ts, p]) => [dateToIndex(new Date(ts).toISOString()), +p.toPrecision(6)]));
     store[a.id] = { at: Date.now(), points: [...compact.entries()], src: 'yahoo' };
     updated.push(a.id);
     await new Promise(r => setTimeout(r, 400));
   }
-  try {
-    localStorage.setItem(YAHOO_MAP_KEY, JSON.stringify(symMap));
-    localStorage.setItem(LIVEHIST_KEY, JSON.stringify(store));
-  } catch (e) { /* quota */ }
+  try { commitStorage({ [YAHOO_MAP_KEY]: JSON.stringify(symMap), [LIVEHIST_KEY]: JSON.stringify(store) }); }
+  catch (e) { return { ok: false, updated: [], failed: wanted.map(a => a.id), error: 'Opslaan van koersdata mislukt.' }; }
   applyLiveHistory();
   if (onProgress) onProgress(wanted.length, wanted.length, null);
   return { ok: updated.length > 0, updated, failed };
@@ -718,8 +944,9 @@ function parseDegiroCSV(objs) {
     if (!o['Datum'] || !o['ISIN']) continue;
     const aantal = parseNum(o['Aantal']);
     if (!aantal) continue; // 0-rijen zijn CUSIP-conversies e.d.
-    const [d, m, y] = o['Datum'].split('-');
-    const dag = `${y}-${m}-${d}`; // brondatum = dedupe-dag (géén tz-conversie)
+    const parsedDate = parseDateFlexible(o['Datum']);
+    if (!parsedDate) continue;
+    const dag = `${parsedDate.getFullYear()}-${String(parsedDate.getMonth() + 1).padStart(2, '0')}-${String(parsedDate.getDate()).padStart(2, '0')}`;
     const waardeEur = Math.abs(parseNum(o['Waarde EUR']) ?? 0);
     const asset = ISIN_TICKERS[o['ISIN']] || o['ISIN'];
     const orderId = (o['Order ID'] || o[''] || o._raw[o._raw.length - 1] || '').trim();
@@ -745,20 +972,24 @@ function parseBitvavoCSV(objs) {
     const type = (o['Type'] || '').toLowerCase();
     const cur = o['Currency'];
     if (!cur || cur === 'EUR') continue;
-    if (type === 'deposit' || type === 'withdrawal') { transfers++; continue; }
-    if (!['buy', 'sell', 'staking', 'fixed_staking', 'manually_assigned'].includes(type)) continue;
-    const amt = parseFloat(o['Amount']);
+    const parsedDate = parseDateFlexible(o['Date']);
+    if (!parsedDate) continue;
+    const isTransfer = type === 'deposit' || type === 'withdrawal';
+    if (!isTransfer && !['buy', 'sell', 'staking', 'fixed_staking', 'manually_assigned'].includes(type)) continue;
+    const amt = parseNum(o['Amount']);
     if (!amt) continue;
-    const price = parseFloat(o['Quote Price']) || 0;
+    const price = parseNum(o['Quote Price']) || 0;
+    if (isTransfer) transfers++;
     txs.push({
       id: o['Transaction ID'] ? `bv-${o['Transaction ID']}` : `bv-${o['Date']}-${cur}-${amt}`,
-      day: o['Date'], // brondatum = dedupe-dag (géén tz-conversie)
-      date: new Date(`${o['Date']}T12:00:00`).toISOString(),
-      type: amt < 0 ? 'sell' : 'buy',
-      asset: cur.toUpperCase(),
-      assetName: cur.toUpperCase(),
+      day: `${parsedDate.getFullYear()}-${String(parsedDate.getMonth() + 1).padStart(2, '0')}-${String(parsedDate.getDate()).padStart(2, '0')}`,
+      date: parsedDate.toISOString(),
+      type: isTransfer ? (type === 'withdrawal' ? 'sell' : 'buy') : (amt < 0 ? 'sell' : 'buy'),
+      asset: normalizeAssetId(cur),
+      assetName: cleanDisplayText(cur, 12).toUpperCase(),
       qty: Math.abs(amt),
       price, // staking/rewards hebben prijs 0: aantal telt, kostprijs nul
+      transfer: isTransfer,
     });
   }
   return { txs, transfers };
@@ -780,12 +1011,19 @@ function importTransactionCSV(text, existingTxs) {
   else return { ok: false, error: 'CSV-formaat niet herkend. Ondersteund: DEGIRO Transactions.csv en Bitvavo Volledige geschiedenis.csv.' };
 
   if (!parsed.txs.length) return { ok: false, error: `Geen transacties gevonden in deze ${bron}-export.` };
+  if (parsed.txs.length > MAX_IMPORT_TRANSACTIONS) return { ok: false, error: `Te veel transacties; maximum is ${MAX_IMPORT_TRANSACTIONS}.` };
 
-  // dedupe: asset + dag + aantal (en op id)
+  // Dedupe primair op broker-id; zonder betrouwbare id op de volledige
+  // economische rij. Twee orders met hetzelfde aantal op dezelfde dag
+  // blijven zo bestaan wanneer prijs of richting verschilt.
   const keys = new Set(), ids = new Set();
+  const txKey = t => [
+    t.asset, String(t.date || t.day).slice(0, 10), t.type,
+    Math.abs(Number(t.qty)).toFixed(8), Number(t.price).toFixed(8), t.transfer ? 'transfer' : 'trade',
+  ].join('|');
   for (const t of existingTxs) {
-    keys.add(`${t.asset}|${String(t.date).slice(0, 10)}|${Math.abs(t.qty).toFixed(8)}`);
-    ids.add(t.id);
+    keys.add(txKey(t));
+    if (t.id) ids.add(t.id);
   }
   const known = new Set(ASSETS.map(a => a.id));
 
@@ -793,9 +1031,13 @@ function importTransactionCSV(text, existingTxs) {
   let dedupe = 0;
   for (const t of parsed.txs) {
     if (!known.has(t.asset)) { skippedAssets.add(t.asset); continue; }
-    const key = `${t.asset}|${t.day}|${t.qty.toFixed(8)}`;
-    if (keys.has(key) || ids.has(t.id)) { dedupe++; continue; }
-    keys.add(key); ids.add(t.id);
+    if (t.transfer && t.price === 0 && MARKET.prices[t.asset]) {
+      t.price = MARKET.prices[t.asset][dateToIndex(t.date)];
+      t.estimatedTransferPrice = true;
+    }
+    const key = txKey(t);
+    if ((t.id && ids.has(t.id)) || keys.has(key)) { dedupe++; continue; }
+    keys.add(key); if (t.id) ids.add(t.id);
     delete t.day;
     added.push(t);
   }
@@ -808,6 +1050,7 @@ function importTransactionCSV(text, existingTxs) {
     added: added.length,
     dedupe,
     transfers: parsed.transfers,
+    estimatedTransfers: added.filter(t => t.estimatedTransferPrice).length,
     skippedAssets: [...skippedAssets],
     addedValue: added.reduce((s, t) => s + (t.type === 'buy' ? 1 : -1) * t.qty * t.price, 0),
   };

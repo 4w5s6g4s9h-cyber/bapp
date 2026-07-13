@@ -1,19 +1,19 @@
 /* Service worker — network-first met cache-fallback (offline-support) */
-const CACHE = 'vermogen-v11';
+const CACHE = 'vermogen-v12';
 const ASSETS = [
   '.',
   'index.html',
-  'css/style.css?v=11',
-  'js/data.js?v=11',
-  'js/ml.js?v=11',
-  'js/charts.js?v=11',
-  'js/quant.js?v=11',
-  'js/backtest.js?v=11',
-  'js/catalog.js?v=11',
-  'js/dca.js?v=11',
-  'js/importer.js?v=11',
-  'js/alerts.js?v=11',
-  'js/app.js?v=11',
+  'css/style.css?v=12',
+  'js/data.js?v=12',
+  'js/ml.js?v=12',
+  'js/charts.js?v=12',
+  'js/quant.js?v=12',
+  'js/backtest.js?v=12',
+  'js/catalog.js?v=12',
+  'js/dca.js?v=12',
+  'js/importer.js?v=12',
+  'js/alerts.js?v=12',
+  'js/app.js?v=12',
   'manifest.webmanifest',
   'icon.svg',
 ];
@@ -36,11 +36,20 @@ self.addEventListener('fetch', (e) => {
   // network-first: altijd vers tijdens ontwikkeling, cache als offline-vangnet
   e.respondWith(
     fetch(e.request)
-      .then(res => {
-        const copy = res.clone();
-        caches.open(CACHE).then(c => c.put(e.request, copy));
+      .then(async res => {
+        // Cache uitsluitend succesvolle same-origin responses. Een tijdelijke
+        // 404/500 mag niet als blijvende offline-versie vast komen te zitten.
+        if (res.ok && res.type === 'basic') {
+          const copy = res.clone();
+          try { await caches.open(CACHE).then(c => c.put(e.request, copy)); } catch (error) { /* quota: netwerkresponse blijft bruikbaar */ }
+        }
         return res;
       })
-      .catch(() => caches.match(e.request))
+      .catch(async () => {
+        const cached = await caches.match(e.request);
+        if (cached) return cached;
+        if (e.request.mode === 'navigate') return caches.match('index.html');
+        return new Response('Offline en niet gecachet', { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+      })
   );
 });
