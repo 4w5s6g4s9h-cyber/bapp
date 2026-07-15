@@ -129,16 +129,19 @@ async function addWatchAsset(entry) {
       }
     } catch (e) { /* netwerk */ }
   } else {
-    // probeer meerdere beurzen tot er data is
+    // Met een ingestelde browserfallback eerst Alpha proberen; rechtstreekse
+    // Yahoo-calls worden door externe browser-origins doorgaans geblokkeerd.
     const candidates = entry.yahoo ? [entry.yahoo] : yahooCandidates(entry.id);
-    let got = null;
-    for (const sym of candidates) {
-      got = await fetchYahooChart(sym);
-      if (got) { entry.yahoo = sym; break; }
+    let got = await fetchAlphaVantageChart(entry.yahoo || entry.id);
+    if (!got) {
+      for (const sym of candidates) {
+        got = await fetchYahooChart(sym);
+        if (got) { entry.yahoo = sym; break; }
+      }
     }
     if (got) {
       points = got.points;
-      src = 'yahoo';
+      src = got.source || 'yahoo';
       if (got.name && entry.name === entry.id) entry.name = got.name;
       if (got.currency !== 'EUR') {
         const fx = await fxToEurSeries(got.currency);
@@ -147,7 +150,12 @@ async function addWatchAsset(entry) {
       }
     }
   }
-  if (!points) return { ok: false, error: `Kon geen koersdata vinden voor ${entry.id}` };
+  if (!points) {
+    const fallback = alphaVantageApiKey()
+      ? ''
+      : ' Yahoo blokkeert rechtstreekse browsercalls; vul bij Instellingen een Alpha Vantage API-sleutel in.';
+    return { ok: false, error: `Kon geen koersdata vinden voor ${entry.id}.${fallback}` };
+  }
 
   const grid = pointsToGrid(points);
   if (!grid) return { ok: false, error: `Ongeldige koersdata voor ${entry.id}` };
@@ -163,7 +171,7 @@ async function addWatchAsset(entry) {
   stored.push({ id: entry.id, name: entry.name, type: entry.type, yahoo: entry.yahoo, color, histSource: src });
   const hist = loadLiveHistory();
   const compact = new Map(points.map(([ts, p]) => [dateToIndex(new Date(ts).toISOString()), +(+p).toPrecision(6)]));
-  hist[entry.id] = { at: Date.now(), points: [...compact.entries()], src: src === 'yahoo' ? 'yahoo' : undefined };
+  hist[entry.id] = { at: Date.now(), points: [...compact.entries()], src };
   try { commitStorage({ [WATCH_ASSETS_KEY]: JSON.stringify(stored), [LIVEHIST_KEY]: JSON.stringify(hist) }); }
   catch (e) {
     removeWatchAsset(entry.id);

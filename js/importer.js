@@ -720,7 +720,7 @@ function applyLiveHistory() {
     if (!points.length) continue;
     mergeRealHistory(id, points);
     const a = assetById(id);
-    if (a) a.histSource = entry.src === 'yahoo' ? 'yahoo' : 'live';
+    if (a) a.histSource = ['yahoo', 'alpha'].includes(entry.src) ? entry.src : 'live';
   }
 }
 
@@ -730,6 +730,7 @@ function historyStatus(asset) {
   const pct = Math.round(coverage * 100);
   if (asset.histSource === 'live') return { label: `CoinGecko · ${pct}% echt`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
   if (asset.histSource === 'yahoo') return { label: `Yahoo · ${pct}% echt`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
+  if (asset.histSource === 'alpha') return { label: `Alpha Vantage · ${pct}% echt`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
   if (asset.histSource === 'import') return { label: `import · ${pct}% echt`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
   return { label: `gereconstrueerd · ${pct}% echt`, cls: 'muted' };
 }
@@ -765,12 +766,32 @@ function exportBackup(txs) {
 }
 
 /* ============================================================
-   Aandelen/ETF-koershistorie via directe Yahoo Finance-call.
-   Generieke publieke CORS-proxy's zijn bewust verwijderd: als de
-   browser Yahoo blokkeert, faalt de functie veilig en blijft import
-   van een eigen koershistorie de betrouwbare route.
+   Aandelen/ETF-koershistorie. Zonder eigen sleutel wordt Yahoo rechtstreeks
+   geprobeerd. Met een Alpha Vantage-sleutel krijgt die CORS-vriendelijke
+   browserroute voorrang en blijft Yahoo de beste-effort fallback.
+   Generieke publieke CORS-proxy's blijven bewust uitgesloten.
    ============================================================ */
 const YAHOO_MAP_KEY = 'vermogen_yahoo_v1'; // gevonden symbolen cachen
+const ALPHA_VANTAGE_KEY = 'vermogen_alpha_vantage_key_v1';
+
+function alphaVantageApiKey() {
+  const key = String(localStorage.getItem(ALPHA_VANTAGE_KEY) || '').trim();
+  return /^[A-Za-z0-9]{8,64}$/.test(key) ? key : '';
+}
+
+/** Bewaart een eigen API-sleutel alleen lokaal; een lege waarde wist hem. */
+function setAlphaVantageApiKey(value) {
+  const key = String(value || '').trim();
+  if (!key) {
+    try { localStorage.removeItem(ALPHA_VANTAGE_KEY); return true; }
+    catch (e) { return false; }
+  }
+  if (!/^[A-Za-z0-9]{8,64}$/.test(key)) return false;
+  try {
+    localStorage.setItem(ALPHA_VANTAGE_KEY, key);
+    return localStorage.getItem(ALPHA_VANTAGE_KEY) === key;
+  } catch (e) { return false; }
+}
 
 async function fetchJSONDirect(url, timeoutMs = 10000) {
   const ctrl = new AbortController();
@@ -837,12 +858,71 @@ async function fetchYahooChart(symbol) {
   const currency = cleanDisplayText(r.meta?.currency || '', 3).toUpperCase();
   if (!/^[A-Z]{3}$/.test(currency)) return null;
   const name = cleanDisplayText(r.meta?.shortName || r.meta?.longName || symbol, 80);
-  return points.length > 30 ? { points, currency, name } : null;
+  // Ook een pas genoteerd instrument kan geldige koersdata hebben, maar nog
+  // geen 30 handelsdagen historie. De analyselaag bewaakt zelf de minimale
+  // dekking; voor toevoegen aan de watchlist is een geldige slotkoers genoeg.
+  return points.length ? { points, currency, name } : null;
+}
+
+/** Zet veelgebruikte Yahoo-beurssuffixen om naar Alpha Vantage-symbolen. */
+function alphaVantageSymbol(symbol) {
+  const clean = cleanDisplayText(symbol || '', 32).toUpperCase();
+  const suffixes = { '.AS': '.AMS', '.DE': '.DEX', '.MI': '.MIL', '.PA': '.PAR', '.L': '.LON' };
+  for (const [from, to] of Object.entries(suffixes)) {
+    if (clean.endsWith(from)) return clean.slice(0, -from.length) + to;
+  }
+  return clean;
+}
+
+function inferredAlphaCurrency(symbol) {
+  if (/\.(?:AMS|DEX|MIL|PAR)$/.test(symbol)) return 'EUR';
+  if (!symbol.includes('.')) return 'USD';
+  return null; // onbekende beurs; eerst metadata opvragen (o.a. GBP versus GBX)
+}
+
+/** Maximaal 100 recente dagkoersen via de gratis Alpha Vantage-fallback. */
+async function fetchAlphaVantageChart(symbol) {
+  const key = alphaVantageApiKey();
+  const requested = alphaVantageSymbol(symbol);
+  if (!networkConsentEnabled() || !key || !/^[A-Z0-9.-]{1,32}$/.test(requested)) return null;
+
+  let resolved = requested;
+  let currency = inferredAlphaCurrency(resolved);
+  let name = cleanDisplayText(symbol, 80) || symbol;
+  if (!currency) {
+    const searchUrl = `https://www.alphavantage.co/query?function=SYMBOL_SEARCH&keywords=${encodeURIComponent(requested)}&apikey=${encodeURIComponent(key)}`;
+    const search = await fetchJSONDirect(searchUrl, 12000);
+    const matches = Array.isArray(search?.bestMatches) ? search.bestMatches : [];
+    const exact = matches.find(match => cleanDisplayText(match?.['1. symbol'] || '', 32).toUpperCase() === requested);
+    resolved = cleanDisplayText(exact?.['1. symbol'] || requested, 32).toUpperCase();
+    currency = cleanDisplayText(exact?.['8. currency'] || '', 3).toUpperCase();
+    name = cleanDisplayText(exact?.['2. name'] || symbol, 80) || symbol;
+    // Gratis sleutels staan maximaal één request per seconde toe.
+    if (currency) await new Promise(resolve => setTimeout(resolve, 1100));
+  }
+  if (!resolved || !currency || !/^[A-Z]{3}$/.test(currency)) return null;
+
+  const seriesUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${encodeURIComponent(resolved)}&outputsize=compact&apikey=${encodeURIComponent(key)}`;
+  const data = await fetchJSONDirect(seriesUrl, 12000);
+  const series = data?.['Time Series (Daily)'];
+  if (!series || typeof series !== 'object' || Array.isArray(series)) return null;
+  let priceScale = 1;
+  if (currency === 'GBX') { currency = 'GBP'; priceScale = 0.01; }
+  const points = Object.entries(series)
+    .slice(0, 100)
+    .map(([date, row]) => {
+      const ts = /^\d{4}-\d{2}-\d{2}$/.test(date) ? Date.parse(`${date}T12:00:00Z`) : NaN;
+      const close = Number(row?.['4. close']) * priceScale;
+      return [ts, close];
+    })
+    .filter(([ts, close]) => Number.isFinite(ts) && Number.isFinite(close) && close > 0 && close < 1e9)
+    .sort((a, b) => a[0] - b[0]);
+  return points.length ? { points, currency, name, source: 'alpha' } : null;
 }
 
 /**
- * Haalt echte historie op voor aandelen/ETF's (Yahoo) — beste-effort:
- * probeert per ticker meerdere beurzen, cachet het gevonden symbool.
+ * Haalt echte historie op voor aandelen/ETF's — beste-effort:
+ * gebruikt met sleutel eerst Alpha Vantage en probeert anders Yahoo-beurzen.
  */
 async function fetchStockHistory(onProgress) {
   if (!networkConsentEnabled()) return { ok: false, updated: [], failed: ASSETS.filter(a => a.type !== 'Crypto').map(a => a.id), error: 'Externe koersdata staat uit.' };
@@ -859,10 +939,13 @@ async function fetchStockHistory(onProgress) {
     if (onProgress) onProgress(i, wanted.length, a.id);
     const preferred = a.yahoo || symMap[a.id];
     const candidates = [...new Set(preferred ? [preferred, ...yahooCandidates(a.id)] : yahooCandidates(a.id))];
-    let got = null, gotSym = null;
-    for (const sym of candidates) {
-      got = await fetchYahooChart(sym);
-      if (got) { gotSym = sym; break; }
+    let gotSym = preferred || a.id;
+    let got = await fetchAlphaVantageChart(gotSym);
+    if (!got) {
+      for (const sym of candidates) {
+        got = await fetchYahooChart(sym);
+        if (got) { gotSym = sym; break; }
+      }
     }
     if (!got) { failed.push(a.id); continue; }
     symMap[a.id] = gotSym;
@@ -875,9 +958,9 @@ async function fetchStockHistory(onProgress) {
       points = points.map(([ts, p]) => [ts, p * fx[dateToIndex(new Date(ts).toISOString())]]);
     }
     const compact = new Map(points.map(([ts, p]) => [dateToIndex(new Date(ts).toISOString()), +p.toPrecision(6)]));
-    store[a.id] = { at: Date.now(), points: [...compact.entries()], src: 'yahoo' };
+    store[a.id] = { at: Date.now(), points: [...compact.entries()], src: got.source || 'yahoo' };
     updated.push(a.id);
-    await new Promise(r => setTimeout(r, 400));
+    await new Promise(r => setTimeout(r, got.source === 'alpha' ? 1100 : 400));
   }
   try { commitStorage({ [YAHOO_MAP_KEY]: JSON.stringify(symMap), [LIVEHIST_KEY]: JSON.stringify(store) }); }
   catch (e) { return { ok: false, updated: [], failed: wanted.map(a => a.id), error: 'Opslaan van koersdata mislukt.' }; }

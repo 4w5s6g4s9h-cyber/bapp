@@ -39,9 +39,10 @@ Zonder toestemming doet de app geen koersnetwerkcalls. Na het aanzetten van **In
 
 - CoinGecko voor crypto;
 - Yahoo Finance voor aandelen en ETF's;
+- optioneel Alpha Vantage als browservriendelijke koersroute voor aandelen en ETF's;
 - Frankfurter voor conversie naar EUR.
 
-Transacties, aantallen, kostprijzen en portefeuillewaarden worden niet in deze calls meegestuurd. Directe Yahoo-calls kunnen door browser-CORS worden geblokkeerd; eigen geïmporteerde koershistorie is dan de betrouwbare route.
+Transacties, aantallen, kostprijzen en portefeuillewaarden worden niet in deze calls meegestuurd. Directe Yahoo-calls kunnen door browser-CORS worden geblokkeerd. In dat geval kan een eigen Alpha Vantage API-sleutel lokaal worden opgeslagen; zodra die is ingesteld probeert de app deze route eerst. De gratis API levert maximaal 100 recente handelsdagen. De sleutel wordt niet geëxporteerd in backups. Voor langere, volledige historie blijft eigen import de betrouwbare route.
 
 `localStorage` is niet versleuteld en wordt gedeeld door pagina's op dezelfde origin. Gebruik de app daarom op een vertrouwd apparaat en host haar bij voorkeur op een eigen origin. Backupbestanden bevatten financiële data en horen niet in Git of gedeelde opslag.
 
