@@ -3,12 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://api.coingecko.com https://query1.finance.yahoo.com https://api.frankfurter.dev; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'; worker-src 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://api.coingecko.com https://query1.finance.yahoo.com https://www.alphavantage.co https://api.frankfurter.dev; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'; worker-src 'self'">
 <title>Vermogen — Beleggingen Tracker</title>
 <meta name="theme-color" content="#0a0c14">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="css/style.css?v=12">
+<link rel="stylesheet" href="css/style.css?v=14">
 </head>
 <body>
 
@@ -473,8 +473,20 @@
         <div class="card-head"><h2>🔐 Privacy en netwerk</h2></div>
         <label class="consent-row" for="set-network-consent">
           <input type="checkbox" id="set-network-consent">
-          <span><b>Externe koersdata toestaan</b><br><span class="explain">Stuurt uitsluitend assetzoektermen, tickers of externe asset-id's naar CoinGecko, Yahoo Finance en zo nodig Frankfurter voor EUR-wisselkoersen. Transacties, aantallen en portefeuillewaarden worden niet meegestuurd. Staat standaard uit en wordt na backupherstel opnieuw uitgezet.</span></span>
+          <span><b>Externe koersdata toestaan</b><br><span class="explain">Stuurt uitsluitend assetzoektermen, tickers of externe asset-id's naar CoinGecko, Yahoo Finance, de optionele Alpha Vantage-fallback en zo nodig Frankfurter voor EUR-wisselkoersen. Transacties, aantallen en portefeuillewaarden worden niet meegestuurd. Staat standaard uit en wordt na backupherstel opnieuw uitgezet.</span></span>
         </label>
+        <div class="api-key-setting">
+          <div>
+            <label for="set-alpha-key"><b>Alpha Vantage API-sleutel</b> <span class="tag">optionele browserfallback</span></label>
+            <p class="explain">Safari en Firefox blokkeren rechtstreekse Yahoo-calls. Een gratis eigen sleutel maakt maximaal 100 recente handelsdagen beschikbaar. De sleutel blijft alleen in deze browser, staat niet in backups en wordt uitsluitend naar Alpha Vantage gestuurd.</p>
+          </div>
+          <div class="api-key-controls">
+            <input type="password" id="set-alpha-key" class="input" autocomplete="off" spellcheck="false" placeholder="Plak hier je API-sleutel">
+            <button class="btn btn-ghost" id="set-alpha-save">Opslaan</button>
+            <a class="btn btn-ghost" href="https://www.alphavantage.co/support/#api-key" target="_blank" rel="noopener noreferrer">Gratis sleutel aanvragen ↗</a>
+          </div>
+          <p class="explain" id="set-alpha-status"></p>
+        </div>
       </div>
 
       <div class="card">
@@ -482,7 +494,7 @@
           <h2>📈 Koershistorie</h2>
           <button class="btn btn-primary" id="set-fetch-hist">📡 Haal echte historie op</button>
         </div>
-        <p class="explain">Na expliciete toestemming haalt deze knop maximaal circa drie jaar op: crypto via CoinGecko en aandelen/ETF's rechtstreeks via Yahoo Finance, met EUR-conversie via Frankfurter. Browser-CORS kan Yahoo blokkeren; importeer dan eigen koershistorie. Gereconstrueerde reeksen worden duidelijk gemarkeerd en niet gebruikt voor ML, backtests of risicoadvies.</p>
+        <p class="explain">Na expliciete toestemming haalt deze knop maximaal circa drie jaar op: crypto via CoinGecko en aandelen/ETF's eerst via Yahoo Finance. Als de browser Yahoo blokkeert en een Alpha Vantage-sleutel is ingesteld, gebruikt de app maximaal 100 recente handelsdagen als fallback. Vreemde valuta worden via Frankfurter naar EUR omgerekend. Gereconstrueerde reeksen worden duidelijk gemarkeerd en niet gebruikt voor ML, backtests of risicoadvies.</p>
         <div id="hist-progress"></div>
         <div class="table-wrap">
           <table class="holdings-table" id="hist-table">
@@ -546,15 +558,15 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<script src="js/data.js?v=12"></script>
-<script src="js/ml.js?v=12"></script>
-<script src="js/charts.js?v=12"></script>
-<script src="js/quant.js?v=12"></script>
-<script src="js/backtest.js?v=12"></script>
-<script src="js/catalog.js?v=12"></script>
-<script src="js/dca.js?v=12"></script>
-<script src="js/importer.js?v=12"></script>
-<script src="js/alerts.js?v=12"></script>
-<script src="js/app.js?v=12"></script>
+<script src="js/data.js?v=14"></script>
+<script src="js/ml.js?v=14"></script>
+<script src="js/charts.js?v=14"></script>
+<script src="js/quant.js?v=14"></script>
+<script src="js/backtest.js?v=14"></script>
+<script src="js/catalog.js?v=14"></script>
+<script src="js/dca.js?v=14"></script>
+<script src="js/importer.js?v=14"></script>
+<script src="js/alerts.js?v=14"></script>
+<script src="js/app.js?v=14"></script>
 </body>
 </html>

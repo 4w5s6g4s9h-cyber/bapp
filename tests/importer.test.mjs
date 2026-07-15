@@ -86,6 +86,90 @@ test('netwerk staat standaard uit en veroorzaakt geen impliciete fetch', async (
   assert.equal(rt.fetchCalls(), 0);
 });
 
+test('een API-sleutel opslaan schakelt netwerktoestemming niet stilzwijgend in', () => {
+  const rt = createRuntime(FILES);
+
+  assert.equal(rt.evaluate(`setAlphaVantageApiKey('TESTKEY123456')`), true);
+  assert.equal(rt.evaluate(`Boolean(alphaVantageApiKey())`), true);
+  assert.equal(rt.evaluate(`networkConsentEnabled()`), false);
+});
+
+test('Yahoo accepteert geldige korte historie van een nieuwe notering', async () => {
+  const timestamps = Array.from({ length: 5 }, (_, i) => 1_780_000_000 + i * 86_400);
+  const closes = timestamps.map((_, i) => 20 + i);
+  const rt = createRuntime(FILES, {
+    fetchImpl: async () => ({
+      ok: true,
+      headers: { get: () => 'application/json' },
+      json: async () => ({
+        chart: { result: [{
+          timestamp: timestamps,
+          indicators: { quote: [{ close: closes }] },
+          meta: { currency: 'USD', shortName: 'Nieuwe notering' },
+        }] },
+      }),
+    }),
+  });
+  rt.storage.setItem('vermogen_network_consent_v1', 'yes');
+
+  const result = await rt.evaluate(`fetchYahooChart('SPCX')`);
+
+  assert.equal(result.points.length, 5);
+  assert.equal(result.currency, 'USD');
+  assert.equal(result.name, 'Nieuwe notering');
+});
+
+test('watchlist gebruikt Alpha Vantage wanneer de browser Yahoo blokkeert', async () => {
+  const storage = new MemoryStorage({
+    vermogen_network_consent_v1: 'yes',
+    vermogen_alpha_vantage_key_v1: 'TESTKEY123456',
+  });
+  const jsonResponse = body => ({
+    ok: true,
+    headers: { get: () => 'application/json' },
+    json: async () => body,
+  });
+  let alphaCalls = 0;
+  let yahooCalls = 0;
+  const rt = createRuntime(['js/data.js', 'js/catalog.js', 'js/importer.js'], {
+    storage,
+    fetchImpl: async url => {
+      const target = String(url);
+      if (target.startsWith('https://query1.finance.yahoo.com/')) {
+        yahooCalls++;
+        throw new TypeError('CORS blocked');
+      }
+      if (target.includes('function=SYMBOL_SEARCH')) {
+        throw new Error('Een gewone Amerikaanse ticker mag geen extra zoekrequest doen');
+      }
+      if (target.includes('function=TIME_SERIES_DAILY')) {
+        alphaCalls++;
+        return jsonResponse({ 'Time Series (Daily)': {
+          '2026-07-10': { '4. close': '145.30' },
+          '2026-07-09': { '4. close': '152.16' },
+          '2026-07-08': { '4. close': '148.30' },
+          '2026-07-07': { '4. close': '149.47' },
+          '2026-07-06': { '4. close': '160.42' },
+        } });
+      }
+      if (target.startsWith('https://api.frankfurter.dev/')) {
+        return jsonResponse({ rates: { '2020-01-01': { EUR: 0.9 } } });
+      }
+      throw new Error(`Onverwachte URL: ${target}`);
+    },
+  });
+
+  const result = await rt.evaluate(`addWatchAsset({ id: 'SPCX', name: 'SPCX', type: 'Aandeel' })`);
+
+  assert.equal(result.ok, true);
+  assert.equal(alphaCalls, 1);
+  assert.equal(yahooCalls, 0);
+  assert.equal(rt.evaluate(`assetById('SPCX').name`), 'SPCX');
+  assert.equal(rt.evaluate(`assetById('SPCX').histSource`), 'alpha');
+  assert.ok(Math.abs(rt.evaluate(`lastPrice('SPCX')`) - 130.77) < 1e-9);
+  assert.equal(JSON.parse(storage.getItem('vermogen_livehist_v1')).SPCX.src, 'alpha');
+});
+
 test('backuprestore zet voorkeuren terug maar netwerktoestemming uit', () => {
   const rt = createRuntime(FILES);
   const result = rt.evaluate(`(() => {

@@ -1499,6 +1499,14 @@ $('#empty-import').addEventListener('click', () => $('#import-file').click());
 function renderSettings() {
   const consent = networkConsentEnabled();
   $('#set-network-consent').checked = consent;
+  const alphaInput = $('#set-alpha-key');
+  const alphaKeySet = Boolean(alphaVantageApiKey());
+  if (document.activeElement !== alphaInput) alphaInput.value = alphaKeySet ? alphaVantageApiKey() : '';
+  $('#set-alpha-status').innerHTML = alphaKeySet
+    ? consent
+      ? '✅ API-sleutel opgeslagen · externe koersdata staat aan.'
+      : '⚠️ API-sleutel opgeslagen, maar <b>Externe koersdata toestaan</b> staat nog uit.'
+    : 'Geen Alpha Vantage-sleutel opgeslagen.';
   $('#set-fetch-hist').disabled = !consent;
   $('#mode-note').textContent = `Portfoliodata lokaal · netwerk ${consent ? 'aan' : 'uit'}`;
   // databeheer-info
@@ -1546,6 +1554,20 @@ $('#set-network-consent').addEventListener('change', e => {
   }
 });
 
+$('#set-alpha-save').addEventListener('click', () => {
+  const value = $('#set-alpha-key').value.trim();
+  if (!setAlphaVantageApiKey(value)) {
+    toast('⚠️ Ongeldige Alpha Vantage API-sleutel');
+    return;
+  }
+  renderSettings();
+  if (value && !networkConsentEnabled()) {
+    toast('🔑 Sleutel opgeslagen; zet hierboven ook Externe koersdata toestaan aan');
+  } else {
+    toast(value ? '🔑 Alpha Vantage-browserfallback opgeslagen' : '🔑 Alpha Vantage-sleutel verwijderd');
+  }
+});
+
 $('#set-import').addEventListener('click', () => $('#import-file').click());
 $('#set-export').addEventListener('click', () => {
   if (!state.txs.length) { toast('⚠️ Nog geen data om te exporteren'); return; }
@@ -1567,7 +1589,7 @@ $('#set-fetch-hist').addEventListener('click', async () => {
     if (id) prog.innerHTML = `<p class="explain">📡 Crypto ${done + 1}/${total}: <b>${escapeHTML(id)}</b>… (CoinGecko)</p>`;
   });
   const stockRes = await fetchStockHistory((done, total, id) => {
-    if (id) prog.innerHTML = `<p class="explain">📡 Aandelen/ETF ${done + 1}/${total}: <b>${escapeHTML(id)}</b>… (rechtstreeks via Yahoo Finance)</p>`;
+    if (id) prog.innerHTML = `<p class="explain">📡 Aandelen/ETF ${done + 1}/${total}: <b>${escapeHTML(id)}</b>… (Yahoo / Alpha Vantage-fallback)</p>`;
   });
   btn.disabled = false;
   const updated = [...(cryptoRes.updated || []), ...(stockRes.updated || [])];
@@ -1578,11 +1600,11 @@ $('#set-fetch-hist').addEventListener('click', async () => {
     delete state.models; state.models = {};
     toast(`📈 Echte historie geladen: ${updated.length} assets`);
     prog.innerHTML = failed.length
-      ? `<p class="explain">✅ ${updated.map(escapeHTML).join(', ')} bijgewerkt. ⚠️ Niet beschikbaar via Yahoo: ${failed.map(escapeHTML).join(', ')}; die blijven gereconstrueerd en zijn uitgesloten van analyse.</p>`
+      ? `<p class="explain">✅ ${updated.map(escapeHTML).join(', ')} bijgewerkt. ⚠️ Niet beschikbaar via de ingestelde koersbronnen: ${failed.map(escapeHTML).join(', ')}; die blijven gereconstrueerd en zijn uitgesloten van analyse.</p>`
       : '<p class="explain">✅ Alle assets bijgewerkt.</p>';
     renderSettings();
   } else {
-    toast('⚠️ Ophalen mislukt; controleer toestemming, netwerk/CORS of rate limits');
+    toast('⚠️ Ophalen mislukt; controleer toestemming, API-sleutel of rate limits');
     prog.innerHTML = `<p class="explain">⚠️ ${escapeHTML(cryptoRes.error || stockRes.error || 'Geen geldige koersreeksen ontvangen.')}</p>`;
   }
 });

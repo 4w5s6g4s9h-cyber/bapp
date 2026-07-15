@@ -529,6 +529,10 @@ input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.2); }
 }
 .consent-row input { width: 20px; height: 20px; margin-top: 2px; accent-color: var(--accent); flex: 0 0 auto; }
 .consent-row .explain { display: inline-block; margin-top: 4px; }
+.api-key-setting { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--card-border); }
+.api-key-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.api-key-controls .input { flex: 1 1 240px; min-width: 0; }
+#set-alpha-status { margin-top: 10px; }
 .btn-danger { color: var(--red); border-color: rgba(251, 113, 133, 0.35); }
 .btn-danger:hover { background: rgba(251, 113, 133, 0.1); color: var(--red); }
 
