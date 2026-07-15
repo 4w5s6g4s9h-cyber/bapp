@@ -1447,17 +1447,159 @@ window.addEventListener('keydown', e => {
 /* ============================================================
    LIVE KOERSEN + PWA + INIT
    ============================================================ */
-async function initLivePrices() {
-  const updated = await fetchLivePrices();
-  if (!updated) return;
-  invalidateDerived();
+const AUTO_REFRESH_POLL_MS = 60 * 1000;
+const refreshDateTime = new Intl.DateTimeFormat('nl-NL', {
+  day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
+});
+let autoRefreshTimer = null;
+let priceRefreshBusy = false;
+
+function formatRefreshMoment(value) {
+  const timestamp = validRefreshTimestamp(value);
+  if (!timestamp) return 'nog niet';
+  const age = Math.max(0, Date.now() - timestamp);
+  if (age < 60 * 1000) return 'zojuist';
+  if (age < 60 * 60 * 1000) return `${Math.floor(age / 60000)} min geleden`;
+  if (age < 24 * 60 * 60 * 1000) return `${Math.floor(age / 3600000)} uur geleden`;
+  return refreshDateTime.format(new Date(timestamp));
+}
+
+function latestStoredPriceAt() {
+  return Math.max(0, ...Object.values(loadLiveHistory()).map(entry => validRefreshTimestamp(entry?.at)));
+}
+
+function renderPriceRefreshStatus() {
+  const consent = networkConsentEnabled();
+  const automatic = autoRefreshEnabled();
+  const meta = loadPriceRefreshMeta();
+  const lastSuccess = Math.max(meta.cryptoSuccessAt, meta.stockSuccessAt, latestStoredPriceAt());
+  const status = $('#set-refresh-status');
+  if (status) {
+    let text;
+    if (!consent) text = 'Uit: externe koersdata is niet toegestaan.';
+    else if (priceRefreshBusy) text = 'Bezig met gecontroleerd verversen…';
+    else if (!automatic) text = `Handmatig/start-up · laatste opslag ${formatRefreshMoment(lastSuccess)}.`;
+    else text = `Actief · crypto maximaal elk uur, aandelen/ETF’s maximaal dagelijks · laatste succes ${formatRefreshMoment(lastSuccess)}.`;
+    if (meta.lastError && consent) text += ` Laatste melding: ${meta.lastError}`;
+    status.textContent = text;
+    status.classList.toggle('is-live', consent && automatic && !meta.lastError);
+    status.classList.toggle('has-warning', Boolean(meta.lastError));
+  }
   const badge = $('#live-badge');
-  badge.style.display = '';
-  badge.title = `Live via CoinGecko: ${updated.join(', ')}`;
-  if (document.querySelector('.view.active').id === 'view-dashboard') renderDashboard(false);
-  toast(`📡 Live koersen geladen: ${updated.join(', ')}`);
+  if (lastSuccess) {
+    badge.style.display = '';
+    badge.textContent = '● koersdata';
+    badge.title = `Laatste opgeslagen koersupdate: ${refreshDateTime.format(new Date(lastSuccess))}`;
+  } else if (!priceRefreshBusy) {
+    badge.style.display = 'none';
+  }
+}
+
+function renderAfterPriceRefresh(updated) {
+  if (!updated.length) return;
+  invalidateDerived();
+  state.twr = null;
+  delete state.models;
+  state.models = {};
+  const active = document.querySelector('.view.active')?.id;
+  if (active === 'view-dashboard') renderDashboard(false);
+  else if (active === 'view-asset') renderAssetView();
+  else if (active === 'view-settings') renderSettings();
   runAlertCheck(true);
 }
+
+async function runAutomaticPriceRefresh({ reason = 'timer', startup = false } = {}) {
+  if (priceRefreshBusy || !networkConsentEnabled()) {
+    renderPriceRefreshStatus();
+    return { ok: false, updated: [], skipped: priceRefreshBusy ? 'busy' : 'disabled' };
+  }
+  const automatic = autoRefreshEnabled();
+  const now = Date.now();
+  const meta = loadPriceRefreshMeta();
+  const cryptoTargets = cryptoPriceTargets();
+  const cryptoDue = cryptoTargets.length > 0
+    && ((startup && !automatic) || (automatic && isPriceRefreshDue(meta.cryptoAttemptAt, CRYPTO_AUTO_REFRESH_MS, now)));
+  const hasStockTargets = ASSETS.some(asset => asset.type !== 'Crypto' && MARKET.prices[asset.id]);
+  const stockWindowDue = automatic && hasStockTargets && isPriceRefreshDue(meta.stockAttemptAt, STOCK_AUTO_REFRESH_MS, now);
+  const stockIds = stockWindowDue ? autoStockRefreshIds(now) : [];
+
+  if (!cryptoDue && !stockIds.length) {
+    if (stockWindowDue) savePriceRefreshMeta({ stockAttemptAt: now, completedAt: now });
+    renderPriceRefreshStatus();
+    return { ok: true, updated: [], skipped: 'fresh' };
+  }
+
+  priceRefreshBusy = true;
+  savePriceRefreshMeta({
+    ...(cryptoDue ? { cryptoAttemptAt: now } : {}),
+    ...(stockIds.length ? { stockAttemptAt: now } : {}),
+    lastError: '',
+  });
+  renderPriceRefreshStatus();
+
+  const updated = [];
+  const errors = [];
+  let cryptoSuccessAt = meta.cryptoSuccessAt;
+  let stockSuccessAt = meta.stockSuccessAt;
+  try {
+    if (cryptoDue) {
+      const cryptoUpdated = await fetchLivePrices();
+      if (Array.isArray(cryptoUpdated) && cryptoUpdated.length) {
+        updated.push(...cryptoUpdated);
+        cryptoSuccessAt = Date.now();
+      } else {
+        errors.push('CoinGecko-update niet beschikbaar; nieuwe poging volgt pas na het uurvenster.');
+      }
+    }
+    if (stockIds.length) {
+      const stockResult = await fetchStockHistory(null, stockIds);
+      if (stockResult.updated?.length) {
+        updated.push(...stockResult.updated);
+        stockSuccessAt = Date.now();
+      }
+      if (stockResult.failed?.length) errors.push(`Dagkoers niet beschikbaar voor ${stockResult.failed.join(', ')}.`);
+    }
+    savePriceRefreshMeta({
+      cryptoSuccessAt,
+      stockSuccessAt,
+      completedAt: Date.now(),
+      lastError: errors.join(' '),
+    });
+    const uniqueUpdated = [...new Set(updated)];
+    renderAfterPriceRefresh(uniqueUpdated);
+    if (reason === 'startup' && uniqueUpdated.length) toast(`📡 Koersen geladen: ${uniqueUpdated.join(', ')}`);
+    if (reason === 'enabled') toast(uniqueUpdated.length ? `⏱ Automatisch verversen actief · ${uniqueUpdated.length} bijgewerkt` : '⏱ Automatisch verversen actief');
+    return { ok: errors.length === 0, updated: uniqueUpdated, errors };
+  } catch (error) {
+    const message = cleanDisplayText(error?.message || 'Onverwachte fout tijdens automatisch verversen.', 160);
+    try { savePriceRefreshMeta({ completedAt: Date.now(), lastError: message }); } catch (storageError) { /* status blijft beste-effort */ }
+    return { ok: false, updated: [], errors: [message] };
+  } finally {
+    priceRefreshBusy = false;
+    renderPriceRefreshStatus();
+  }
+}
+
+function syncAutoRefreshTimer({ runNow = false } = {}) {
+  if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+  autoRefreshTimer = null;
+  if (networkConsentEnabled() && autoRefreshEnabled()) {
+    autoRefreshTimer = setInterval(() => { runAutomaticPriceRefresh({ reason: 'timer' }); }, AUTO_REFRESH_POLL_MS);
+    if (runNow) setTimeout(() => { runAutomaticPriceRefresh({ reason: 'enabled' }); }, 0);
+  }
+  renderPriceRefreshStatus();
+}
+
+async function initLivePrices() {
+  return runAutomaticPriceRefresh({ reason: 'startup', startup: true });
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && autoRefreshEnabled()) runAutomaticPriceRefresh({ reason: 'focus' });
+});
+window.addEventListener('online', () => {
+  if (autoRefreshEnabled()) runAutomaticPriceRefresh({ reason: 'online' });
+});
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
@@ -1499,6 +1641,9 @@ $('#empty-import').addEventListener('click', () => $('#import-file').click());
 function renderSettings() {
   const consent = networkConsentEnabled();
   $('#set-network-consent').checked = consent;
+  const autoInput = $('#set-auto-refresh');
+  autoInput.checked = autoRefreshEnabled();
+  autoInput.disabled = !consent;
   const alphaInput = $('#set-alpha-key');
   const alphaKeySet = Boolean(alphaVantageApiKey());
   if (document.activeElement !== alphaInput) alphaInput.value = alphaKeySet ? alphaVantageApiKey() : '';
@@ -1509,6 +1654,7 @@ function renderSettings() {
     : 'Geen Alpha Vantage-sleutel opgeslagen.';
   $('#set-fetch-hist').disabled = !consent;
   $('#mode-note').textContent = `Portfoliodata lokaal · netwerk ${consent ? 'aan' : 'uit'}`;
+  renderPriceRefreshStatus();
   // databeheer-info
   const importedAt = IMPORT_REPORT?.date && Number.isFinite(new Date(IMPORT_REPORT.date).getTime())
     ? ` · geïmporteerd op ${fmtDate.format(new Date(IMPORT_REPORT.date))}` : '';
@@ -1519,15 +1665,20 @@ function renderSettings() {
   // koershistorie-status
   const tbody = $('#hist-table tbody');
   tbody.innerHTML = '';
+  const liveHistory = loadLiveHistory();
   for (const a of ASSETS) {
     const st = historyStatus(a);
+    const entry = liveHistory[a.id];
+    const quoteAt = validRefreshTimestamp(entry?.quoteAt);
+    const quoteTitle = quoteAt ? `Bronkoers: ${refreshDateTime.format(new Date(quoteAt))}` : 'Bronmoment onbekend';
     const tr = document.createElement('tr');
     tr.style.cursor = 'default';
     tr.innerHTML = `
       <td><div class="asset-cell"><div class="asset-dot" style="background:${a.color};width:26px;height:26px;border-radius:8px;font-size:9px">${escapeHTML(a.id.slice(0, 3))}</div>${escapeHTML(a.name)}</div></td>
       <td>${escapeHTML(a.type)}</td>
       <td>${fmtEUR2.format(lastPrice(a.id))}</td>
-      <td><span class="pct ${st.cls === 'up' ? 'up' : ''}" style="${st.cls !== 'up' ? 'color:var(--text-3)' : ''}">${st.label}</span></td>`;
+      <td><span class="pct ${st.cls === 'up' ? 'up' : ''}" style="${st.cls !== 'up' ? 'color:var(--text-3)' : ''}">${st.label}</span></td>
+      <td class="muted" title="${quoteTitle}">${formatRefreshMoment(entry?.at)}</td>`;
     tbody.appendChild(tr);
   }
 
@@ -1547,11 +1698,28 @@ $('#set-network-consent').addEventListener('change', e => {
   setNetworkConsent(e.target.checked);
   renderSettings();
   if (e.target.checked) {
-    toast('🔐 Externe koersdata toegestaan; er wordt pas opgehaald na een expliciete actie of nieuwe start');
+    syncAutoRefreshTimer({ runNow: autoRefreshEnabled() });
+    toast(autoRefreshEnabled()
+      ? '🔐 Externe koersdata toegestaan; automatische verversing wordt hervat'
+      : '🔐 Externe koersdata toegestaan; ophalen volgt na een expliciete actie of nieuwe start');
   } else {
+    syncAutoRefreshTimer();
     $('#live-badge').style.display = 'none';
     toast('🔒 Externe koersdata uitgezet');
   }
+});
+
+$('#set-auto-refresh').addEventListener('change', e => {
+  if (!networkConsentEnabled()) {
+    e.target.checked = false;
+    setAutoRefreshEnabled(false);
+    toast('⚠️ Sta eerst externe koersdata toe');
+    return;
+  }
+  setAutoRefreshEnabled(e.target.checked);
+  syncAutoRefreshTimer({ runNow: e.target.checked });
+  renderSettings();
+  if (!e.target.checked) toast('⏸ Automatisch verversen uitgezet');
 });
 
 $('#set-alpha-save').addEventListener('click', () => {
@@ -1564,7 +1732,7 @@ $('#set-alpha-save').addEventListener('click', () => {
   if (value && !networkConsentEnabled()) {
     toast('🔑 Sleutel opgeslagen; zet hierboven ook Externe koersdata toestaan aan');
   } else {
-    toast(value ? '🔑 Alpha Vantage-browserfallback opgeslagen' : '🔑 Alpha Vantage-sleutel verwijderd');
+    toast(value ? '🔑 Alpha Vantage-koersroute opgeslagen' : '🔑 Alpha Vantage-sleutel verwijderd');
   }
 });
 
@@ -1582,30 +1750,55 @@ $('#set-clear').addEventListener('click', () => {
 
 $('#set-fetch-hist').addEventListener('click', async () => {
   if (!networkConsentEnabled()) { toast('⚠️ Sta eerst externe koersdata toe'); return; }
+  if (priceRefreshBusy) { toast('⏳ Er loopt al een koersverversing'); return; }
   const btn = $('#set-fetch-hist');
   btn.disabled = true;
   const prog = $('#hist-progress');
-  const cryptoRes = await fetchLiveHistory((done, total, id) => {
-    if (id) prog.innerHTML = `<p class="explain">📡 Crypto ${done + 1}/${total}: <b>${escapeHTML(id)}</b>… (CoinGecko)</p>`;
-  });
-  const stockRes = await fetchStockHistory((done, total, id) => {
-    if (id) prog.innerHTML = `<p class="explain">📡 Aandelen/ETF ${done + 1}/${total}: <b>${escapeHTML(id)}</b>… (Yahoo / Alpha Vantage-fallback)</p>`;
-  });
-  btn.disabled = false;
-  const updated = [...(cryptoRes.updated || []), ...(stockRes.updated || [])];
-  const failed = stockRes.failed || [];
-  if (updated.length) {
-    invalidateDerived();
-    state.twr = null;
-    delete state.models; state.models = {};
-    toast(`📈 Echte historie geladen: ${updated.length} assets`);
-    prog.innerHTML = failed.length
-      ? `<p class="explain">✅ ${updated.map(escapeHTML).join(', ')} bijgewerkt. ⚠️ Niet beschikbaar via de ingestelde koersbronnen: ${failed.map(escapeHTML).join(', ')}; die blijven gereconstrueerd en zijn uitgesloten van analyse.</p>`
-      : '<p class="explain">✅ Alle assets bijgewerkt.</p>';
-    renderSettings();
-  } else {
-    toast('⚠️ Ophalen mislukt; controleer toestemming, API-sleutel of rate limits');
-    prog.innerHTML = `<p class="explain">⚠️ ${escapeHTML(cryptoRes.error || stockRes.error || 'Geen geldige koersreeksen ontvangen.')}</p>`;
+  priceRefreshBusy = true;
+  const startedAt = Date.now();
+  try {
+    savePriceRefreshMeta({
+      ...(cryptoPriceTargets().length ? { cryptoAttemptAt: startedAt } : {}),
+      ...(ASSETS.some(asset => asset.type !== 'Crypto') ? { stockAttemptAt: startedAt } : {}),
+      lastError: '',
+    });
+    renderPriceRefreshStatus();
+    const cryptoRes = await fetchLiveHistory((done, total, id) => {
+      if (id) prog.innerHTML = `<p class="explain">📡 Crypto ${done + 1}/${total}: <b>${escapeHTML(id)}</b>… (CoinGecko)</p>`;
+    });
+    const stockRes = await fetchStockHistory((done, total, id) => {
+      if (id) prog.innerHTML = `<p class="explain">📡 Aandelen/ETF ${done + 1}/${total}: <b>${escapeHTML(id)}</b>… (Alpha Vantage / Yahoo)</p>`;
+    });
+    const updated = [...new Set([...(cryptoRes.updated || []), ...(stockRes.updated || [])])];
+    const failed = stockRes.failed || [];
+    const finishedAt = Date.now();
+    savePriceRefreshMeta({
+      ...(cryptoRes.updated?.length ? { cryptoSuccessAt: finishedAt } : {}),
+      ...(stockRes.updated?.length ? { stockSuccessAt: finishedAt } : {}),
+      completedAt: finishedAt,
+      lastError: failed.length ? `Dagkoers niet beschikbaar voor ${failed.join(', ')}.` : '',
+    });
+    if (updated.length) {
+      renderAfterPriceRefresh(updated);
+      toast(`📈 Echte historie geladen: ${updated.length} assets`);
+      prog.innerHTML = failed.length
+        ? `<p class="explain">✅ ${updated.map(escapeHTML).join(', ')} bijgewerkt. ⚠️ Niet beschikbaar via de ingestelde koersbronnen: ${failed.map(escapeHTML).join(', ')}; die blijven gereconstrueerd en zijn uitgesloten van analyse.</p>`
+        : '<p class="explain">✅ Alle assets bijgewerkt.</p>';
+    } else {
+      const error = cryptoRes.error || stockRes.error || 'Geen geldige koersreeksen ontvangen.';
+      savePriceRefreshMeta({ completedAt: finishedAt, lastError: error });
+      toast('⚠️ Ophalen mislukt; controleer toestemming, API-sleutel of providerlimieten');
+      prog.innerHTML = `<p class="explain">⚠️ ${escapeHTML(error)}</p>`;
+    }
+  } catch (error) {
+    const message = cleanDisplayText(error?.message || 'Onverwachte fout tijdens koersverversing.', 160);
+    try { savePriceRefreshMeta({ completedAt: Date.now(), lastError: message }); } catch (storageError) { /* status blijft beste-effort */ }
+    toast('⚠️ Koersverversing afgebroken');
+    prog.innerHTML = `<p class="explain">⚠️ ${escapeHTML(message)}</p>`;
+  } finally {
+    priceRefreshBusy = false;
+    btn.disabled = !networkConsentEnabled();
+    renderPriceRefreshStatus();
   }
 });
 
@@ -1693,7 +1886,9 @@ try {
   renderDashboard(true);
   updateEmptyOverlay();
   $('#mode-note').textContent = `Portfoliodata lokaal · netwerk ${networkConsentEnabled() ? 'aan' : 'uit'}`;
-  initLivePrices();
+  initLivePrices()
+    .catch(error => savePriceRefreshMeta({ completedAt: Date.now(), lastError: cleanDisplayText(error?.message || 'Startverversing mislukt.', 160) }))
+    .finally(() => syncAutoRefreshTimer());
   runAlertCheck(false);
   // warm alvast een model op voor de grootste positie (achtergrond)
   setTimeout(() => {

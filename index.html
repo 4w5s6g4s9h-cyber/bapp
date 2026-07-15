@@ -8,7 +8,7 @@
 <meta name="theme-color" content="#0a0c14">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="css/style.css?v=14">
+<link rel="stylesheet" href="css/style.css?v=15">
 </head>
 <body>
 
@@ -475,6 +475,11 @@
           <input type="checkbox" id="set-network-consent">
           <span><b>Externe koersdata toestaan</b><br><span class="explain">Stuurt uitsluitend assetzoektermen, tickers of externe asset-id's naar CoinGecko, Yahoo Finance, de optionele Alpha Vantage-fallback en zo nodig Frankfurter voor EUR-wisselkoersen. Transacties, aantallen en portefeuillewaarden worden niet meegestuurd. Staat standaard uit en wordt na backupherstel opnieuw uitgezet.</span></span>
         </label>
+        <label class="consent-row auto-refresh-row" for="set-auto-refresh">
+          <input type="checkbox" id="set-auto-refresh">
+          <span><b>Automatisch verversen zolang de app open is</b><br><span class="explain">Afzonderlijke opt-in: crypto maximaal eenmaal per uur in één CoinGecko-call; aandelen en ETF’s maximaal eenmaal per dag in kleine batches. Bij terugkeer naar een verouderde tab wordt direct gecontroleerd. Browsers kunnen timers pauzeren en er draait niets wanneer de app gesloten is.</span></span>
+        </label>
+        <p class="refresh-status" id="set-refresh-status" role="status" aria-live="polite">Automatisch verversen staat uit.</p>
         <div class="api-key-setting">
           <div>
             <label for="set-alpha-key"><b>Alpha Vantage API-sleutel</b> <span class="tag">optionele browserfallback</span></label>
@@ -494,11 +499,11 @@
           <h2>📈 Koershistorie</h2>
           <button class="btn btn-primary" id="set-fetch-hist">📡 Haal echte historie op</button>
         </div>
-        <p class="explain">Na expliciete toestemming haalt deze knop maximaal circa drie jaar op: crypto via CoinGecko en aandelen/ETF's eerst via Yahoo Finance. Als de browser Yahoo blokkeert en een Alpha Vantage-sleutel is ingesteld, gebruikt de app maximaal 100 recente handelsdagen als fallback. Vreemde valuta worden via Frankfurter naar EUR omgerekend. Gereconstrueerde reeksen worden duidelijk gemarkeerd en niet gebruikt voor ML, backtests of risicoadvies.</p>
+        <p class="explain">Na expliciete toestemming haalt deze knop maximaal circa drie jaar op via CoinGecko en Yahoo Finance. Met een ingestelde Alpha Vantage-sleutel gebruikt de app voor aandelen/ETF’s eerst die browservriendelijke route (maximaal 100 recente handelsdagen) en blijft Yahoo beste-effort. Vreemde valuta worden via Frankfurter naar EUR omgerekend. Dit zijn dagkoersen, geen gegarandeerde intraday-koersen. Gereconstrueerde reeksen worden duidelijk gemarkeerd en niet gebruikt voor ML, backtests of risicoadvies.</p>
         <div id="hist-progress"></div>
         <div class="table-wrap">
           <table class="holdings-table" id="hist-table">
-            <thead><tr><th>Asset</th><th>Type</th><th>Koers nu</th><th>Historie</th></tr></thead>
+            <thead><tr><th>Asset</th><th>Type</th><th>Laatste koers</th><th>Historie</th><th>Opgehaald</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -558,15 +563,15 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<script src="js/data.js?v=14"></script>
-<script src="js/ml.js?v=14"></script>
-<script src="js/charts.js?v=14"></script>
-<script src="js/quant.js?v=14"></script>
-<script src="js/backtest.js?v=14"></script>
-<script src="js/catalog.js?v=14"></script>
-<script src="js/dca.js?v=14"></script>
-<script src="js/importer.js?v=14"></script>
-<script src="js/alerts.js?v=14"></script>
-<script src="js/app.js?v=14"></script>
+<script src="js/data.js?v=15"></script>
+<script src="js/ml.js?v=15"></script>
+<script src="js/charts.js?v=15"></script>
+<script src="js/quant.js?v=15"></script>
+<script src="js/backtest.js?v=15"></script>
+<script src="js/catalog.js?v=15"></script>
+<script src="js/dca.js?v=15"></script>
+<script src="js/importer.js?v=15"></script>
+<script src="js/alerts.js?v=15"></script>
+<script src="js/app.js?v=15"></script>
 </body>
 </html>

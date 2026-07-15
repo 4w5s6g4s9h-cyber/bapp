@@ -71,6 +71,16 @@ function normalizeAssetId(value) {
   return cleaned;
 }
 
+/** Veilige CoinGecko API-id voor persistente koerskoppelingen. */
+function normalizeCoinGeckoId(value) {
+  const cleaned = String(value ?? '')
+    .normalize('NFKC')
+    .trim()
+    .toLowerCase()
+    .slice(0, 100);
+  return /^[a-z0-9._-]+$/.test(cleaned) ? cleaned : '';
+}
+
 function cleanDisplayText(value, maxLength = 80) {
   return String(value ?? '')
     .normalize('NFKC')
@@ -119,6 +129,7 @@ function registerAsset(asset, prices, provenance = null) {
     isin: cleanDisplayText(asset.isin || '', 16).toUpperCase(),
     venue: cleanDisplayText(asset.venue || '', 16).toUpperCase(),
     yahoo: cleanDisplayText(asset.yahoo || '', 32),
+    cg: normalizeCoinGeckoId(asset.cg),
   };
   const existing = assetById(id);
   if (existing) Object.assign(existing, normalized);
