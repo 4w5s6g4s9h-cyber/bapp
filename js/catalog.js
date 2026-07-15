@@ -61,7 +61,12 @@ const CATALOG = [
 function loadStoredWatchAssets() {
   try {
     const parsed = JSON.parse(localStorage.getItem(WATCH_ASSETS_KEY)) || [];
-    return Array.isArray(parsed) ? parsed.slice(0, MAX_IMPORT_ASSETS) : [];
+    return Array.isArray(parsed)
+      ? parsed.slice(0, MAX_IMPORT_ASSETS).filter(entry => entry && typeof entry === 'object').map(entry => ({
+          ...entry,
+          cg: normalizeCoinGeckoId(entry.cg),
+        }))
+      : [];
   }
   catch (e) { return []; }
 }
@@ -109,6 +114,7 @@ async function addWatchAsset(entry) {
     name: cleanDisplayText(entry.name || id, 80) || id,
     type: ['Crypto', 'ETF', 'Aandeel'].includes(entry.type) ? entry.type : 'Aandeel',
     yahoo: cleanDisplayText(entry.yahoo || '', 32),
+    cg: normalizeCoinGeckoId(entry.cg),
   };
   if (assetById(entry.id)) return { ok: true };
 
@@ -116,6 +122,7 @@ async function addWatchAsset(entry) {
   if (entry.type === 'Crypto') {
     const cgId = entry.cg || COINGECKO_IDS[entry.id];
     if (!cgId) return { ok: false, error: `Geen CoinGecko-koppeling voor ${entry.id}` };
+    entry.cg = cgId;
     try {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 12000);
@@ -140,7 +147,10 @@ async function addWatchAsset(entry) {
       }
     }
     if (got) {
-      points = got.points;
+      points = [...got.points];
+      if (Number.isFinite(got.quotePrice) && Number.isFinite(got.quoteAt)) {
+        points.push([got.quoteAt, got.quotePrice]);
+      }
       src = got.source || 'yahoo';
       if (got.name && entry.name === entry.id) entry.name = got.name;
       if (got.currency !== 'EUR') {
@@ -164,14 +174,21 @@ async function addWatchAsset(entry) {
   const first = Math.min(...pointIndices), last = Math.max(...pointIndices);
   for (let i = first; i <= last; i++) real[i] = true;
   const color = CUSTOM_COLORS[(ASSETS.length + 3) % CUSTOM_COLORS.length];
-  registerAsset({ id: entry.id, name: entry.name, type: entry.type, yahoo: entry.yahoo, color, custom: true, watchOnly: true, histSource: src, seed: 1, drift: 0, vol: 0.3, start: grid[0] }, grid, real);
+  registerAsset({ id: entry.id, name: entry.name, type: entry.type, yahoo: entry.yahoo, cg: entry.cg, color, custom: true, watchOnly: true, histSource: src, seed: 1, drift: 0, vol: 0.3, start: grid[0] }, grid, real);
 
   // persist: assetdefinitie + koersdata (zodat het na herladen terugkomt)
   const stored = loadStoredWatchAssets();
-  stored.push({ id: entry.id, name: entry.name, type: entry.type, yahoo: entry.yahoo, color, histSource: src });
+  stored.push({ id: entry.id, name: entry.name, type: entry.type, yahoo: entry.yahoo, cg: entry.cg, color, histSource: src });
   const hist = loadLiveHistory();
   const compact = new Map(points.map(([ts, p]) => [dateToIndex(new Date(ts).toISOString()), +(+p).toPrecision(6)]));
-  hist[entry.id] = { at: Date.now(), points: [...compact.entries()], src };
+  const sourceAt = Math.max(...points.map(([ts]) => Number(ts)).filter(Number.isFinite));
+  hist[entry.id] = {
+    at: Date.now(),
+    quoteAt: Number.isFinite(sourceAt) ? sourceAt : Date.now(),
+    points: [...compact.entries()],
+    src,
+    ...(entry.cg ? { cg: entry.cg } : {}),
+  };
   try { commitStorage({ [WATCH_ASSETS_KEY]: JSON.stringify(stored), [LIVEHIST_KEY]: JSON.stringify(hist) }); }
   catch (e) {
     removeWatchAsset(entry.id);

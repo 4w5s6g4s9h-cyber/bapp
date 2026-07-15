@@ -94,6 +94,21 @@ test('een API-sleutel opslaan schakelt netwerktoestemming niet stilzwijgend in',
   assert.equal(rt.evaluate(`networkConsentEnabled()`), false);
 });
 
+test('automatisch verversen heeft een afzonderlijke opt-in en vaste vensters', () => {
+  const rt = createRuntime(FILES);
+  const now = 1_800_000_000_000;
+
+  assert.equal(rt.evaluate('autoRefreshEnabled()'), false);
+  assert.equal(rt.evaluate('networkConsentEnabled()'), false);
+  rt.evaluate('setAutoRefreshEnabled(true)');
+  assert.equal(rt.evaluate('autoRefreshEnabled()'), true);
+  assert.equal(rt.evaluate('networkConsentEnabled()'), false);
+  assert.equal(rt.evaluate(`isPriceRefreshDue(${now - 30 * 60 * 1000}, CRYPTO_AUTO_REFRESH_MS, ${now})`), false);
+  assert.equal(rt.evaluate(`isPriceRefreshDue(${now - 61 * 60 * 1000}, CRYPTO_AUTO_REFRESH_MS, ${now})`), true);
+  assert.equal(rt.evaluate(`isPriceRefreshDue(${now - 23 * 60 * 60 * 1000}, STOCK_AUTO_REFRESH_MS, ${now})`), false);
+  assert.equal(rt.evaluate(`isPriceRefreshDue(${now - 25 * 60 * 60 * 1000}, STOCK_AUTO_REFRESH_MS, ${now})`), true);
+});
+
 test('Yahoo accepteert geldige korte historie van een nieuwe notering', async () => {
   const timestamps = Array.from({ length: 5 }, (_, i) => 1_780_000_000 + i * 86_400);
   const closes = timestamps.map((_, i) => 20 + i);
@@ -117,6 +132,50 @@ test('Yahoo accepteert geldige korte historie van een nieuwe notering', async ()
   assert.equal(result.points.length, 5);
   assert.equal(result.currency, 'USD');
   assert.equal(result.name, 'Nieuwe notering');
+});
+
+test('Yahoo wijst een lege koersreeks beheerst af', async () => {
+  const rt = createRuntime(FILES, {
+    fetchImpl: async () => ({
+      ok: true,
+      headers: { get: () => 'application/json' },
+      json: async () => ({
+        chart: { result: [{
+          timestamp: [1_780_000_000],
+          indicators: { quote: [{ close: [null] }] },
+          meta: { currency: 'EUR', regularMarketPrice: 10 },
+        }] },
+      }),
+    }),
+  });
+  rt.storage.setItem('vermogen_network_consent_v1', 'yes');
+
+  assert.equal(await rt.evaluate(`fetchYahooChart('EMPTY')`), null);
+});
+
+test('automatische dagkoersen selecteren maximaal tien oudste assets', () => {
+  const now = 1_800_000_000_000;
+  const stockWindow = 24 * 60 * 60 * 1000;
+  const liveHistory = Object.fromEntries(Array.from({ length: 12 }, (_, i) => {
+    const id = 'S' + String(i).padStart(2, '0');
+    return [id, { at: i === 11 ? now - stockWindow / 2 : now - 2 * stockWindow + i * 1000 }];
+  }));
+  liveHistory.S01.at = now - 3 * stockWindow;
+  const storage = new MemoryStorage({
+    vermogen_livehist_v1: JSON.stringify(liveHistory),
+  });
+  const rt = createRuntime(FILES, { storage });
+  rt.evaluate(`Array.from({ length: 12 }, (_, i) => {
+    const id = 'S' + String(i).padStart(2, '0');
+    registerAsset({ id, name: id, type: 'Aandeel' }, new Array(HISTORY_DAYS).fill(100), new Array(HISTORY_DAYS).fill(true));
+  })`);
+
+  const selected = rt.evaluate(`autoStockRefreshIds(${now})`);
+  assert.equal(selected.length, 10);
+  assert.equal(selected[0], 'S01');
+  assert.equal(selected[1], 'S00');
+  assert.equal(selected.includes('S10'), false);
+  assert.equal(selected.includes('S11'), false);
 });
 
 test('watchlist gebruikt Alpha Vantage wanneer de browser Yahoo blokkeert', async () => {
@@ -170,6 +229,68 @@ test('watchlist gebruikt Alpha Vantage wanneer de browser Yahoo blokkeert', asyn
   assert.equal(JSON.parse(storage.getItem('vermogen_livehist_v1')).SPCX.src, 'alpha');
 });
 
+test('dynamische CoinGecko-koppeling overleeft reload en bewaart de uurkoers', async () => {
+  const storage = new MemoryStorage({ vermogen_network_consent_v1: 'yes' });
+  const now = Date.now();
+  const history = Array.from({ length: 35 }, (_, index) => [now - (34 - index) * 86400000, 10 + index]);
+  const jsonResponse = body => ({ ok: true, status: 200, json: async () => body });
+  const first = createRuntime(['js/data.js', 'js/catalog.js', 'js/importer.js'], {
+    storage,
+    fetchImpl: async url => {
+      assert.match(String(url), /\/coins\/privacy-coin\/market_chart/);
+      return jsonResponse({ prices: history });
+    },
+  });
+
+  const added = await first.evaluate(`addWatchAsset({ id: 'PRV', name: 'Privacy Coin', type: 'Crypto', cg: 'privacy-coin' })`);
+  assert.equal(added.ok, true);
+  assert.equal(JSON.parse(storage.getItem('vermogen_watchassets_v1'))[0].cg, 'privacy-coin');
+
+  let liveUrl = '';
+  const providerSeconds = Math.floor(Date.now() / 1000) - 30;
+  const reload = createRuntime(['js/data.js', 'js/catalog.js', 'js/importer.js'], {
+    storage,
+    fetchImpl: async url => {
+      liveUrl = String(url);
+      return jsonResponse({ 'privacy-coin': { eur: 42.25, last_updated_at: providerSeconds } });
+    },
+  });
+  reload.evaluate('loadWatchAssets(); applyLiveHistory()');
+  const updated = await reload.evaluate('fetchLivePrices()');
+  const saved = JSON.parse(storage.getItem('vermogen_livehist_v1')).PRV;
+
+  assert.equal(JSON.stringify(updated), JSON.stringify(['PRV']));
+  assert.match(liveUrl, /ids=privacy-coin/);
+  assert.match(liveUrl, /include_last_updated_at=true/);
+  assert.equal(reload.evaluate(`assetById('PRV').cg`), 'privacy-coin');
+  assert.equal(reload.evaluate(`lastPrice('PRV')`), 42.25);
+  assert.equal(saved.cg, 'privacy-coin');
+  assert.equal(saved.quoteAt, providerSeconds * 1000);
+  assert.deepEqual(saved.points.find(([index]) => index === 1094), [1094, 42.25]);
+});
+
+test('een opgeslagen spotkoers herschaalt geïmporteerde historie niet bij reload', async () => {
+  const storage = new MemoryStorage({ vermogen_network_consent_v1: 'yes' });
+  const response = { bitcoin: { eur: 200, last_updated_at: Math.floor(Date.now() / 1000) } };
+  const first = createRuntime(FILES, {
+    storage,
+    fetchImpl: async () => ({ ok: true, json: async () => response }),
+  });
+  first.evaluate(`registerAsset({ id: 'BTC', name: 'Bitcoin', type: 'Crypto', histSource: 'import' }, Array.from({ length: HISTORY_DAYS }, (_, i) => 100 + i / 100), new Array(HISTORY_DAYS).fill(true))`);
+  await first.evaluate('fetchLivePrices()');
+  assert.equal(JSON.parse(storage.getItem('vermogen_livehist_v1')).BTC.spotOnly, true);
+
+  const reload = createRuntime(FILES, { storage });
+  const result = reload.evaluate(`(() => {
+    registerAsset({ id: 'BTC', name: 'Bitcoin', type: 'Crypto', histSource: 'import' }, Array.from({ length: HISTORY_DAYS }, (_, i) => 100 + i / 100), new Array(HISTORY_DAYS).fill(true));
+    applyLiveHistory();
+    return { first: MARKET.prices.BTC[0], last: lastPrice('BTC'), source: assetById('BTC').histSource };
+  })()`);
+  assert.equal(result.first, 100);
+  assert.equal(result.last, 200);
+  assert.equal(result.source, 'import');
+});
+
 test('backuprestore zet voorkeuren terug maar netwerktoestemming uit', () => {
   const rt = createRuntime(FILES);
   const result = rt.evaluate(`(() => {
@@ -186,9 +307,13 @@ test('backuprestore zet voorkeuren terug maar netwerktoestemming uit', () => {
       },
     };
     localStorage.setItem(NETWORK_CONSENT_KEY, 'yes');
+    setAutoRefreshEnabled(true);
+    savePriceRefreshMeta({ cryptoSuccessAt: Date.now() });
     return importPortfolioJSON(JSON.stringify(backup));
   })()`);
   assert.equal(result.ok, true);
   assert.deepEqual(JSON.parse(rt.storage.getItem('vermogen_watchlist_v1')), ['ETF']);
   assert.equal(rt.storage.getItem('vermogen_network_consent_v1'), 'no');
+  assert.equal(rt.storage.getItem('vermogen_auto_refresh_v1'), null);
+  assert.equal(rt.storage.getItem('vermogen_price_refresh_meta_v1'), null);
 });

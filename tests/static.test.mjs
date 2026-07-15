@@ -16,9 +16,14 @@ test('alle JavaScript-bestanden zijn syntactisch geldig', () => {
 test('publieke shell heeft CSP, geen externe fonts en consistente cacheversie', () => {
   const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
   const sw = fs.readFileSync(path.join(ROOT, 'sw.js'), 'utf8');
+  const app = fs.readFileSync(path.join(ROOT, 'js/app.js'), 'utf8');
   assert.match(html, /Content-Security-Policy/);
   assert.doesNotMatch(html, /fonts\.googleapis|fonts\.gstatic/);
   assert.doesNotMatch(html + sw, /\?v=11/);
+  assert.match(html, /id="set-auto-refresh"/);
+  assert.match(html, /crypto maximaal eenmaal per uur/);
+  assert.match(app, /visibilitychange/);
+  assert.match(app, /setInterval\(.*runAutomaticPriceRefresh/s);
   assert.match(sw, /res\.ok && res\.type === 'basic'/);
   assert.doesNotMatch(fs.readFileSync(path.join(ROOT, 'js/importer.js'), 'utf8'), /corsproxy|allorigins|codetabs/i);
 });

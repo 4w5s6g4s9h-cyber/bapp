@@ -31,6 +31,7 @@ De runtime-app zelf heeft geen npm-dependencies en geen buildstap.
 - Cashflow-gecorrigeerde volatiliteit, Sharpe, drawdown, correlatie en Markowitz-verkenning.
 - DCA-plannen als lokale boekhoudautomatisering. Er worden geen echte brokerorders geplaatst; een termijn wordt alleen geboekt als voor die dag een echte koers bekend is.
 - In-app alerts; geen achtergrondserver en dus geen push wanneer de app gesloten is.
+- Afzonderlijk opt-in automatisch verversen zolang de app open is: crypto maximaal elk uur in één batch en aandelen/ETF’s maximaal dagelijks in batches van tien.
 - Offline shell via een service worker die uitsluitend succesvolle same-origin-responses cachet.
 
 ## Privacy en externe data
@@ -44,12 +45,15 @@ Zonder toestemming doet de app geen koersnetwerkcalls. Na het aanzetten van **In
 
 Transacties, aantallen, kostprijzen en portefeuillewaarden worden niet in deze calls meegestuurd. Directe Yahoo-calls kunnen door browser-CORS worden geblokkeerd. In dat geval kan een eigen Alpha Vantage API-sleutel lokaal worden opgeslagen; zodra die is ingesteld probeert de app deze route eerst. De gratis API levert maximaal 100 recente handelsdagen. De sleutel wordt niet geëxporteerd in backups. Voor langere, volledige historie blijft eigen import de betrouwbare route.
 
+Automatisch verversen heeft een eigen schakelaar en wordt nooit stilzwijgend door netwerktoestemming geactiveerd. CoinGecko-spotprijzen worden maximaal eenmaal per uur in één call bijgewerkt. De gratis aandelenbronnen leveren dagdata; daarom worden aandelen en ETF’s maximaal eenmaal per dag en in kleine batches bijgewerkt. Bij terugkeer naar een verouderde tab controleert de app direct of een groep aan de beurt is. Browsers mogen achtergrondtabs pauzeren en er wordt niets uitgevoerd wanneer de app gesloten is. Dynamisch gevonden CoinGecko-ID’s worden lokaal bij de watch-asset bewaard, zodat ook die koppelingen een reload overleven.
+
 `localStorage` is niet versleuteld en wordt gedeeld door pagina's op dezelfde origin. Gebruik de app daarom op een vertrouwd apparaat en host haar bij voorkeur op een eigen origin. Backupbestanden bevatten financiële data en horen niet in Git of gedeelde opslag.
 
 ## Data-integriteit
 
 - Asset-id's, datums, getallen, reekslengtes, kleuren en externe antwoorden worden gevalideerd.
 - Een restore accepteert alleen backup-schema 2 en schakelt netwerktoestemming opnieuw uit.
+- Een restore schakelt ook automatisch verversen uit en herstelt geen provider- of refreshsessievoorkeuren.
 - Een generieke import kan ontbrekende historie reconstrueren om een grafiek te tonen. De provenance-array blijft dan `false`, zodat die waarden niet teruglekken in financiële analyses.
 - Stortingen en opnames worden uit dagrendement en TWR gefilterd. Bitvavo asset-transfers zonder kostprijs worden bij CSV-import gewaardeerd op de beschikbare dagkoers en expliciet als transfer bewaard.
 - Aandelen in een vreemde valuta worden alleen geregistreerd als ook een geldige EUR-reeks beschikbaar is; anders faalt de import veilig.

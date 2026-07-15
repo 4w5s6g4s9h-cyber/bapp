@@ -529,6 +529,15 @@ input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.2); }
 }
 .consent-row input { width: 20px; height: 20px; margin-top: 2px; accent-color: var(--accent); flex: 0 0 auto; }
 .consent-row .explain { display: inline-block; margin-top: 4px; }
+.auto-refresh-row { margin-top: 10px; }
+.consent-row:has(input:disabled) { cursor: not-allowed; opacity: 0.58; }
+.refresh-status {
+  margin: 10px 0 0; padding: 10px 12px; border-radius: 11px;
+  border: 1px solid var(--card-border); background: rgba(0, 0, 0, 0.16);
+  color: var(--text-3); font-size: 12px; line-height: 1.5;
+}
+.refresh-status.is-live { color: var(--green); border-color: rgba(52, 211, 153, 0.28); }
+.refresh-status.has-warning { color: var(--amber); border-color: rgba(251, 191, 36, 0.28); }
 .api-key-setting { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--card-border); }
 .api-key-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
 .api-key-controls .input { flex: 1 1 240px; min-width: 0; }

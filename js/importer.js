@@ -13,6 +13,11 @@ const CUSTOM_KEY = 'vermogen_custom_v1';
 const MODE_KEY = 'vermogen_mode';
 const BACKUP_SCHEMA_VERSION = 2;
 const NETWORK_CONSENT_KEY = 'vermogen_network_consent_v1';
+const AUTO_REFRESH_KEY = 'vermogen_auto_refresh_v1';
+const PRICE_REFRESH_META_KEY = 'vermogen_price_refresh_meta_v1';
+const CRYPTO_AUTO_REFRESH_MS = 60 * 60 * 1000;
+const STOCK_AUTO_REFRESH_MS = 24 * 60 * 60 * 1000;
+const AUTO_STOCK_BATCH_SIZE = 10;
 const MAX_IMPORT_BYTES = 8 * 1024 * 1024;
 const MAX_IMPORT_TRANSACTIONS = 25000;
 const MAX_IMPORT_ASSETS = 250;
@@ -55,6 +60,55 @@ function networkConsentEnabled() {
 
 function setNetworkConsent(enabled) {
   localStorage.setItem(NETWORK_CONSENT_KEY, enabled ? 'yes' : 'no');
+}
+
+/** Uurverversing is een afzonderlijke opt-in bovenop netwerktoestemming. */
+function autoRefreshEnabled() {
+  return localStorage.getItem(AUTO_REFRESH_KEY) === 'yes';
+}
+
+function setAutoRefreshEnabled(enabled) {
+  localStorage.setItem(AUTO_REFRESH_KEY, enabled ? 'yes' : 'no');
+}
+
+function validRefreshTimestamp(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.trunc(number) : 0;
+}
+
+function loadPriceRefreshMeta() {
+  let raw = {};
+  try { raw = JSON.parse(localStorage.getItem(PRICE_REFRESH_META_KEY)) || {}; }
+  catch (e) { raw = {}; }
+  return {
+    cryptoAttemptAt: validRefreshTimestamp(raw.cryptoAttemptAt),
+    cryptoSuccessAt: validRefreshTimestamp(raw.cryptoSuccessAt),
+    stockAttemptAt: validRefreshTimestamp(raw.stockAttemptAt),
+    stockSuccessAt: validRefreshTimestamp(raw.stockSuccessAt),
+    completedAt: validRefreshTimestamp(raw.completedAt),
+    lastError: cleanDisplayText(raw.lastError || '', 160),
+  };
+}
+
+function savePriceRefreshMeta(patch) {
+  const current = loadPriceRefreshMeta();
+  const next = {
+    ...current,
+    ...patch,
+    lastError: cleanDisplayText(patch?.lastError ?? current.lastError, 160),
+  };
+  for (const key of ['cryptoAttemptAt', 'cryptoSuccessAt', 'stockAttemptAt', 'stockSuccessAt', 'completedAt']) {
+    next[key] = validRefreshTimestamp(next[key]);
+  }
+  localStorage.setItem(PRICE_REFRESH_META_KEY, JSON.stringify(next));
+  return next;
+}
+
+function isPriceRefreshDue(lastAttemptAt, intervalMs, now = Date.now()) {
+  const last = validRefreshTimestamp(lastAttemptAt);
+  const current = validRefreshTimestamp(now);
+  if (!last || !current || last > current + 5 * 60 * 1000) return true;
+  return current - last >= intervalMs;
 }
 
 // ---------- waarde-parsers ----------
@@ -597,31 +651,78 @@ const COINGECKO_IDS = {
   NEAR: 'near', INJ: 'injective-protocol', RNDR: 'render-token', FTM: 'fantom',
 };
 
+function coinGeckoIdForAsset(asset) {
+  if (!asset || asset.type !== 'Crypto') return '';
+  return normalizeCoinGeckoId(asset.cg) || normalizeCoinGeckoId(COINGECKO_IDS[asset.id]);
+}
+
+function cryptoPriceTargets() {
+  return ASSETS
+    .map(asset => ({ asset, cgId: coinGeckoIdForAsset(asset) }))
+    .filter(target => target.cgId && MARKET.prices[target.asset.id]);
+}
+
 async function fetchLivePrices() {
   if (!networkConsentEnabled()) return null;
-  const wanted = ASSETS.filter(a => a.type === 'Crypto' && COINGECKO_IDS[a.id]);
+  const wanted = cryptoPriceTargets();
   if (!wanted.length) return null;
-  const ids = [...new Set(wanted.map(a => COINGECKO_IDS[a.id]))].join(',');
+  const ids = [...new Set(wanted.map(target => target.cgId))].join(',');
+  let timer = null;
   try {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 6000);
-    const res = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=eur`, { signal: ctrl.signal });
+    timer = setTimeout(() => ctrl.abort(), 6000);
+    const res = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=eur&include_last_updated_at=true`, {
+      signal: ctrl.signal,
+      credentials: 'omit',
+      referrerPolicy: 'no-referrer',
+    });
     clearTimeout(timer);
+    timer = null;
     if (!res.ok) return null;
     const data = await res.json();
-    const updated = [];
-    for (const a of wanted) {
-      const eur = data[COINGECKO_IDS[a.id]]?.eur;
-      if (eur && eur > 0) {
-        // alleen "vandaag" bijwerken; historie blijft zoals geïmporteerd
-        MARKET.prices[a.id][HISTORY_DAYS - 1] = eur;
-        if (!MARKET.provenance[a.id]) MARKET.provenance[a.id] = new Array(HISTORY_DAYS).fill(false);
-        MARKET.provenance[a.id][HISTORY_DAYS - 1] = true;
-        updated.push(a.id);
-      }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+    const now = Date.now();
+    const store = loadLiveHistory();
+    const pending = [];
+    for (const { asset, cgId } of wanted) {
+      const eur = Number(data[cgId]?.eur);
+      if (!Number.isFinite(eur) || eur <= 0 || eur >= 1e12) continue;
+      const providerAt = Number(data[cgId]?.last_updated_at) * 1000;
+      const quoteAt = Number.isFinite(providerAt) && providerAt > 0 && providerAt <= now + 5 * 60 * 1000 ? providerAt : now;
+      const current = store[asset.id] && typeof store[asset.id] === 'object' ? store[asset.id] : {};
+      const spotOnly = current.spotOnly === true || !Array.isArray(current.points) || current.points.length <= 1;
+      const compact = new Map((Array.isArray(current.points) ? current.points : [])
+        .filter(point => Array.isArray(point) && Number.isInteger(Number(point[0]))
+          && Number(point[0]) >= 0 && Number(point[0]) < HISTORY_DAYS
+          && Number.isFinite(Number(point[1])) && Number(point[1]) > 0)
+        .map(([idx, price]) => [Number(idx), Number(price)]));
+      compact.set(HISTORY_DAYS - 1, +eur.toPrecision(10));
+      store[asset.id] = {
+        ...current,
+        at: now,
+        quoteAt,
+        points: [...compact.entries()].sort((a, b) => a[0] - b[0]).slice(-2000),
+        src: 'coingecko',
+        cg: cgId,
+        ...(spotOnly ? { spotOnly: true } : {}),
+      };
+      pending.push({ asset, cgId, eur });
     }
-    return updated.length ? updated : null;
-  } catch (e) { return null; }
+    if (!pending.length) return null;
+    commitStorage({ [LIVEHIST_KEY]: JSON.stringify(store) });
+    for (const { asset, cgId, eur } of pending) {
+      asset.cg = cgId;
+      // Alleen "vandaag" bijwerken; de historie blijft intact.
+      MARKET.prices[asset.id][HISTORY_DAYS - 1] = eur;
+      if (!MARKET.provenance[asset.id]) MARKET.provenance[asset.id] = new Array(HISTORY_DAYS).fill(false);
+      MARKET.provenance[asset.id][HISTORY_DAYS - 1] = true;
+    }
+    return pending.map(item => item.asset.id);
+  } catch (e) {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /* ============================================================
@@ -671,19 +772,21 @@ function mergeRealHistory(assetId, points) {
  */
 async function fetchLiveHistory(onProgress) {
   if (!networkConsentEnabled()) return { ok: false, error: 'Externe koersdata staat uit.', updated: [] };
-  const wanted = ASSETS.filter(a => a.type === 'Crypto' && COINGECKO_IDS[a.id]);
+  const wanted = cryptoPriceTargets();
   if (!wanted.length) return { ok: false, error: 'Geen crypto-assets met een bekende CoinGecko-koppeling.' };
   const store = loadLiveHistory();
   const updated = [];
   for (let i = 0; i < wanted.length; i++) {
-    const a = wanted[i];
+    const { asset: a, cgId } = wanted[i];
     if (onProgress) onProgress(i, wanted.length, a.id);
+    let timer = null;
     try {
-      const url = `https://api.coingecko.com/api/v3/coins/${COINGECKO_IDS[a.id]}/market_chart?vs_currency=eur&days=${HISTORY_DAYS}&interval=daily`;
+      const url = `https://api.coingecko.com/api/v3/coins/${encodeURIComponent(cgId)}/market_chart?vs_currency=eur&days=${HISTORY_DAYS}&interval=daily`;
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 12000);
+      timer = setTimeout(() => ctrl.abort(), 12000);
       const res = await fetch(url, { signal: ctrl.signal, credentials: 'omit', referrerPolicy: 'no-referrer' });
       clearTimeout(timer);
+      timer = null;
       if (res.status === 429) continue;
       if (!res.ok) continue;
       const data = await res.json();
@@ -694,11 +797,20 @@ async function fetchLiveHistory(onProgress) {
           .map(([ts, p]) => [dateToIndex(new Date(Number(ts)).toISOString()), +Number(p).toPrecision(6)]);
         const dedup = new Map(compact);
         if (dedup.size > 30) {
-          store[a.id] = { at: Date.now(), points: [...dedup.entries()] };
+          const sourceAt = Math.max(...data.prices.map(point => Number(point?.[0])).filter(Number.isFinite));
+          store[a.id] = {
+            at: Date.now(),
+            quoteAt: Number.isFinite(sourceAt) ? sourceAt : Date.now(),
+            points: [...dedup.entries()],
+            src: 'coingecko',
+            cg: cgId,
+          };
+          a.cg = cgId;
           updated.push(a.id);
         }
       }
     } catch (e) { /* netwerk: overslaan */ }
+    finally { if (timer) clearTimeout(timer); }
     if (i < wanted.length - 1) await new Promise(r => setTimeout(r, 1500));
   }
   try { commitStorage({ [LIVEHIST_KEY]: JSON.stringify(store) }); }
@@ -713,6 +825,21 @@ function applyLiveHistory() {
   const store = loadLiveHistory();
   for (const [id, entry] of Object.entries(store)) {
     if (!MARKET.prices[id] || !entry || !Array.isArray(entry.points)) continue;
+    if (entry.spotOnly === true) {
+      for (const point of entry.points.slice(-10)) {
+        const idx = Number(point?.[0]), price = Number(point?.[1]);
+        if (!Number.isInteger(idx) || idx < 0 || idx >= HISTORY_DAYS || !Number.isFinite(price) || price <= 0) continue;
+        MARKET.prices[id][idx] = price;
+        if (!MARKET.provenance[id]) MARKET.provenance[id] = new Array(HISTORY_DAYS).fill(false);
+        MARKET.provenance[id][idx] = true;
+      }
+      const asset = assetById(id);
+      if (asset) {
+        if (asset.type === 'Crypto' && entry.cg) asset.cg = normalizeCoinGeckoId(entry.cg) || asset.cg;
+        if (asset.histSource === 'synth') asset.histSource = 'live';
+      }
+      continue;
+    }
     const points = entry.points
       .filter(point => Array.isArray(point) && Number.isInteger(Number(point[0])) && Number.isFinite(Number(point[1])) && Number(point[1]) > 0)
       .slice(0, 2000)
@@ -720,7 +847,10 @@ function applyLiveHistory() {
     if (!points.length) continue;
     mergeRealHistory(id, points);
     const a = assetById(id);
-    if (a) a.histSource = ['yahoo', 'alpha'].includes(entry.src) ? entry.src : 'live';
+    if (a) {
+      a.histSource = ['yahoo', 'alpha'].includes(entry.src) ? entry.src : 'live';
+      if (a.type === 'Crypto' && entry.cg) a.cg = normalizeCoinGeckoId(entry.cg) || a.cg;
+    }
   }
 }
 
@@ -733,6 +863,20 @@ function historyStatus(asset) {
   if (asset.histSource === 'alpha') return { label: `Alpha Vantage · ${pct}% echt`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
   if (asset.histSource === 'import') return { label: `import · ${pct}% echt`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
   return { label: `gereconstrueerd · ${pct}% echt`, cls: 'muted' };
+}
+
+/** Oudste aandelen/ETF's eerst, begrensd om gratis providerquota te sparen. */
+function autoStockRefreshIds(now = Date.now(), limit = AUTO_STOCK_BATCH_SIZE) {
+  const current = validRefreshTimestamp(now) || Date.now();
+  const max = Math.max(1, Math.min(25, Math.trunc(Number(limit)) || AUTO_STOCK_BATCH_SIZE));
+  const store = loadLiveHistory();
+  return ASSETS
+    .filter(asset => asset.type !== 'Crypto' && MARKET.prices[asset.id])
+    .map(asset => ({ id: asset.id, at: validRefreshTimestamp(store[asset.id]?.at) }))
+    .filter(item => !item.at || current - item.at >= STOCK_AUTO_REFRESH_MS || item.at > current + 5 * 60 * 1000)
+    .sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))
+    .slice(0, max)
+    .map(item => item.id);
 }
 
 /** Exporteert alle data als downloadbare JSON (zelfde formaat als import). */
@@ -858,10 +1002,23 @@ async function fetchYahooChart(symbol) {
   const currency = cleanDisplayText(r.meta?.currency || '', 3).toUpperCase();
   if (!/^[A-Z]{3}$/.test(currency)) return null;
   const name = cleanDisplayText(r.meta?.shortName || r.meta?.longName || symbol, 80);
+  if (!points.length) return null;
+  const quotePrice = Number(r.meta?.regularMarketPrice);
+  const rawQuoteAt = Number(r.meta?.regularMarketTime) * 1000;
+  const quoteAt = Number.isFinite(rawQuoteAt) && rawQuoteAt > 0 && rawQuoteAt <= Date.now() + 2 * 86400000
+    ? rawQuoteAt
+    : points.at(-1)[0];
   // Ook een pas genoteerd instrument kan geldige koersdata hebben, maar nog
   // geen 30 handelsdagen historie. De analyselaag bewaakt zelf de minimale
   // dekking; voor toevoegen aan de watchlist is een geldige slotkoers genoeg.
-  return points.length ? { points, currency, name } : null;
+  return {
+    points,
+    currency,
+    name,
+    source: 'yahoo',
+    quotePrice: Number.isFinite(quotePrice) && quotePrice > 0 && quotePrice < 1e9 ? quotePrice : null,
+    quoteAt,
+  };
 }
 
 /** Zet veelgebruikte Yahoo-beurssuffixen om naar Alpha Vantage-symbolen. */
@@ -915,18 +1072,22 @@ async function fetchAlphaVantageChart(symbol) {
       const close = Number(row?.['4. close']) * priceScale;
       return [ts, close];
     })
-    .filter(([ts, close]) => Number.isFinite(ts) && Number.isFinite(close) && close > 0 && close < 1e9)
+    .filter(([ts, close]) => Number.isFinite(ts) && ts <= Date.now() + 2 * 86400000
+      && Number.isFinite(close) && close > 0 && close < 1e9)
     .sort((a, b) => a[0] - b[0]);
-  return points.length ? { points, currency, name, source: 'alpha' } : null;
+  return points.length ? { points, currency, name, source: 'alpha', quoteAt: points.at(-1)[0] } : null;
 }
 
 /**
  * Haalt echte historie op voor aandelen/ETF's — beste-effort:
  * gebruikt met sleutel eerst Alpha Vantage en probeert anders Yahoo-beurzen.
  */
-async function fetchStockHistory(onProgress) {
-  if (!networkConsentEnabled()) return { ok: false, updated: [], failed: ASSETS.filter(a => a.type !== 'Crypto').map(a => a.id), error: 'Externe koersdata staat uit.' };
-  const wanted = ASSETS.filter(a => a.type !== 'Crypto');
+async function fetchStockHistory(onProgress, assetIds = null) {
+  const selected = Array.isArray(assetIds)
+    ? new Set(assetIds.map(normalizeAssetId).filter(Boolean))
+    : null;
+  const wanted = ASSETS.filter(a => a.type !== 'Crypto' && (!selected || selected.has(a.id)));
+  if (!networkConsentEnabled()) return { ok: false, updated: [], failed: wanted.map(a => a.id), error: 'Externe koersdata staat uit.' };
   if (!wanted.length) return { ok: false, updated: [], failed: [] };
   let symMap;
   try { symMap = JSON.parse(localStorage.getItem(YAHOO_MAP_KEY)) || {}; } catch (e) { symMap = {}; }
@@ -950,7 +1111,12 @@ async function fetchStockHistory(onProgress) {
     if (!got) { failed.push(a.id); continue; }
     symMap[a.id] = gotSym;
 
-    let points = got.points;
+    let points = [...got.points];
+    if (Number.isFinite(got.quotePrice) && Number.isFinite(got.quoteAt)) {
+      points.push([got.quoteAt, got.quotePrice]);
+    }
+    const sourceAt = validRefreshTimestamp(got.quoteAt)
+      || Math.max(...points.map(([ts]) => Number(ts)).filter(Number.isFinite));
     if (got.currency !== 'EUR') {
       if (!(got.currency in fxCache)) fxCache[got.currency] = await fxToEurSeries(got.currency);
       const fx = fxCache[got.currency];
@@ -958,7 +1124,12 @@ async function fetchStockHistory(onProgress) {
       points = points.map(([ts, p]) => [ts, p * fx[dateToIndex(new Date(ts).toISOString())]]);
     }
     const compact = new Map(points.map(([ts, p]) => [dateToIndex(new Date(ts).toISOString()), +p.toPrecision(6)]));
-    store[a.id] = { at: Date.now(), points: [...compact.entries()], src: got.source || 'yahoo' };
+    store[a.id] = {
+      at: Date.now(),
+      quoteAt: Number.isFinite(sourceAt) ? sourceAt : Date.now(),
+      points: [...compact.entries()],
+      src: got.source || 'yahoo',
+    };
     updated.push(a.id);
     await new Promise(r => setTimeout(r, got.source === 'alpha' ? 1100 : 400));
   }

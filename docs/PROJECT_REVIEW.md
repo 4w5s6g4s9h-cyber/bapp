@@ -1,13 +1,13 @@
 # Kritische projectbeoordeling en verbeterplan
 
-Datum: 13 juli 2026  
+Datum: 15 juli 2026
 Scope: app, hoofddoel, aannames, architectuur, code, cybersecurity, functies, tests en deployment.
 
 ## Samenvattend oordeel
 
 De app is geschikt als lokale, experimentele portefeuilleviewer voor één gebruiker, mits de gebruiker begrijpt dat browseropslag geen kluis is en historische modellen geen adviesmotor zijn. De oorspronkelijke versie had bruikbare visualisaties, maar liet gereconstrueerde data doorstromen naar statistiek en ML, behandelde cashflows als rendement, maakte impliciete netwerkcalls en had geen regressietests of CI. Daardoor waren vooral de financiële uitkomsten overtuigender gepresenteerd dan de datakwaliteit toeliet.
 
-Versie 12 herstelt de belangrijkste betrouwbaarheidsgrenzen: data heeft nu herkomst, financiële analyses blokkeren op onvoldoende echte dekking, cashflows zijn neutraal in rendement, externe calls zijn opt-in en import/restore is gevalideerd en herstelbaar. De app blijft bewust een statische browserapp; dat is tegelijk haar sterkste privacy-eigenschap en haar voornaamste operationele beperking.
+Versie 15 herstelt de belangrijkste betrouwbaarheidsgrenzen: data heeft nu herkomst, financiële analyses blokkeren op onvoldoende echte dekking, cashflows zijn neutraal in rendement, externe calls zijn opt-in en import/restore is gevalideerd en herstelbaar. Providerbewuste automatische verversing is afzonderlijk opt-in, bewaart dynamische CoinGecko-koppelingen en toont bron- en ophaaltijden. De app blijft bewust een statische browserapp; dat is tegelijk haar sterkste privacy-eigenschap en haar voornaamste operationele beperking.
 
 ## Hoofddoel en expliciete aannames
 
@@ -29,7 +29,7 @@ De scheiding in data, import, kwantitatieve analyse, ML, backtest, DCA, alerts, 
 De kerngegevensstroom is nu:
 
 ```text
-bestand / expliciete koerscall
+bestand / expliciete of opt-in geplande koerscall
             |
        validatie + normalisatie
             |
@@ -64,6 +64,7 @@ Een toekomstige grotere versie hoort klassieke globals te vervangen door ES-modu
 | P1 | 365-daags grid werd met 252 geannualiseerd en 504 kalenderdagen heette twee jaar | Centrale factor 365; backtest/covariantie gebruiken 730 kalenderdagen | Afgerond |
 | P1 | CSV-dedupe liet legitieme orders met gelijk aantal/dag verdwijnen | Broker-id primair; fallback bevat richting, aantal, prijs en transfertype | Afgerond |
 | P1 | Watch-only assets verdwenen door verkeerde laadvolgorde | Assetdefinities laden vóór de watchlist | Afgerond |
+| P1 | Toegevoegde assets hadden geen betrouwbare vervolgverversing; dynamische CoinGecko-ID’s gingen bij reload verloren | CoinGecko-ID persistent; single-flight uurcontrole bij open/focus/online; aandelen providerbewust dagelijks in begrensde batches; bron- en ophaaltijd zichtbaar | Afgerond binnen browserbeperkingen |
 | P1 | DCA kon toekomstige data gebruiken en fictieve koersen boeken | Historisch venster eindigt exact op uitvoerdag; openstaande termijn wacht op echte koers | Afgerond |
 | P1 | Modals misten Escape, focuslus en dialoogsemantiek | ARIA, Escape, focus trap, focusherstel en live toast toegevoegd | Afgerond voor de twee modals |
 | P1 | Geen tests of CI | Node-testset, publieke-buildvalidator en minimale GitHub Actions-workflow | Afgerond |
@@ -79,6 +80,8 @@ Resterende risico's:
 - Een meta-CSP kan geen betrouwbare `frame-ancestors`-header zetten. Productiehosting hoort CSP, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` en `Permissions-Policy` als HTTP-headers toe te voegen.
 - De app heeft geen authenticatie, autorisatie, auditlog of veilige synchronisatie. Maak haar niet multi-user zonder backend- en threat-modelherontwerp.
 - Externe koersdiensten kunnen uitvallen, CORS wijzigen of een verkeerd symbool teruggeven. Valuta wordt gevalideerd, maar tickeridentiteit zonder ISIN/beurs blijft ambigu.
+- Een open browsertab is geen scheduler: timers kunnen worden vertraagd of gepauzeerd en stoppen volledig wanneer de app gesloten is. Gegarandeerde achtergrondverversing vereist een backend of worker.
+- Gratis Alpha Vantage-data is eindedagdata en heeft een laag dagelijks verzoekbudget; de app noemt aandelenkoersen daarom niet realtime en ververst ze automatisch hooguit dagelijks.
 - Een lokaal backupbestand is platte financiële JSON. Beveiliging daarvan ligt bij bestandssysteem, gebruiker en eventuele schijfversleuteling.
 - Eerder verwijderde gevoelige Git-objecten kunnen nog in lokale reflogs of onbereikbare objecten bestaan. Geschiedenis opschonen is destructief en valt buiten automatische uitvoering; doe dit alleen na backup en expliciete keuze, en roteer een remote indien die objecten ooit zijn gepusht.
 
@@ -97,7 +100,7 @@ Niet opgelost of bewust beperkt:
 
 ## Tests en deployment
 
-De regressiesuite controleert de cashflowcorrectie, herimport/reload, rollback, CSV-dedupe, standaard-uitgeschakeld netwerk, backuprestore, DCA zonder look-ahead, walk-forward-arena, syntaxis en statische security-/cache-eisen. `scripts/validate-public-build.mjs` controleert daarnaast privépaden, lokale assetreferenties en cacheversies.
+De regressiesuite controleert de cashflowcorrectie, herimport/reload, rollback, CSV-dedupe, standaard-uitgeschakeld netwerk, afzonderlijke auto-refreshtoestemming, refreshvensters, persistente CoinGecko-koppelingen en spotopslag, backuprestore, DCA zonder look-ahead, walk-forward-arena, syntaxis en statische security-/cache-eisen. `scripts/validate-public-build.mjs` controleert daarnaast privépaden, lokale assetreferenties en cacheversies.
 
 De GitHub Actions-job is aanwezig, maar branch protection is een externe repository-instelling en moet handmatig worden geactiveerd. Ook productie-securityheaders zijn een hostingverantwoordelijkheid; GitHub Pages biedt daar beperkte controle over.
 
