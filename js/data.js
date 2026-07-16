@@ -162,51 +162,159 @@ function historyCoverageLabel(assetId, days = 365) {
   return `${Math.round(marketCoverage(assetId, Math.max(0, HISTORY_DAYS - days), HISTORY_DAYS - 1) * 100)}% echt`;
 }
 
-// ---------- Transacties (localStorage) ----------
-const TX_KEY = 'vermogen_transactions_v3';
+// ---------- Transacties + cashledger (schema v4) ----------
+const TX_KEY = 'vermogen_transactions_v4';
+const LEGACY_TX_KEY = 'vermogen_transactions_v3';
+const RECONCILIATION_KEY = 'vermogen_reconciliation_v1';
+const TRANSACTION_TYPES = Object.freeze([
+  'buy', 'sell', 'deposit', 'withdrawal', 'dividend', 'interest',
+  'fee', 'tax', 'split', 'transfer_in', 'transfer_out',
+]);
+const TRADE_TYPES = new Set(['buy', 'sell']);
+const TRANSFER_TYPES = new Set(['transfer_in', 'transfer_out']);
+const CASH_EVENT_TYPES = new Set(['deposit', 'withdrawal', 'dividend', 'interest', 'fee', 'tax']);
+const ASSET_REQUIRED_TYPES = new Set(['buy', 'sell', 'split', 'transfer_in', 'transfer_out']);
 
-function normalizeStoredTransaction(tx) {
-  if (!tx || typeof tx !== 'object') return null;
+function normalizeCurrency(value) {
+  const currency = cleanDisplayText(value || 'EUR', 3).toUpperCase();
+  return /^[A-Z]{3}$/.test(currency) ? currency : null;
+}
+
+function normalizedNonNegative(value, fallback = 0) {
+  const number = value === '' || value === null || value === undefined ? fallback : Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function optionalNonNegative(value) {
+  if (value === '' || value === null || value === undefined) return undefined;
+  return normalizedNonNegative(value);
+}
+
+/**
+ * Normaliseert schema-v4-gebeurtenissen. Oude v3 buy/sell-rijen worden als
+ * extern afgerekend gemarkeerd: zo blijft hun historische waardering gelijk,
+ * terwijl nieuwe interne trades de cashrekening wel gebruiken.
+ */
+function normalizeStoredTransaction(tx, { legacy = false } = {}) {
+  if (!tx || typeof tx !== 'object' || Array.isArray(tx)) return null;
   const date = new Date(tx.date);
+  if (!Number.isFinite(date.getTime())) return null;
+
+  let type = cleanDisplayText(tx.type || '', 20).toLowerCase();
+  if (tx.transfer === true && (type === 'buy' || type === 'sell')) {
+    type = type === 'buy' ? 'transfer_in' : 'transfer_out';
+  }
+  if (!TRANSACTION_TYPES.includes(type)) return null;
+
   const asset = normalizeAssetId(tx.asset);
-  const qty = Number(tx.qty), price = Number(tx.price);
-  if (!Number.isFinite(date.getTime()) || !asset || !['buy', 'sell'].includes(tx.type)
-      || !Number.isFinite(qty) || qty <= 0 || !Number.isFinite(price) || price < 0) return null;
+  if (ASSET_REQUIRED_TYPES.has(type) && !asset) return null;
+  const currency = normalizeCurrency(tx.currency);
+  const fxRate = Number(tx.fxRate ?? 1);
+  if (!currency || !Number.isFinite(fxRate) || fxRate <= 0 || fxRate >= 1e6) return null;
+
   const out = {
-    id: cleanDisplayText(tx.id || `tx-${date.getTime()}-${asset}`, 100),
-    date: date.toISOString(), type: tx.type, asset, qty, price,
+    id: cleanDisplayText(tx.id || `tx-${date.getTime()}-${asset || type}`, 100),
+    date: date.toISOString(), type, currency, fxRate,
   };
-  if (tx.transfer === true) out.transfer = true;
-  if (tx.dca && typeof tx.dca === 'object') {
+  if (asset) out.asset = asset;
+
+  if (TRADE_TYPES.has(type)) {
+    const qty = Number(tx.qty), price = Number(tx.price);
+    const fee = normalizedNonNegative(tx.fee), tax = normalizedNonNegative(tx.tax);
+    if (!Number.isFinite(qty) || qty <= 0 || !Number.isFinite(price) || price < 0 || fee === null || tax === null) return null;
+    Object.assign(out, { qty, price, fee, tax, external: legacy ? tx.external !== false : tx.external === true });
+  } else if (TRANSFER_TYPES.has(type)) {
+    const qty = Number(tx.qty), price = normalizedNonNegative(tx.price);
+    const costBasis = optionalNonNegative(tx.costBasis);
+    const externalValue = optionalNonNegative(tx.externalValue);
+    if (!Number.isFinite(qty) || qty <= 0 || price === null || costBasis === null || externalValue === null) return null;
+    Object.assign(out, { qty, price });
+    if (costBasis !== undefined) out.costBasis = costBasis;
+    if (externalValue !== undefined) out.externalValue = externalValue;
+  } else if (type === 'split') {
+    const ratio = Number(tx.ratio);
+    if (!Number.isFinite(ratio) || ratio <= 0 || ratio >= 1e6) return null;
+    out.ratio = ratio;
+  } else if (CASH_EVENT_TYPES.has(type)) {
+    const amount = Number(tx.amount);
+    if (!Number.isFinite(amount) || amount <= 0 || amount >= 1e12) return null;
+    out.amount = amount;
+  }
+
+  if (tx.dca && typeof tx.dca === 'object' && type === 'buy') {
     out.dca = { plan: cleanDisplayText(tx.dca.plan || '', 80), mult: Number(tx.dca.mult) || 1 };
   }
+  const note = cleanDisplayText(tx.note || '', 160);
+  const source = cleanDisplayText(tx.source || '', 40);
+  if (note) out.note = note;
+  if (source) out.source = source;
   return out;
 }
 
 function loadTransactions() {
+  const read = (key, legacy) => {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    const clean = parsed
+      .filter(tx => !String(tx?.id).startsWith('seed-'))
+      .map(tx => normalizeStoredTransaction(tx, { legacy }))
+      .filter(Boolean);
+    return { parsed, clean };
+  };
   try {
-    const raw = localStorage.getItem(TX_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        // overblijfsels van de oude demo-versie opruimen
-        const clean = parsed
-          .filter(tx => !String(tx.id).startsWith('seed-'))
-          .map(normalizeStoredTransaction)
-          .filter(Boolean);
-        if (clean.length !== parsed.length || JSON.stringify(clean) !== JSON.stringify(parsed)) saveTransactions(clean);
-        return clean;
+    const current = read(TX_KEY, false);
+    if (current) {
+      if (current.clean.length !== current.parsed.length || JSON.stringify(current.clean) !== JSON.stringify(current.parsed)) {
+        localStorage.setItem(TX_KEY, JSON.stringify(current.clean));
       }
+      return current.clean;
     }
-  } catch (e) { /* corrupt -> leeg beginnen */ }
+    const legacy = read(LEGACY_TX_KEY, true);
+    if (legacy) {
+      const encoded = JSON.stringify(legacy.clean);
+      localStorage.setItem(TX_KEY, encoded);
+      if (localStorage.getItem(TX_KEY) !== encoded) throw new Error('Migratie naar transactieschema v4 is niet bevestigd.');
+      localStorage.removeItem(LEGACY_TX_KEY);
+      return legacy.clean;
+    }
+  } catch (e) { /* corrupt -> leeg beginnen; backuprestore blijft beschikbaar */ }
   return [];
 }
 
 function saveTransactions(txs) {
   if (!Array.isArray(txs)) throw new Error('Transacties moeten een lijst zijn.');
-  const clean = txs.map(normalizeStoredTransaction);
+  const clean = txs.map(tx => normalizeStoredTransaction(tx));
   if (clean.some(tx => tx === null)) throw new Error('Een transactie is ongeldig.');
-  localStorage.setItem(TX_KEY, JSON.stringify(clean));
+  const ids = new Set(clean.map(tx => tx.id));
+  if (ids.size !== clean.length) throw new Error('Transactie-id’s moeten uniek zijn.');
+  const encoded = JSON.stringify(clean);
+  localStorage.setItem(TX_KEY, encoded);
+  if (localStorage.getItem(TX_KEY) !== encoded) throw new Error('Transacties konden niet betrouwbaar worden opgeslagen.');
+}
+
+function transactionFxRate(tx) {
+  const rate = Number(tx?.fxRate ?? 1);
+  return Number.isFinite(rate) && rate > 0 ? rate : 1;
+}
+function transactionPriceEur(tx) { return Number(tx?.price || 0) * transactionFxRate(tx); }
+function transactionAmountEur(tx) { return Number(tx?.amount || 0) * transactionFxRate(tx); }
+function transactionFeeEur(tx) { return Number(tx?.fee || 0) * transactionFxRate(tx); }
+function transactionTaxEur(tx) { return Number(tx?.tax || 0) * transactionFxRate(tx); }
+function transactionTradeGrossEur(tx) {
+  return Number(tx?.qty || 0) * transactionPriceEur(tx) + transactionFeeEur(tx) + transactionTaxEur(tx);
+}
+function transactionTradeNetEur(tx) {
+  return Number(tx?.qty || 0) * transactionPriceEur(tx) - transactionFeeEur(tx) - transactionTaxEur(tx);
+}
+function transactionTransferValueEur(tx) {
+  const native = tx?.externalValue !== undefined ? Number(tx.externalValue) : Number(tx?.qty || 0) * Number(tx?.price || 0);
+  return Number.isFinite(native) ? native * transactionFxRate(tx) : 0;
+}
+function transactionTransferCostEur(tx) {
+  const native = tx?.costBasis !== undefined ? Number(tx.costBasis) : Number(tx?.qty || 0) * Number(tx?.price || 0);
+  return Number.isFinite(native) ? native * transactionFxRate(tx) : 0;
 }
 
 // ---------- Portefeuille-berekeningen ----------
@@ -217,50 +325,155 @@ function dateToIndex(isoDate) {
   return Math.max(0, Math.min(HISTORY_DAYS - 1, idx));
 }
 
-// Holdings (aantallen per asset) per dag opbouwen uit transacties
-function computeHoldingsTimeline(txs) {
-  const deltas = {}; // idx -> {asset: dqty}
-  for (const tx of txs) {
-    const idx = dateToIndex(tx.date);
-    const sign = tx.type === 'buy' ? 1 : -1;
-    if (!deltas[idx]) deltas[idx] = {};
-    deltas[idx][tx.asset] = (deltas[idx][tx.asset] || 0) + sign * tx.qty;
-  }
-  const timeline = new Array(HISTORY_DAYS);
-  const current = {};
-  for (let i = 0; i < HISTORY_DAYS; i++) {
-    if (deltas[i]) {
-      for (const [asset, dq] of Object.entries(deltas[i])) {
-        current[asset] = Math.max(0, (current[asset] || 0) + dq);
-      }
-    }
-    timeline[i] = { ...current };
-  }
-  return timeline;
+function emptyLedgerPosition() { return { qty: 0, cost: 0, realized: 0 }; }
+
+function addLedgerIssue(ledger, tx, code, message) {
+  ledger.issues.push({ txId: tx.id, date: tx.date, asset: tx.asset || '', code, message });
 }
+
+/** Past één gevalideerde gebeurtenis toe en retourneert de externe flow naar de portefeuille. */
+function applyLedgerTransaction(ledger, tx) {
+  let externalFlow = 0;
+  const position = tx.asset ? (ledger.positions[tx.asset] ||= emptyLedgerPosition()) : null;
+
+  if (tx.type === 'buy') {
+    const gross = transactionTradeGrossEur(tx);
+    if (tx.external) { ledger.cash += gross; externalFlow += gross; }
+    ledger.cash -= gross;
+    position.qty += tx.qty;
+    position.cost += gross;
+    ledger.fees += transactionFeeEur(tx);
+    ledger.taxes += transactionTaxEur(tx);
+  } else if (tx.type === 'sell') {
+    if (tx.qty > position.qty + 1e-9) {
+      addLedgerIssue(ledger, tx, 'oversell', `Verkoop van ${tx.qty} ${tx.asset} overschrijdt het beschikbare aantal ${position.qty}.`);
+      return 0;
+    }
+    const avg = position.qty > 0 ? position.cost / position.qty : 0;
+    const basis = avg * tx.qty;
+    const net = transactionTradeNetEur(tx);
+    position.qty -= tx.qty;
+    position.cost = Math.max(0, position.cost - basis);
+    position.realized += net - basis;
+    ledger.realized += net - basis;
+    ledger.cash += net;
+    if (tx.external) { ledger.cash -= net; externalFlow -= net; }
+    ledger.fees += transactionFeeEur(tx);
+    ledger.taxes += transactionTaxEur(tx);
+  } else if (tx.type === 'deposit') {
+    const amount = transactionAmountEur(tx);
+    ledger.cash += amount; externalFlow += amount;
+  } else if (tx.type === 'withdrawal') {
+    const amount = transactionAmountEur(tx);
+    ledger.cash -= amount; externalFlow -= amount;
+  } else if (tx.type === 'dividend' || tx.type === 'interest') {
+    const amount = transactionAmountEur(tx);
+    ledger.cash += amount;
+    ledger.income += amount;
+  } else if (tx.type === 'fee') {
+    const amount = transactionAmountEur(tx);
+    ledger.cash -= amount; ledger.fees += amount;
+  } else if (tx.type === 'tax') {
+    const amount = transactionAmountEur(tx);
+    ledger.cash -= amount; ledger.taxes += amount;
+  } else if (tx.type === 'transfer_in') {
+    const cost = transactionTransferCostEur(tx);
+    position.qty += tx.qty;
+    position.cost += cost;
+    externalFlow += transactionTransferValueEur(tx);
+  } else if (tx.type === 'transfer_out') {
+    if (tx.qty > position.qty + 1e-9) {
+      addLedgerIssue(ledger, tx, 'overtransfer', `Transfer van ${tx.qty} ${tx.asset} overschrijdt het beschikbare aantal ${position.qty}.`);
+      return 0;
+    }
+    const avg = position.qty > 0 ? position.cost / position.qty : 0;
+    position.qty -= tx.qty;
+    position.cost = Math.max(0, position.cost - avg * tx.qty);
+    externalFlow -= transactionTransferValueEur(tx);
+  } else if (tx.type === 'split') {
+    if (position.qty <= 0) {
+      addLedgerIssue(ledger, tx, 'split-without-position', `Split voor ${tx.asset} heeft geen bestaande positie.`);
+      return 0;
+    }
+    position.qty *= tx.ratio;
+  }
+  ledger.minCash = Math.min(ledger.minCash, ledger.cash);
+  return externalFlow;
+}
+
+/** Bouwt effecten, cash, kostbasis en externe flows op één gedeelde tijdlijn. */
+function buildPortfolioLedger(txs) {
+  const eventsByDay = new Map();
+  const normalized = (Array.isArray(txs) ? txs : [])
+    .map(tx => normalizeStoredTransaction(tx))
+    .filter(Boolean)
+    .sort((a, b) => new Date(a.date) - new Date(b.date) || a.id.localeCompare(b.id));
+  for (const tx of normalized) {
+    const idx = dateToIndex(tx.date);
+    if (!eventsByDay.has(idx)) eventsByDay.set(idx, []);
+    eventsByDay.get(idx).push(tx);
+  }
+
+  const ledger = {
+    cash: 0, minCash: 0, positions: {}, issues: [],
+    realized: 0, income: 0, fees: 0, taxes: 0,
+  };
+  const timeline = new Array(HISTORY_DAYS);
+  const cashTimeline = new Array(HISTORY_DAYS).fill(0);
+  const externalFlows = new Array(HISTORY_DAYS).fill(0);
+  const values = new Array(HISTORY_DAYS).fill(0);
+
+  for (let i = 0; i < HISTORY_DAYS; i++) {
+    for (const tx of eventsByDay.get(i) || []) externalFlows[i] += applyLedgerTransaction(ledger, tx);
+    const holdings = {};
+    for (const [asset, position] of Object.entries(ledger.positions)) {
+      if (position.qty > 1e-9) holdings[asset] = position.qty;
+    }
+    timeline[i] = holdings;
+    cashTimeline[i] = ledger.cash;
+    let value = ledger.cash;
+    for (const [asset, qty] of Object.entries(holdings)) {
+      if (MARKET.prices[asset]) value += qty * MARKET.prices[asset][i];
+    }
+    values[i] = value;
+  }
+  if (ledger.minCash < -0.005) {
+    ledger.issues.push({
+      txId: '', date: '', asset: '', code: 'negative-cash',
+      message: `Het cashsaldo was historisch minimaal ${ledger.minCash.toFixed(2)} EUR; mogelijk ontbreekt een storting.`,
+    });
+  }
+  return { ...ledger, timeline, cashTimeline, externalFlows, values };
+}
+
+function computeHoldingsTimeline(txs) { return buildPortfolioLedger(txs).timeline; }
 
 function computePortfolioSeries(txs) {
-  const timeline = computeHoldingsTimeline(txs);
-  const values = new Array(HISTORY_DAYS);
-  for (let i = 0; i < HISTORY_DAYS; i++) {
-    let v = 0;
-    for (const [asset, qty] of Object.entries(timeline[i])) {
-      if (qty > 0 && MARKET.prices[asset]) v += qty * MARKET.prices[asset][i];
-    }
-    values[i] = v;
-  }
-  return { values, timeline };
+  const ledger = buildPortfolioLedger(txs);
+  return {
+    values: ledger.values, timeline: ledger.timeline, cashTimeline: ledger.cashTimeline,
+    externalFlows: ledger.externalFlows, cash: ledger.cash, ledger,
+  };
 }
 
-/** Externe cashflow per dag: aankopen positief, verkopen negatief. */
-function computeCashflowSeries(txs) {
-  const flows = new Array(HISTORY_DAYS).fill(0);
-  for (const tx of txs) {
-    const amount = Number(tx.qty) * Number(tx.price);
-    if (!Number.isFinite(amount)) continue;
-    flows[dateToIndex(tx.date)] += (tx.type === 'buy' ? 1 : -1) * amount;
+/** Externe stortingen/onttrekkingen; interne trades, inkomsten en kosten tellen niet mee. */
+function computeCashflowSeries(txs) { return buildPortfolioLedger(txs).externalFlows; }
+
+function externalCashflowEvents(txs) {
+  const ledger = {
+    cash: 0, minCash: 0, positions: {}, issues: [],
+    realized: 0, income: 0, fees: 0, taxes: 0,
+  };
+  const events = [];
+  const normalized = (Array.isArray(txs) ? txs : [])
+    .map(row => normalizeStoredTransaction(row))
+    .filter(Boolean)
+    .sort((a, b) => new Date(a.date) - new Date(b.date) || a.id.localeCompare(b.id));
+  for (const tx of normalized) {
+    const amount = applyLedgerTransaction(ledger, tx);
+    if (Math.abs(amount) > 1e-12) events.push({ date: tx.date, amount });
   }
-  return flows;
+  return events;
 }
 
 /**
@@ -300,33 +513,19 @@ function dailyPortfolioPnl(txs, values, index = HISTORY_DAYS - 1) {
   return { pnl, pct: base > 1e-9 ? pnl / base : 0, flow: flows[index] };
 }
 
-// Huidige posities met gemiddelde koopprijs (moving average cost basis)
+// Huidige posities met gemiddelde kostbasis, inclusief kosten en splits.
 function computePositions(txs) {
-  const sorted = [...txs].sort((a, b) => new Date(a.date) - new Date(b.date));
-  const pos = {}; // asset -> {qty, cost}
-  for (const tx of sorted) {
-    if (!pos[tx.asset]) pos[tx.asset] = { qty: 0, cost: 0 };
-    const p = pos[tx.asset];
-    if (tx.type === 'buy') {
-      p.cost += tx.qty * tx.price;
-      p.qty += tx.qty;
-    } else {
-      const avg = p.qty > 0 ? p.cost / p.qty : 0;
-      const sellQty = Math.min(tx.qty, p.qty);
-      p.cost -= avg * sellQty;
-      p.qty -= sellQty;
-    }
-  }
+  const ledger = buildPortfolioLedger(txs);
   return ASSETS
-    .filter(a => pos[a.id] && pos[a.id].qty > 1e-9 && MARKET.prices[a.id])
+    .filter(a => ledger.positions[a.id] && ledger.positions[a.id].qty > 1e-9 && MARKET.prices[a.id])
     .map(a => {
-      const { qty, cost } = pos[a.id];
+      const { qty, cost, realized } = ledger.positions[a.id];
       const price = lastPrice(a.id);
       const value = qty * price;
       const avgPrice = cost / qty;
       return {
         asset: a, qty, avgPrice, price, value,
-        cost,
+        cost, realized,
         gain: value - cost,
         gainPct: cost > 0 ? (value / cost - 1) * 100 : 0,
       };
@@ -335,10 +534,40 @@ function computePositions(txs) {
 }
 
 function totalInvested(txs) {
-  // netto ingelegd: koopsom - verkoopopbrengst
-  let sum = 0;
-  for (const tx of txs) sum += (tx.type === 'buy' ? 1 : -1) * tx.qty * tx.price;
-  return sum;
+  return computeCashflowSeries(txs).reduce((sum, amount) => sum + amount, 0);
+}
+
+function loadReconciliation() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(RECONCILIATION_KEY)) || {};
+    const assets = {};
+    if (parsed.assets && typeof parsed.assets === 'object' && !Array.isArray(parsed.assets)) {
+      for (const [rawId, rawQty] of Object.entries(parsed.assets).slice(0, 250)) {
+        const id = normalizeAssetId(rawId), qty = Number(rawQty);
+        if (id && Number.isFinite(qty) && qty >= 0 && qty < 1e15) assets[id] = qty;
+      }
+    }
+    const cash = parsed.cash === '' || parsed.cash === null || parsed.cash === undefined ? null : Number(parsed.cash);
+    const date = Number.isFinite(new Date(parsed.date).getTime()) ? new Date(parsed.date).toISOString() : null;
+    return { assets, cash: Number.isFinite(cash) && Math.abs(cash) < 1e15 ? cash : null, date };
+  } catch (e) { return { assets: {}, cash: null, date: null }; }
+}
+
+function saveReconciliation(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') throw new Error('Reconciliatie ontbreekt.');
+  const clean = { assets: {}, cash: null, date: new Date().toISOString() };
+  for (const [rawId, rawQty] of Object.entries(snapshot.assets || {}).slice(0, 250)) {
+    const id = normalizeAssetId(rawId), qty = Number(rawQty);
+    if (!id || !Number.isFinite(qty) || qty < 0 || qty >= 1e15) throw new Error(`Ongeldige referentiehoeveelheid voor ${rawId}.`);
+    clean.assets[id] = qty;
+  }
+  if (snapshot.cash !== '' && snapshot.cash !== null && snapshot.cash !== undefined) {
+    const cash = Number(snapshot.cash);
+    if (!Number.isFinite(cash) || Math.abs(cash) >= 1e15) throw new Error('Ongeldig referentie-cashsaldo.');
+    clean.cash = cash;
+  }
+  localStorage.setItem(RECONCILIATION_KEY, JSON.stringify(clean));
+  return clean;
 }
 
 // ---------- Helpers ----------

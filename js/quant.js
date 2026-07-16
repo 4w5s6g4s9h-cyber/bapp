@@ -152,19 +152,109 @@ function applyStress(positions, scenario) {
 function benchmarkSeries(txs, benchId = 'VWCE') {
   const bench = MARKET.prices[benchId];
   if (!bench) return null;
-  const flows = txs
-    .map(tx => ({ idx: dateToIndex(tx.date), cash: (tx.type === 'buy' ? 1 : -1) * tx.qty * tx.price }))
-    .sort((a, b) => a.idx - b.idx);
+  const flows = computeCashflowSeries(txs);
   const values = new Array(HISTORY_DAYS).fill(null);
-  let units = 0, f = 0, started = false;
+  let units = 0, started = false;
   for (let i = 0; i < HISTORY_DAYS; i++) {
-    while (f < flows.length && flows[f].idx <= i) {
-      units = Math.max(0, units + flows[f].cash / bench[i]);
-      started = true; f++;
+    if (Math.abs(flows[i]) > 1e-12) {
+      units = Math.max(0, units + flows[i] / bench[i]);
+      if (flows[i] > 0) started = true;
     }
     if (started) values[i] = units * bench[i];
   }
   return values;
+}
+
+// ---------- Geldgewogen rendement (XIRR) ----------
+function xnpv(rate, cashflows) {
+  if (!Number.isFinite(rate) || rate <= -1 || !Array.isArray(cashflows) || cashflows.length < 2) return NaN;
+  const ordered = cashflows
+    .map(flow => ({ date: new Date(flow.date), amount: Number(flow.amount) }))
+    .filter(flow => Number.isFinite(flow.date.getTime()) && Number.isFinite(flow.amount))
+    .sort((a, b) => a.date - b.date);
+  if (ordered.length < 2) return NaN;
+  const t0 = ordered[0].date.getTime();
+  return ordered.reduce((sum, flow) => {
+    const years = (flow.date.getTime() - t0) / 86400000 / 365;
+    return sum + flow.amount / ((1 + rate) ** years);
+  }, 0);
+}
+
+/**
+ * Jaarlijks geldgewogen rendement voor onregelmatige cashflows. De uitkomst
+ * is een fractie (0,10 = 10%); null betekent dat geen betrouwbare wortel
+ * bestaat, bijvoorbeeld doordat alle cashflows hetzelfde teken hebben.
+ */
+function xirr(cashflows, guess = 0.1) {
+  const byDate = new Map();
+  for (const flow of Array.isArray(cashflows) ? cashflows : []) {
+    const date = new Date(flow?.date), amount = Number(flow?.amount);
+    if (!Number.isFinite(date.getTime()) || !Number.isFinite(amount) || Math.abs(amount) < 1e-12) continue;
+    const key = date.toISOString().slice(0, 10);
+    byDate.set(key, (byDate.get(key) || 0) + amount);
+  }
+  const flows = [...byDate.entries()]
+    .map(([date, amount]) => ({ date: new Date(`${date}T12:00:00.000Z`), amount }))
+    .filter(flow => Math.abs(flow.amount) >= 1e-12)
+    .sort((a, b) => a.date - b.date);
+  if (flows.length < 2 || !flows.some(flow => flow.amount > 0) || !flows.some(flow => flow.amount < 0)) return null;
+
+  const scale = flows.reduce((sum, flow) => sum + Math.abs(flow.amount), 0);
+  const tolerance = Math.max(1e-9, scale * 1e-10);
+  const t0 = flows[0].date.getTime();
+  const npvAndDerivative = (rate) => {
+    if (!Number.isFinite(rate) || rate <= -1) return { value: NaN, derivative: NaN };
+    let value = 0, derivative = 0;
+    for (const flow of flows) {
+      const years = (flow.date.getTime() - t0) / 86400000 / 365;
+      value += flow.amount / ((1 + rate) ** years);
+      derivative -= years * flow.amount / ((1 + rate) ** (years + 1));
+    }
+    return { value, derivative };
+  };
+
+  let rate = Number.isFinite(guess) && guess > -1 ? guess : 0.1;
+  for (let iteration = 0; iteration < 100; iteration++) {
+    const { value, derivative } = npvAndDerivative(rate);
+    if (Math.abs(value) <= tolerance) return rate;
+    if (!Number.isFinite(value) || !Number.isFinite(derivative) || Math.abs(derivative) < 1e-14) break;
+    const next = rate - value / derivative;
+    if (!Number.isFinite(next) || next <= -0.999999999 || next > 1e9) break;
+    if (Math.abs(next - rate) <= 1e-12) return next;
+    rate = next;
+  }
+
+  const grid = [-0.999999, -0.9999, -0.999, -0.99, -0.9, -0.75, -0.5, -0.25, 0, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 100, 1000, 1e6];
+  let previousRate = grid[0], previousValue = npvAndDerivative(previousRate).value;
+  for (let i = 1; i < grid.length; i++) {
+    let currentRate = grid[i], currentValue = npvAndDerivative(currentRate).value;
+    if (Math.abs(currentValue) <= tolerance) return currentRate;
+    if (Number.isFinite(previousValue) && Number.isFinite(currentValue) && Math.sign(previousValue) !== Math.sign(currentValue)) {
+      let low = previousRate, high = currentRate;
+      for (let iteration = 0; iteration < 200; iteration++) {
+        const mid = (low + high) / 2;
+        const midValue = npvAndDerivative(mid).value;
+        if (Math.abs(midValue) <= tolerance || high - low <= 1e-12) return mid;
+        if (Math.sign(midValue) === Math.sign(previousValue)) low = mid;
+        else high = mid;
+      }
+      return (low + high) / 2;
+    }
+    previousRate = currentRate;
+    previousValue = currentValue;
+  }
+  return null;
+}
+
+function portfolioXirr(txs, finalValue, valuationDate = MARKET.dates[HISTORY_DAYS - 1]) {
+  const end = new Date(valuationDate);
+  const value = Number(finalValue);
+  if (!Number.isFinite(end.getTime()) || !Number.isFinite(value) || value < 0) return null;
+  const flows = externalCashflowEvents(txs)
+    .filter(flow => new Date(flow.date) <= end)
+    .map(flow => ({ date: flow.date, amount: -flow.amount }));
+  if (value > 0) flows.push({ date: end.toISOString(), amount: value });
+  return xirr(flows);
 }
 
 // ---------- Tijdgewogen rendement (TWR) ----------
