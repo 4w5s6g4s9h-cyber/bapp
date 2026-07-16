@@ -806,7 +806,9 @@ function reconcilePortfolio(txs, snapshot = {}) {
     const rawActual = Object.prototype.hasOwnProperty.call(actualAssets, asset) ? Number(actualAssets[asset]) : null;
     const actual = Number.isFinite(rawActual) ? rawActual : null;
     const difference = actual === null ? null : actual - expected;
-    const tolerance = Math.max(1e-8, Math.abs(expected) * 1e-8);
+    // De UI toont zeven decimalen; een halve eenheid op die laatste
+    // decimaal is broker-/weergaveafronding en geen echte mismatch.
+    const tolerance = Math.max(5e-8, Math.abs(expected) * 1e-8);
     return { asset, expected, actual, difference, balanced: difference !== null && Math.abs(difference) <= tolerance };
   });
   const rawCash = snapshot?.cash;

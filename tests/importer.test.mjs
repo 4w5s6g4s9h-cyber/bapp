@@ -18,10 +18,10 @@ function genericPortfolio() {
 test('identieke JSON-herimport bewaart assetdefinities en overleeft reload', () => {
   const storage = new MemoryStorage();
   const first = createRuntime(FILES, { storage });
-  assert.equal(first.evaluate(`importPortfolioJSON(${JSON.stringify(genericPortfolio())}).ok`), true);
+  assert.equal(first.evaluate(`importPortfolioJSON(${JSON.stringify(genericPortfolio())}, { confirmed: true }).ok`), true);
   assert.equal(JSON.parse(storage.getItem('vermogen_custom_v2')).assets.length, 1);
   assert.equal(JSON.parse(storage.getItem('vermogen_transactions_v4'))[0].external, true);
-  assert.equal(first.evaluate(`importPortfolioJSON(${JSON.stringify(genericPortfolio())}).ok`), true);
+  assert.equal(first.evaluate(`importPortfolioJSON(${JSON.stringify(genericPortfolio())}, { confirmed: true }).ok`), true);
   assert.equal(JSON.parse(storage.getItem('vermogen_custom_v2')).assets.length, 1);
 
   const reload = createRuntime(FILES, { storage });
@@ -35,7 +35,7 @@ test('geïmporteerde labels worden onschadelijk gemaakt', () => {
   const payload = JSON.stringify({
     transactions: [{ date: '2026-07-01', side: 'buy', ticker: 'XSS', quantity: 1, price: 10, name: '<img src=x onerror=alert(1)>' }],
   });
-  const result = rt.evaluate(`importPortfolioJSON(${JSON.stringify(payload)})`);
+  const result = rt.evaluate(`importPortfolioJSON(${JSON.stringify(payload)}, { confirmed: true })`);
   assert.equal(result.ok, true);
   assert.doesNotMatch(rt.evaluate('ASSETS[0].name'), /[<>]/);
 });
@@ -73,6 +73,42 @@ test('een generieke import met een toekomstige boeking faalt zonder opslagmutati
   assert.equal(storage.getItem('vermogen_custom_v2'), null);
 });
 
+test('generieke JSON schrijft pas na previewbevestiging en toont afgewezen type-rijen', () => {
+  const storage = new MemoryStorage({ bestaand: 'blijft' });
+  const rt = createRuntime(FILES, { storage });
+  const payload = JSON.stringify({ transactions: [
+    { date: '2026-07-01', side: 'buy', ticker: 'SAFE', quantity: 1, price: 100 },
+    { date: '2026-07-02', side: 'swap', ticker: 'SAFE', quantity: 2, price: 110 },
+  ] });
+  const preview = rt.evaluate(`importPortfolioJSON(${JSON.stringify(payload)})`);
+  assert.equal(preview.needsConfirmation, true);
+  assert.equal(preview.preview.recognized, 1);
+  assert.equal(preview.preview.rejectedRows, 1);
+  assert.match(preview.preview.rejected[0], /onbekend transactietype: swap/);
+  assert.equal(storage.getItem('vermogen_transactions_v4'), null);
+  assert.equal(storage.getItem('bestaand'), 'blijft');
+
+  const applied = rt.evaluate(`importPortfolioJSON(${JSON.stringify(payload)}, { confirmed: true })`);
+  assert.equal(applied.ok, true);
+  assert.equal(JSON.parse(storage.getItem('vermogen_transactions_v4')).length, 1);
+});
+
+test('koershistorie met een symboolveld wordt niet als defecte transactietabel gezien', () => {
+  const rt = createRuntime(FILES, { now: '2026-07-16T12:00:00+02:00' });
+  const history = Array.from({ length: 30 }, (_, index) => ({
+    date: `2026-06-${String(index + 1).padStart(2, '0')}`,
+    symbol: 'SAFE',
+    price: 100 + index,
+  }));
+  const payload = JSON.stringify({
+    transactions: [{ date: '2026-07-01', side: 'buy', ticker: 'SAFE', quantity: 1, price: 130 }],
+    history,
+  });
+  const result = rt.evaluate(`importPortfolioJSON(${JSON.stringify(payload)}, { confirmed: true })`);
+  assert.equal(result.ok, true);
+  assert.equal(result.report.histMatched, 1);
+});
+
 test('CSV-dedupe behoudt afzonderlijke orders met andere prijs', () => {
   const rt = createRuntime(FILES);
   const result = rt.evaluate(`(() => {
@@ -82,15 +118,34 @@ test('CSV-dedupe behoudt afzonderlijke orders met andere prijs', () => {
       '2026-07-01,BTC,buy,0.1,50000,UTC,one',
       '2026-07-01,BTC,buy,0.1,51000,UTC,two',
     ].join('\\n');
-    const txs = [];
-    const one = importTransactionCSV(csv, txs);
-    const two = importTransactionCSV(csv, txs);
+    const txs = [{ id: 'funding', date: '2026-06-30T12:00:00.000Z', type: 'deposit', amount: 10000, currency: 'EUR', fxRate: 1, source: 'bitvavo' }];
+    const one = importTransactionCSV(csv, txs, { confirmed: true });
+    const two = importTransactionCSV(csv, txs, { confirmed: true });
     return { one, two, txs };
   })()`);
   assert.equal(result.one.added, 2);
   assert.equal(result.two.added, 0);
-  assert.equal(result.txs.length, 2);
-  assert.equal(JSON.stringify(result.txs.map(tx => tx.price)), JSON.stringify([50000, 51000]));
+  assert.equal(result.txs.length, 3);
+  assert.equal(JSON.stringify(result.txs.filter(tx => tx.asset === 'BTC').map(tx => tx.price)), JSON.stringify([50000, 51000]));
+});
+
+test('CSV-preview muteert ledger en opslag niet vóór bevestiging', () => {
+  const storage = new MemoryStorage();
+  const rt = createRuntime(FILES, { storage });
+  const result = rt.evaluate(`(() => {
+    registerAsset({ id: 'BTC', name: 'Bitcoin', type: 'Crypto' }, new Array(HISTORY_DAYS).fill(50000), new Array(HISTORY_DAYS).fill(true));
+    const txs = [{ id: 'funding', date: '2026-06-30T12:00:00.000Z', type: 'deposit', amount: 1000, currency: 'EUR', fxRate: 1, source: 'bitvavo' }];
+    const csv = [
+      'Date,Currency,Type,Amount,Quote Price,Timezone,Transaction ID',
+      '2026-07-01,BTC,buy,0.01,50000,UTC,preview-trade',
+    ].join('\\n');
+    const preview = importTransactionCSV(csv, txs);
+    return { preview, count: txs.length, stored: localStorage.getItem(TX_KEY) };
+  })()`);
+  assert.equal(result.preview.needsConfirmation, true);
+  assert.equal(result.preview.preview.added, 1);
+  assert.equal(result.count, 1);
+  assert.equal(result.stored, null);
 });
 
 test('generieke schema-v4 JSON bewaart cash, interne trades, dividend en splits', () => {
@@ -102,7 +157,7 @@ test('generieke schema-v4 JSON bewaart cash, interne trades, dividend en splits'
     { id: 'split', date: '2026-07-04', type: 'split', asset: 'V4X', ratio: 2 },
   ] });
   const result = rt.evaluate(`(() => {
-    const imported = importPortfolioJSON(${JSON.stringify(payload)});
+    const imported = importPortfolioJSON(${JSON.stringify(payload)}, { confirmed: true });
     const txs = JSON.parse(localStorage.getItem(TX_KEY));
     const ledger = buildPortfolioLedger(txs);
     return { imported, txs, cash: ledger.cash, qty: ledger.positions.V4X.qty, external: ledger.externalFlows.reduce((a, b) => a + b, 0) };
@@ -124,7 +179,7 @@ test('DEGIRO-import boekt expliciete transactiekosten en blijft direct extern af
       '01-07-2026,NL0000000001,2,200,-2.50,-0.50,Degiro ETF,order-fee',
     ].join('\\n');
     const txs = [];
-    const imported = importTransactionCSV(csv, txs);
+    const imported = importTransactionCSV(csv, txs, { confirmed: true });
     return { imported, tx: txs[0], invested: totalInvested(txs) };
   })()`);
   assert.equal(result.imported.ok, true);
@@ -135,25 +190,119 @@ test('DEGIRO-import boekt expliciete transactiekosten en blijft direct extern af
   assert.equal(result.invested, 203);
 });
 
+test('Engelse DEGIRO-export gebruikt asset-ISIN en alleen een expliciete EUR-factor', () => {
+  const rt = createRuntime(FILES);
+  const result = rt.evaluate(`(() => {
+    registerAsset({ id: 'USX', isin: 'US0000000001', name: 'US Asset', type: 'Aandeel' }, new Array(HISTORY_DAYS).fill(90), new Array(HISTORY_DAYS).fill(true));
+    const csv = [
+      'Date,ISIN,Quantity,Price,Currency,Rate to EUR,Transaction Costs,Product,Order ID',
+      '2026-07-01,US0000000001,2,100,USD,0.9,2,US Asset,english-order',
+    ].join('\\n');
+    const txs = [];
+    const imported = importTransactionCSV(csv, txs, { confirmed: true });
+    return { imported, tx: txs[0] };
+  })()`);
+  assert.equal(result.imported.ok, true);
+  assert.equal(result.tx.asset, 'USX');
+  assert.equal(result.tx.price, 90);
+  assert.equal(result.tx.fee, 1.8);
+});
+
+test('DEGIRO-koers in vreemde valuta zonder bewezen EUR-omrekening wordt geweigerd', () => {
+  const rt = createRuntime(FILES);
+  const result = rt.evaluate(`(() => {
+    registerAsset({ id: 'USX', isin: 'US0000000001', name: 'US Asset', type: 'Aandeel' }, new Array(HISTORY_DAYS).fill(90), new Array(HISTORY_DAYS).fill(true));
+    const csv = [
+      'Date,ISIN,Quantity,Price,Currency,Product,Order ID',
+      '2026-07-01,US0000000001,2,100,USD,US Asset,unsafe-order',
+    ].join('\\n');
+    const txs = [];
+    return { imported: importTransactionCSV(csv, txs, { confirmed: true }), count: txs.length };
+  })()`);
+  assert.equal(result.imported.ok, false);
+  assert.match(result.imported.error, /geen expliciete EUR-waarde|veilige koersomrekening/i);
+  assert.equal(result.count, 0);
+});
+
 test('Bitvavo-cashfunding maakt trades intern en behoudt brokerfees', () => {
+  const rt = createRuntime(FILES);
+  const result = rt.evaluate(`(() => {
+    registerAsset({ id: 'DOGE', name: 'Dogecoin', type: 'Crypto' }, new Array(HISTORY_DAYS).fill(0.5), new Array(HISTORY_DAYS).fill(true));
+    const csv = [
+      'Date,Currency,Type,Amount,Quote Price,Timezone,Transaction ID,Fee,Fee Currency',
+      '2026-07-01,EUR,deposit,1000,1,UTC,cash-in,0,EUR',
+      '2026-07-02,DOGE,buy,1000,0.5,UTC,buy-one,1,EUR',
+    ].join('\\n');
+    const txs = [];
+    const imported = importTransactionCSV(csv, txs, { confirmed: true });
+    const ledger = buildPortfolioLedger(txs);
+    return { imported, txs, cash: ledger.cash, invested: totalInvested(txs) };
+  })()`);
+  assert.equal(result.imported.ok, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.txs.map(tx => tx.type))), ['deposit', 'buy']);
+  assert.equal(result.txs[1].asset, 'DOGE');
+  assert.equal(result.txs[1].external, false);
+  assert.equal(result.txs[1].fee, 1);
+  assert.equal(result.cash, 499);
+  assert.equal(result.invested, 1000);
+});
+
+test('Bitvavo-trade zonder funding in bestand of ledger wordt geblokkeerd', () => {
+  const rt = createRuntime(FILES);
+  const result = rt.evaluate(`(() => {
+    registerAsset({ id: 'BTC', name: 'Bitcoin', type: 'Crypto' }, new Array(HISTORY_DAYS).fill(50000), new Array(HISTORY_DAYS).fill(true));
+    const csv = [
+      'Date,Currency,Type,Amount,Quote Price,Timezone,Transaction ID',
+      '2026-07-02,BTC,buy,0.01,50000,UTC,buy-without-funding',
+    ].join('\\n');
+    const txs = [];
+    return { imported: importTransactionCSV(csv, txs, { confirmed: true }), count: txs.length };
+  })()`);
+  assert.equal(result.imported.ok, false);
+  assert.match(result.imported.error, /EUR-funding/);
+  assert.equal(result.count, 0);
+});
+
+test('Bitvavo-fee in de verhandelde crypto corrigeert aantal en EUR-kost', () => {
   const rt = createRuntime(FILES);
   const result = rt.evaluate(`(() => {
     registerAsset({ id: 'BTC', name: 'Bitcoin', type: 'Crypto' }, new Array(HISTORY_DAYS).fill(50000), new Array(HISTORY_DAYS).fill(true));
     const csv = [
       'Date,Currency,Type,Amount,Quote Price,Timezone,Transaction ID,Fee,Fee Currency',
       '2026-07-01,EUR,deposit,1000,1,UTC,cash-in,0,EUR',
-      '2026-07-02,BTC,buy,0.01,50000,UTC,buy-one,1,EUR',
+      '2026-07-02,BTC,buy,0.01,50000,UTC,buy-crypto-fee,0.0001,BTC',
     ].join('\\n');
     const txs = [];
-    const imported = importTransactionCSV(csv, txs);
+    const imported = importTransactionCSV(csv, txs, { confirmed: true });
     const ledger = buildPortfolioLedger(txs);
-    return { imported, txs, cash: ledger.cash, invested: totalInvested(txs) };
+    return { imported, trade: txs[1], cash: ledger.cash, qty: ledger.positions.BTC.qty, cost: ledger.positions.BTC.cost };
   })()`);
   assert.equal(result.imported.ok, true);
-  assert.deepEqual(JSON.parse(JSON.stringify(result.txs.map(tx => tx.type))), ['deposit', 'buy']);
-  assert.equal(result.txs[1].external, false);
-  assert.equal(result.txs[1].fee, 1);
-  assert.equal(result.cash, 499);
+  assert.ok(Math.abs(result.trade.qty - 0.0099) < 1e-12);
+  assert.equal(result.trade.fee, 5);
+  assert.ok(Math.abs(result.cash - 500) < 1e-9);
+  assert.ok(Math.abs(result.qty - 0.0099) < 1e-12);
+  assert.ok(Math.abs(result.cost - 500) < 1e-9);
+});
+
+test('latere Bitvavo-funding herclassificeert eerdere directe trades zonder dubbele inleg', () => {
+  const rt = createRuntime(FILES);
+  const result = rt.evaluate(`(() => {
+    registerAsset({ id: 'BTC', name: 'Bitcoin', type: 'Crypto' }, new Array(HISTORY_DAYS).fill(50000), new Array(HISTORY_DAYS).fill(true));
+    const txs = [normalizeStoredTransaction({
+      id: 'old-trade', date: '2026-07-01', type: 'buy', asset: 'BTC', qty: 0.01, price: 50000,
+      fee: 0, tax: 0, currency: 'EUR', fxRate: 1, external: true, source: 'bitvavo',
+    })];
+    const csv = [
+      'Date,Currency,Type,Amount,Quote Price,Timezone,Transaction ID',
+      '2026-06-30,EUR,deposit,1000,1,UTC,late-funding',
+    ].join('\\n');
+    const imported = importTransactionCSV(csv, txs, { confirmed: true });
+    return { imported, external: txs.find(tx => tx.id === 'old-trade').external, invested: totalInvested(txs) };
+  })()`);
+  assert.equal(result.imported.ok, true);
+  assert.equal(result.imported.reclassifiedTrades, 1);
+  assert.equal(result.external, false);
   assert.equal(result.invested, 1000);
 });
 
@@ -167,7 +316,7 @@ test('Bitvavo assetdeposit wordt transfer en stakingreward blijft een interne nu
       '2026-07-02,BTC,staking,0.01,0,UTC,reward',
     ].join('\\n');
     const txs = [];
-    const imported = importTransactionCSV(csv, txs);
+    const imported = importTransactionCSV(csv, txs, { confirmed: true });
     const ledger = buildPortfolioLedger(txs);
     return { imported, txs, qty: ledger.positions.BTC.qty, cost: ledger.positions.BTC.cost, invested: totalInvested(txs) };
   })()`);
@@ -179,6 +328,22 @@ test('Bitvavo assetdeposit wordt transfer en stakingreward blijft een interne nu
   assert.ok(Math.abs(result.qty - 0.11) < 1e-12);
   assert.equal(result.cost, 10);
   assert.equal(result.invested, 10);
+});
+
+test('assettransfer zonder eigen waarde blokkeert op gereconstrueerde koerskwaliteit', () => {
+  const rt = createRuntime(FILES);
+  const result = rt.evaluate(`(() => {
+    registerAsset({ id: 'BTC', name: 'Bitcoin', type: 'Crypto' }, new Array(HISTORY_DAYS).fill(100), new Array(HISTORY_DAYS).fill(false));
+    const csv = [
+      'Date,Currency,Type,Amount,Quote Price,Timezone,Transaction ID',
+      '2026-07-01,BTC,deposit,0.1,0,UTC,unvalued-transfer',
+    ].join('\\n');
+    const txs = [];
+    return { imported: importTransactionCSV(csv, txs, { confirmed: true }), count: txs.length };
+  })()`);
+  assert.equal(result.imported.ok, false);
+  assert.match(result.imported.error, /geen waargenomen bronkoers/);
+  assert.equal(result.count, 0);
 });
 
 test('netwerk staat standaard uit en veroorzaakt geen impliciete fetch', async () => {
@@ -410,7 +575,7 @@ test('gedateerde marktdata blijft na een week aan de oorspronkelijke kalenderdag
     histories: { SAFE: history },
   });
   const first = createRuntime(FILES, { storage, now: '2026-07-16T12:00:00+02:00' });
-  assert.equal(first.evaluate(`importPortfolioJSON(${JSON.stringify(payload)}).ok`), true);
+  assert.equal(first.evaluate(`importPortfolioJSON(${JSON.stringify(payload)}, { confirmed: true }).ok`), true);
   const stored = JSON.parse(storage.getItem('vermogen_custom_v2')).market.SAFE;
   assert.match(stored.startDate, /^\d{4}-\d{2}-\d{2}$/);
   assert.equal(stored.quality.at(-1), 'o');
@@ -510,9 +675,20 @@ test('backuprestore zet voorkeuren terug maar netwerktoestemming uit', () => {
     localStorage.setItem(NETWORK_CONSENT_KEY, 'yes');
     setAutoRefreshEnabled(true);
     savePriceRefreshMeta({ cryptoSuccessAt: Date.now() });
-    return importPortfolioJSON(JSON.stringify(backup));
+    const preview = importPortfolioJSON(JSON.stringify(backup));
+    const beforeConfirm = {
+      consent: localStorage.getItem(NETWORK_CONSENT_KEY),
+      automatic: localStorage.getItem(AUTO_REFRESH_KEY),
+      transactions: localStorage.getItem(TX_KEY),
+    };
+    const applied = importPortfolioJSON(JSON.stringify(backup), { confirmed: true });
+    return { preview, beforeConfirm, applied };
   })()`);
-  assert.equal(result.ok, true);
+  assert.equal(result.preview.needsConfirmation, true);
+  assert.equal(result.beforeConfirm.consent, 'yes');
+  assert.equal(result.beforeConfirm.automatic, 'yes');
+  assert.equal(result.beforeConfirm.transactions, null);
+  assert.equal(result.applied.ok, true);
   assert.deepEqual(JSON.parse(rt.storage.getItem('vermogen_watchlist_v1')), ['ETF']);
   assert.equal(rt.storage.getItem('vermogen_network_consent_v1'), 'no');
   assert.equal(rt.storage.getItem('vermogen_auto_refresh_v1'), null);
@@ -539,7 +715,7 @@ test('schema-v3-backup herstelt alle boekingstypen en brokerreconciliatie', () =
         reconciliation: { assets: { ETF: 5 }, cash: 508, date: '2026-07-01T12:00:00.000Z' },
       },
     };
-    const restored = importPortfolioJSON(JSON.stringify(backup));
+    const restored = importPortfolioJSON(JSON.stringify(backup), { confirmed: true });
     return {
       restored,
       txs: JSON.parse(localStorage.getItem(TX_KEY)),
@@ -573,7 +749,7 @@ test('schema-v4-backup herstelt marktdata op de oorspronkelijke datum', () => {
     },
   };
   const restore = createRuntime(FILES, { storage, now: '2026-07-23T12:00:00+02:00' });
-  assert.equal(restore.evaluate(`importPortfolioJSON(${JSON.stringify(JSON.stringify(backup))}).ok`), true);
+  assert.equal(restore.evaluate(`importPortfolioJSON(${JSON.stringify(JSON.stringify(backup))}, { confirmed: true }).ok`), true);
   restore.evaluate('loadCustomData()');
   const result = restore.evaluate(`(() => {
     const original = dateToIndexUnclamped(localDateFromKey('2026-07-16'));

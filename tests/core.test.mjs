@@ -148,15 +148,19 @@ test('brokerreconciliatie vergelijkt aantallen en cash met expliciete tolerantie
       { id: '2', date, type: 'buy', asset: 'REC', qty: 5, price: 100 },
     ];
     const exact = reconcilePortfolio(txs, { assets: { REC: 5 }, cash: 500, date });
+    const rounded = reconcilePortfolio(txs, { assets: { REC: 5.00000004 }, cash: 500, date });
+    const beyondDisplayTolerance = reconcilePortfolio(txs, { assets: { REC: 5.00000006 }, cash: 500, date });
     const mismatch = reconcilePortfolio(txs, { assets: { REC: 4.5 }, cash: 499, date });
     const saved = saveReconciliation({ assets: { REC: 5 }, cash: 500 });
     const loaded = loadReconciliation();
-    return { empty, exact, mismatch, saved, loaded };
+    return { empty, exact, rounded, beyondDisplayTolerance, mismatch, saved, loaded };
   })()`);
   const resultPlain = JSON.parse(JSON.stringify(result));
   assert.equal(resultPlain.empty.date, null);
   assert.equal(resultPlain.exact.complete, true);
   assert.equal(resultPlain.exact.balanced, true);
+  assert.equal(resultPlain.rounded.balanced, true);
+  assert.equal(resultPlain.beyondDisplayTolerance.balanced, false);
   assert.equal(resultPlain.mismatch.balanced, false);
   assert.equal(resultPlain.mismatch.rows[0].difference, -0.5);
   assert.equal(resultPlain.mismatch.cash.difference, -1);

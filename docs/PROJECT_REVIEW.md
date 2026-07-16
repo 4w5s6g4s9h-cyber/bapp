@@ -13,6 +13,8 @@ Versie 17 sluit vervolgens een kritieke tijdsdimensiefout: marktdata wordt met e
 
 Versie 18 maakt ook de actualiteit van die marktdata afdwingbaar. Een doorgetrokken koers is maximaal één kalenderdag betrouwbaar voor crypto en vier voor aandelen/ETF’s; daarna blijft de waarde zichtbaar, maar wordt zij gereconstrueerd/verouderd en zijn actuele rendementen, analyses en wegingalerts geblokkeerd. Dashboard, posities, watchlist, assetdetail en instellingen tonen de laatste waargenomen bronkoersdatum. Toekomstige boekingen worden bij invoer en import geweigerd en reeds aanwezige toekomstige gebeurtenissen worden niet langer op vandaag geklemd. Afgeleide TWR-state wordt bij iedere relevante mutatie ongeldig gemaakt.
 
+Versie 19 sluit de resterende fail-open grenzen in import. JSON, CSV en backuprestore doorlopen nu eerst een niet-schrijvende preview met aantallen en concrete voorbeelden van herkende, afgewezen, genegeerde, afgeleide en dubbele rijen; opslag volgt alleen na een expliciete bevestiging. Onbekende transactierichtingen worden niet langer koop, DEGIRO-notatiekoersen worden niet zonder bewezen EUR-waarde of expliciete EUR-factor geboekt en de persoonsgebonden ISIN-tabel is verwijderd. Bitvavo-trades vereisen EUR-funding in de huidige of bestaande import, fees in de verhandelde crypto corrigeren aantal en kosten, en een latere fundingexport herclassificeert eerdere directe trades pas na preview. Transfers zonder eigen waarde vereisen een waargenomen dagkoers. Reconciliatie accepteert uitsluitend de afronding die de UI zelf op zeven decimalen toont; Frankfurter-calls gebruiken dezelfde timeoutgrens als de andere koersproviders.
+
 ## Hoofddoel en expliciete aannames
 
 Het hoofddoel is inzicht geven in een zelf geïmporteerde portefeuille zonder een centrale applicatieserver. De implementatie gaat uit van:
@@ -36,6 +38,8 @@ De kerngegevensstroom is nu:
 bestand / expliciete of opt-in geplande koerscall
             |
        validatie + normalisatie
+            |
+ niet-schrijvende preview + bevestiging
             |
  asset + gedateerde marktserie + kwaliteit
             |
@@ -77,16 +81,22 @@ Een toekomstige grotere versie hoort klassieke globals te vervangen door ES-modu
 | P1 | Formeel geldgewogen rendement ontbrak | XNPV/XIRR met exacte datums, 365-dagenconventie, hybride rootfinding en referentietests | Afgerond |
 | P1 | Geen controle of de lokale ledger nog met de broker aansloot | Lokale brokerstand per asset en cash, toleranties, verschilrapport en opname in backup-schema 4 | Afgerond |
 | P1 | Brokerimports verloren fees en maakten van assettransfers gewone trades | DEGIRO-fees/belasting, Bitvavo-cashfunding, assettransfers en stakingrewards worden afzonderlijk geboekt | Afgerond voor ondersteunde kolommen |
+| P1 | De tolerante JSON-scanner maakte een onbekend type stil tot koop en liet onherkende rijen verdwijnen | Rijdiagnostiek en verplichte preview; onbekende of ontbrekende richting wordt afgewezen en iedere aanname wordt zichtbaar | Afgerond in versie 19 |
+| P1 | DEGIRO-import was NL-specifiek, kon een vreemde notatiekoers als EUR boeken en gebruikte een persoonsgebonden ISIN-tabel | NL/EN-kolomaliassen; alleen expliciete EUR-waarde/factor; koppeling uitsluitend via asset-ISIN, anders blijft de ISIN zichtbaar als onbekend instrument | Afgerond in versie 19 voor gedocumenteerde kolommen |
+| P1 | Bitvavo split-exports konden funding missen en crypto-fees verdwijnen | Funding wordt ook in de bestaande ledger gezocht; zonder funding blokkade; latere funding corrigeert externe trades na preview; fee in de verhandelde crypto corrigeert aantal en EUR-kost | Afgerond in versie 19 |
+| P1 | Transferwaardering kon gereconstrueerde koersen als externe inleg gebruiken | Automatische transferwaarde vereist exact op die datum een waargenomen koers; anders wordt de volledige CSV-import zonder mutatie geblokkeerd | Afgerond in versie 19 |
 | P1 | Watch-only assets verdwenen door verkeerde laadvolgorde | Assetdefinities laden vóór de watchlist | Afgerond |
 | P1 | Toegevoegde assets hadden geen betrouwbare vervolgverversing; dynamische CoinGecko-ID’s gingen bij reload verloren | CoinGecko-ID persistent; single-flight uurcontrole bij open/focus/online; aandelen providerbewust dagelijks in begrensde batches; bron- en ophaaltijd zichtbaar; observaties datumvast opgeslagen | Afgerond binnen browserbeperkingen |
 | P1 | DCA kon toekomstige data gebruiken en fictieve koersen boeken | Historisch venster eindigt exact op uitvoerdag; openstaande termijn wacht vanaf de vervaldatum op de eerste waargenomen koers | Afgerond |
 | P1 | Stilstaande koersdata werd zonder peildatum als actuele portefeuillewaarde gepresenteerd | Laatste bronkoersdatum per positie zichtbaar; carried-venster begrensd op 1/4 dagen; actuele rendementen en analyses sluiten daarna fail-closed | Afgerond in versie 18 |
 | P1 | Assetdetail toonde een dagrendement zonder dezelfde kwaliteitsgate als het dashboard | Dagresultaat vereist in beide schermen twee opeenvolgende waargenomen koersen | Afgerond in versie 17 |
 | P1 | Verwijderen of wijzigen van transacties kon gecachte TWR-resultaten laten staan | Centrale invalidatie wist portefeuille, TWR, frontier en backteststate | Afgerond in versie 18 |
-| P1 | Modals misten Escape, focuslus en dialoogsemantiek | ARIA, Escape, focus trap, focusherstel en live toast toegevoegd | Afgerond voor de twee modals |
+| P1 | Modals misten Escape, focuslus en dialoogsemantiek | ARIA, Escape, focus trap, focusherstel en live toast toegevoegd | Afgerond voor transactie-, importpreview- en opdrachtmodal |
 | P1 | Geen tests of CI | Node-testset, publieke-buildvalidator en minimale GitHub Actions-workflow | Afgerond |
 | P2 | Service worker cachete ook foutresponses | Alleen succesvolle same-origin-responses worden gecachet; expliciete offline 503 | Afgerond |
 | P2 | Toekomstige transacties werden door indexclamping stil op vandaag verwerkt | Formulier en imports weigeren toekomstige datums; bestaande rijen worden overgeslagen met een zichtbaar ledgerprobleem | Afgerond in versie 18 |
+| P2 | Reconciliatie flagde verschillen kleiner dan de getoonde zevende decimaal | Assettolerantie gelijk aan een halve eenheid op de laatste getoonde decimaal; cash blijft ± € 0,01 | Afgerond in versie 19 |
+| P2 | Frankfurter was de enige koerscall zonder timeout | Gedeelde directe JSON-fetch met AbortController en tiensecondenlimiet | Afgerond in versie 19 |
 
 ## Cybersecurity en privacy
 
@@ -120,19 +130,18 @@ Niet opgelost of bewust beperkt:
 
 ## Tests en deployment
 
-De regressiesuite controleert nu ook v3→v4-transactiemigratie, interne herbalancering, fees/dividend/kostbasis, realized P&L, splits, transfers, oversell-beveiliging, reconciliatie, XIRR en schema-2/3/4-backupherstel. Datumregressies starten dezelfde marktdata op een latere systeemdatum, controleren dat de bronobservatie op haar oorspronkelijke kalenderdag blijft staan, bewaken het 1/4-daagse actualiteitsvenster en toetsen kalenderdagverschillen over zomer- en wintertijd. Toekomstige transacties worden zowel bij import als in de ledger fail-closed getest. Brokerfixtures bewijzen DEGIRO-fees, Bitvavo-cashfunding, assettransfers, stakingrewards en dedupe. Daarnaast blijven netwerkgrenzen, DCA zonder look-ahead, walk-forward-arena, syntaxis en statische security-/cache-eisen gedekt. Een lokale headless-Chrome-smokecheck doorliep storting, interne koop, reconciliatie en oversell-blokkade zonder runtime-exception; dit is nog geen geautomatiseerde cross-browser-CI.
+De regressiesuite controleert nu ook v3→v4-transactiemigratie, interne herbalancering, fees/dividend/kostbasis, realized P&L, splits, transfers, oversell-beveiliging, reconciliatie, XIRR en schema-2/3/4-backupherstel. Datumregressies starten dezelfde marktdata op een latere systeemdatum, controleren dat de bronobservatie op haar oorspronkelijke kalenderdag blijft staan, bewaken het 1/4-daagse actualiteitsvenster en toetsen kalenderdagverschillen over zomer- en wintertijd. Toekomstige transacties worden zowel bij import als in de ledger fail-closed getest. Importtests bewijzen dat JSON-, CSV- en backuppreviews niets muteren en dekken onbekende richting, NL/EN-DEGIRO met veilige FX, Bitvavo-funding over losse exports, crypto-fees, transferkwaliteit, stakingrewards en dedupe. Daarnaast blijven netwerkgrenzen, DCA zonder look-ahead, walk-forward-arena, syntaxis en statische security-/cache-eisen gedekt. Een lokale headless-Chrome-smokecheck doorliep storting, interne koop, reconciliatie en oversell-blokkade zonder runtime-exception; dit is nog geen geautomatiseerde cross-browser-CI.
 
 De GitHub Actions-job is aanwezig, maar branch protection is een externe repository-instelling en moet handmatig worden geactiveerd. Ook productie-securityheaders zijn een hostingverantwoordelijkheid; GitHub Pages biedt daar beperkte controle over.
 
 ## Vervolgplan
 
-1. **P1 — importpreview en brokerintegriteit:** expliciet tonen en laten bevestigen wat wordt herkend, overgeslagen, omgerekend of geschat; transfers zonder betrouwbare waarneming blokkeren.
-2. **P1 — kwantitatieve sampling:** correlaties op gezamenlijke waargenomen handelsdagen, consistente cashweging en expliciete samplingwaarschuwingen bij signalen/frontier.
-3. **P1 — geautomatiseerde browser-end-to-endtests:** import, schema-2/3/4-backuprestore, modaltoetsenbord, service-workerupdate en een volledige lege-stateflow in Chromium, Firefox en WebKit.
-4. **P1 — instrumentidentiteit:** ISIN + beurs + quotevaluta als primaire sleutel; ticker alleen als label/zoekterm.
-5. **P1 — fiscale lots en corporate actions:** optionele FIFO/lots, return-of-capital, fusies, spin-offs en symboolmigraties zonder historische breuk.
-6. **P2 — multi-currency ledger:** afzonderlijke cashrekeningen en gevalideerde historische FX-bronnen in plaats van één handmatige rate per event.
-7. **P2 — opslagmigratie en modulegrenzen:** IndexedDB met migraties/checksums, optionele versleutelde backup, ES-modules en expliciete provideradapters.
-8. **P2 — deploymenthardening:** eigen hosting met securityheaders, branch protection, verplichte CI en periodieke browsercompatibiliteitscontrole.
+1. **P1 — kwantitatieve sampling:** correlaties op gezamenlijke waargenomen handelsdagen, consistente cashweging en expliciete samplingwaarschuwingen bij signalen/frontier.
+2. **P1 — geautomatiseerde browser-end-to-endtests:** import, schema-2/3/4-backuprestore, modaltoetsenbord, service-workerupdate en een volledige lege-stateflow in Chromium, Firefox en WebKit.
+3. **P1 — instrumentidentiteit:** ISIN + beurs + quotevaluta als primaire sleutel; ticker alleen als label/zoekterm.
+4. **P1 — fiscale lots en corporate actions:** optionele FIFO/lots, return-of-capital, fusies, spin-offs en symboolmigraties zonder historische breuk.
+5. **P2 — multi-currency ledger:** afzonderlijke cashrekeningen en gevalideerde historische FX-bronnen in plaats van één handmatige rate per event.
+6. **P2 — opslagmigratie en modulegrenzen:** IndexedDB met migraties/checksums, optionele versleutelde backup, ES-modules en expliciete provideradapters.
+7. **P2 — deploymenthardening:** eigen hosting met securityheaders, branch protection, verplichte CI en periodieke browsercompatibiliteitscontrole.
 
-De eerstvolgende investering hoort nu importintegriteit en kwantitatieve sampling te zijn. Daarna leveren browser-E2E en sterkere instrumentidentiteit meer betrouwbaarheid op dan verdere verfijning van ML.
+De eerstvolgende investering hoort nu kwantitatieve sampling en browser-E2E te zijn. Daarna levert sterkere instrumentidentiteit meer betrouwbaarheid op dan verdere verfijning van ML.
