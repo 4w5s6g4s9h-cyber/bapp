@@ -1,7 +1,7 @@
 {
   "name": "Vermogen — Beleggingen Tracker",
   "short_name": "Vermogen",
-  "description": "Beleggingen tracker met interactieve grafieken en machine learning in de browser",
+  "description": "Lokale beleggingstracker met cashledger, reconciliatie en transparante analyse in de browser",
   "start_url": ".",
   "display": "standalone",
   "background_color": "#0a0c14",

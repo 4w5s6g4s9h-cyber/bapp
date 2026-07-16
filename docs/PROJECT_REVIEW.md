@@ -1,20 +1,20 @@
 # Kritische projectbeoordeling en verbeterplan
 
-Datum: 15 juli 2026
+Datum: 16 juli 2026
 Scope: app, hoofddoel, aannames, architectuur, code, cybersecurity, functies, tests en deployment.
 
 ## Samenvattend oordeel
 
 De app is geschikt als lokale, experimentele portefeuilleviewer voor één gebruiker, mits de gebruiker begrijpt dat browseropslag geen kluis is en historische modellen geen adviesmotor zijn. De oorspronkelijke versie had bruikbare visualisaties, maar liet gereconstrueerde data doorstromen naar statistiek en ML, behandelde cashflows als rendement, maakte impliciete netwerkcalls en had geen regressietests of CI. Daardoor waren vooral de financiële uitkomsten overtuigender gepresenteerd dan de datakwaliteit toeliet.
 
-Versie 15 herstelt de belangrijkste betrouwbaarheidsgrenzen: data heeft nu herkomst, financiële analyses blokkeren op onvoldoende echte dekking, cashflows zijn neutraal in rendement, externe calls zijn opt-in en import/restore is gevalideerd en herstelbaar. Providerbewuste automatische verversing is afzonderlijk opt-in, bewaart dynamische CoinGecko-koppelingen en toont bron- en ophaaltijden. De app blijft bewust een statische browserapp; dat is tegelijk haar sterkste privacy-eigenschap en haar voornaamste operationele beperking.
+Versie 16 herstelt daarnaast de belangrijkste boekhoudkundige grens. Trades zijn niet langer automatisch gelijk aan externe inleg: een schema-v4-ledger verwerkt effecten en cash gezamenlijk, met fees, belasting, dividend, rente, splits en transfers. Gemiddelde kostbasis, gerealiseerd resultaat, TWR, XIRR en brokerreconciliatie komen nu uit dezelfde gebeurtenisstroom. Oude schema-v3-trades migreren waarderingsneutraal en versie-2-backups blijven herstelbaar. De app blijft bewust een statische browserapp; dat is tegelijk haar sterkste privacy-eigenschap en haar voornaamste operationele beperking.
 
 ## Hoofddoel en expliciete aannames
 
 Het hoofddoel is inzicht geven in een zelf geïmporteerde portefeuille zonder een centrale applicatieserver. De implementatie gaat uit van:
 
 1. één vertrouwde gebruiker per browserprofiel en website-origin;
-2. transacties en koersen in EUR, of een aantoonbare omrekening naar EUR;
+2. één EUR-cashrekening; transacties in andere valuta bevatten een expliciete wisselkoers naar EUR en marktkoersreeksen zijn al in EUR;
 3. kalenderdagreeksen van 1.095 dagen, inclusief forward-fill op niet-handelsdagen;
 4. begin-van-de-dagcashflows voor de berekening van dagrendement;
 5. historische analyse als educatief hulpmiddel, niet als voorspellingsgarantie;
@@ -35,9 +35,13 @@ bestand / expliciete of opt-in geplande koerscall
             |
      asset + prijzen + provenance
             |
+   schema-v4-events + cashledger
+            |
+ kostbasis + externe flows + reconciliatie
+            |
    atomaire localStorage-opslag
             |
- portefeuille + cashflowcorrectie
+ portefeuille + TWR / XIRR
             |
  kwaliteitsgate (minimaal 90% echt)
             |
@@ -51,9 +55,9 @@ Een toekomstige grotere versie hoort klassieke globals te vervangen door ES-modu
 | Prioriteit | Bevinding | Uitgevoerde maatregel | Status |
 |---|---|---|---|
 | P0 | Identieke JSON-herimport kon lege assetdefinities bewaren, waardoor reload assets verloor | Elke import bouwt en bewaart volledige assetdefinities; regressietest herimporteert en simuleert reload | Afgerond |
-| P0 | Stortingen/opnames vervormden dag-P&L, volatiliteit, Sharpe, drawdown en Monte Carlo | Centrale cashflowreeks en begin-van-de-dagcorrectie; analyses gebruiken gecorrigeerde rendementen | Afgerond |
+| P0 | Trades en externe inleg waren hetzelfde, waardoor verkopen/herbalanceren rendement en cash verkeerd beïnvloedden | Eén eventledger met afzonderlijke effecten, cash en externe flows; interne trades zijn resultaatneutraal voor inleg | Afgerond |
 | P0 | Gereconstrueerde Brownian-bridge-data voedde ML, backtests en advies en kon toekomstige ankers bevatten | Boolean provenance per dag; analyse-gates op 90% echte dekking; reconstructie alleen nog als zichtbare grafiek | Afgerond |
-| P0 | Backup was niet volledig herstelbaar | Schema 2 omvat transacties, assets, prijzen, provenance, watchlist, alerts, DCA, watch-assets en bronmappings | Afgerond |
+| P0 | Backup was niet volledig herstelbaar | Schema 3 omvat ledger en reconciliatie naast assets, prijzen, provenance en voorkeuren; schema 2 migreert waarderingsneutraal | Afgerond |
 | P0 | Import kon gedeeltelijk opgeslagen toestand achterlaten | Meervoudige localStorage-mutaties hebben verificatie en rollback | Afgerond binnen localStorage-beperkingen |
 | P0 | Geïmporteerde/externe tekst kon via `innerHTML` uitvoerbaar worden | Normalisatie, HTML-escaping op dynamische hotspots, strikte kleuren/id's, CSP en gevalideerde opgeslagen regels | Afgerond voor bekende invoerpaden |
 | P0 | Privacytekst ontkende externe verzoeken; fonts en koersen gingen automatisch naar derden | Externe fonts verwijderd; koersnetwerk standaard uit; expliciete toestemming en eerlijke UI/README | Afgerond |
@@ -63,6 +67,11 @@ Een toekomstige grotere versie hoort klassieke globals te vervangen door ES-modu
 | P1 | “Zekerheid” en “80%-betrouwbaarheidsinterval” waren niet gekalibreerd | UI noemt signaalsterkte en indicatieve residuband | Afgerond |
 | P1 | 365-daags grid werd met 252 geannualiseerd en 504 kalenderdagen heette twee jaar | Centrale factor 365; backtest/covariantie gebruiken 730 kalenderdagen | Afgerond |
 | P1 | CSV-dedupe liet legitieme orders met gelijk aantal/dag verdwijnen | Broker-id primair; fallback bevat richting, aantal, prijs en transfertype | Afgerond |
+| P1 | Fees, belasting, dividend, rente, splits en transfers ontbraken als volwaardige gebeurtenissen | Schema-v4-normalisatie, cashimpact, gemiddelde kostbasis, gerealiseerd resultaat en expliciete transferwaarde | Afgerond voor ondersteunde events |
+| P1 | Meer verkopen/transfereren dan aanwezig werd stil naar nul geklemd | Ongeldige events worden fail-closed genegeerd, zichtbaar gemeld en door het handmatige formulier vooraf geblokkeerd | Afgerond |
+| P1 | Formeel geldgewogen rendement ontbrak | XNPV/XIRR met exacte datums, 365-dagenconventie, hybride rootfinding en referentietests | Afgerond |
+| P1 | Geen controle of de lokale ledger nog met de broker aansloot | Lokale brokerstand per asset en cash, toleranties, verschilrapport en opname in backup-schema 3 | Afgerond |
+| P1 | Brokerimports verloren fees en maakten van assettransfers gewone trades | DEGIRO-fees/belasting, Bitvavo-cashfunding, assettransfers en stakingrewards worden afzonderlijk geboekt | Afgerond voor ondersteunde kolommen |
 | P1 | Watch-only assets verdwenen door verkeerde laadvolgorde | Assetdefinities laden vóór de watchlist | Afgerond |
 | P1 | Toegevoegde assets hadden geen betrouwbare vervolgverversing; dynamische CoinGecko-ID’s gingen bij reload verloren | CoinGecko-ID persistent; single-flight uurcontrole bij open/focus/online; aandelen providerbewust dagelijks in begrensde batches; bron- en ophaaltijd zichtbaar | Afgerond binnen browserbeperkingen |
 | P1 | DCA kon toekomstige data gebruiken en fictieve koersen boeken | Historisch venster eindigt exact op uitvoerdag; openstaande termijn wacht op echte koers | Afgerond |
@@ -80,6 +89,7 @@ Resterende risico's:
 - Een meta-CSP kan geen betrouwbare `frame-ancestors`-header zetten. Productiehosting hoort CSP, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` en `Permissions-Policy` als HTTP-headers toe te voegen.
 - De app heeft geen authenticatie, autorisatie, auditlog of veilige synchronisatie. Maak haar niet multi-user zonder backend- en threat-modelherontwerp.
 - Externe koersdiensten kunnen uitvallen, CORS wijzigen of een verkeerd symbool teruggeven. Valuta wordt gevalideerd, maar tickeridentiteit zonder ISIN/beurs blijft ambigu.
+- De ledger heeft één EUR-cashrekening, geen afzonderlijke valutarekeningen. Een verkeerde handmatige FX-rate blijft een invoerfout die reconciliatie alleen indirect kan blootleggen.
 - Een open browsertab is geen scheduler: timers kunnen worden vertraagd of gepauzeerd en stoppen volledig wanneer de app gesloten is. Gegarandeerde achtergrondverversing vereist een backend of worker.
 - Gratis Alpha Vantage-data is eindedagdata en heeft een laag dagelijks verzoekbudget; de app noemt aandelenkoersen daarom niet realtime en ververst ze automatisch hooguit dagelijks.
 - Een lokaal backupbestand is platte financiële JSON. Beveiliging daarvan ligt bij bestandssysteem, gebruiker en eventuele schijfversleuteling.
@@ -87,12 +97,13 @@ Resterende risico's:
 
 ## Functionele evaluatie
 
-De kernworkflow — importeren, holdings berekenen, bekijken, aanvullen en backuppen — is nu coherent. De app communiceert wanneer een dagcijfer of analyse ontbreekt in plaats van een synthetisch getal als feit te tonen. Transfers en DCA zijn explicieter, en watchlistvoorkeuren overleven herstel.
+De kernworkflow — importeren, ledger opbouwen, waarderen, reconciliëren en backuppen — is nu coherent. Het dashboard telt cash mee, toont XIRR naast TWR wanneer de datakwaliteit dat toelaat en maakt fees, inkomsten en gerealiseerd resultaat zichtbaar. Interne herbalancering verandert de externe inleg niet. Een onmogelijke verkoop, transfer of split verdwijnt niet stil in de berekening maar wordt geweigerd of gemeld.
 
 Niet opgelost of bewust beperkt:
 
-- corporate actions, splits, dividenden, belastingen en brokerfees hebben geen volwaardig domeinmodel;
-- money-weighted return/IRR ontbreekt als formele metriek;
+- complexere corporate actions zoals fusies, spin-offs, symboolwijzigingen en return-of-capital ontbreken;
+- kostbasis gebruikt één gewogen gemiddelde; FIFO/LIFO, lots en fiscale jaarrapportage ontbreken;
+- multi-currency cashrekeningen en historische FX-reeksen ontbreken;
 - ticker naar beurs/ISIN-resolutie blijft heuristisch wanneer metadata ontbreekt;
 - DCA voert geen brokerorder uit;
 - candlestick open/hoog/laag wordt afgeleid uit slotkoersen en is duidelijk als indicatief gelabeld;
@@ -100,17 +111,18 @@ Niet opgelost of bewust beperkt:
 
 ## Tests en deployment
 
-De regressiesuite controleert de cashflowcorrectie, herimport/reload, rollback, CSV-dedupe, standaard-uitgeschakeld netwerk, afzonderlijke auto-refreshtoestemming, refreshvensters, persistente CoinGecko-koppelingen en spotopslag, backuprestore, DCA zonder look-ahead, walk-forward-arena, syntaxis en statische security-/cache-eisen. `scripts/validate-public-build.mjs` controleert daarnaast privépaden, lokale assetreferenties en cacheversies.
+De regressiesuite controleert nu ook v3→v4-transactiemigratie, interne herbalancering, fees/dividend/kostbasis, realized P&L, splits, transfers, oversell-beveiliging, reconciliatie, XIRR en schema-2/3-backupherstel. Brokerfixtures bewijzen DEGIRO-fees, Bitvavo-cashfunding, assettransfers, stakingrewards en dedupe. Daarnaast blijven netwerkgrenzen, koersprovenance, DCA zonder look-ahead, walk-forward-arena, syntaxis en statische security-/cache-eisen gedekt. Een lokale headless-Chrome-smokecheck doorliep storting, interne koop, reconciliatie en oversell-blokkade zonder runtime-exception; dit is nog geen geautomatiseerde cross-browser-CI.
 
 De GitHub Actions-job is aanwezig, maar branch protection is een externe repository-instelling en moet handmatig worden geactiveerd. Ook productie-securityheaders zijn een hostingverantwoordelijkheid; GitHub Pages biedt daar beperkte controle over.
 
 ## Vervolgplan
 
-1. **P1 — domeinmodel uitbreiden:** fees, belastingen, dividenden, transfers met expliciete externe kostbasis, splits en corporate actions.
-2. **P1 — instrumentidentiteit:** ISIN + beurs + quotevaluta als primaire sleutel; ticker alleen als label/zoekterm.
-3. **P1 — browser-end-to-endtests:** import, backuprestore, modaltoetsenbord, service-workerupdate en een volledige lege-stateflow in Playwright.
-4. **P2 — opslagmigratie:** IndexedDB-repository met schema-migraties, checksums en optionele versleutelde backup met een gebruikerswachtwoord.
-5. **P2 — modulegrenzen:** ES-modules, expliciete imports en afzonderlijke adapters voor opslag en koersproviders.
-6. **P2 — deploymenthardening:** eigen hosting met securityheaders, branch protection, verplichte CI en periodieke dependency-/browsercompatibiliteitscontrole.
+1. **P1 — instrumentidentiteit:** ISIN + beurs + quotevaluta als primaire sleutel; ticker alleen als label/zoekterm.
+2. **P1 — geautomatiseerde browser-end-to-endtests:** import, schema-2/3-backuprestore, modaltoetsenbord, service-workerupdate en een volledige lege-stateflow in Chromium, Firefox en WebKit.
+3. **P1 — fiscale lots en corporate actions:** optionele FIFO/lots, return-of-capital, fusies, spin-offs en symboolmigraties zonder historische breuk.
+4. **P2 — multi-currency ledger:** afzonderlijke cashrekeningen en gevalideerde historische FX-bronnen in plaats van één handmatige rate per event.
+5. **P2 — opslagmigratie:** IndexedDB-repository met schema-migraties, checksums en optionele versleutelde backup met een gebruikerswachtwoord.
+6. **P2 — modulegrenzen:** ES-modules, expliciete imports en afzonderlijke adapters voor opslag en koersproviders.
+7. **P2 — deploymenthardening:** eigen hosting met securityheaders, branch protection, verplichte CI en periodieke browsercompatibiliteitscontrole.
 
-De eerstvolgende inhoudelijke investering hoort instrumentidentiteit en corporate actions te zijn. Zonder die domeinlaag levert verdere verfijning van ML meer schijnprecisie dan betrouwbaarheid op.
+De eerstvolgende investering hoort instrumentidentiteit en geautomatiseerde cross-browserflows te zijn. Daarna leveren fiscale lots en complexere corporate actions meer betrouwbaarheid op dan verdere verfijning van ML.

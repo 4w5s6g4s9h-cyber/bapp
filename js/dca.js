@@ -90,6 +90,7 @@ function executeDuePlans(txs) {
           asset: plan.asset,
           qty: amount / price,
           price: +price.toPrecision(12),
+          external: true,
           dca: { plan: plan.name, mult },
         });
         delete plan.blockedAt;

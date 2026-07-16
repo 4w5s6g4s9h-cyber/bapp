@@ -20,6 +20,7 @@ test('identieke JSON-herimport bewaart assetdefinities en overleeft reload', () 
   const first = createRuntime(FILES, { storage });
   assert.equal(first.evaluate(`importPortfolioJSON(${JSON.stringify(genericPortfolio())}).ok`), true);
   assert.equal(JSON.parse(storage.getItem('vermogen_custom_v1')).assets.length, 1);
+  assert.equal(JSON.parse(storage.getItem('vermogen_transactions_v4'))[0].external, true);
   assert.equal(first.evaluate(`importPortfolioJSON(${JSON.stringify(genericPortfolio())}).ok`), true);
   assert.equal(JSON.parse(storage.getItem('vermogen_custom_v1')).assets.length, 1);
 
@@ -76,6 +77,94 @@ test('CSV-dedupe behoudt afzonderlijke orders met andere prijs', () => {
   assert.equal(result.two.added, 0);
   assert.equal(result.txs.length, 2);
   assert.equal(JSON.stringify(result.txs.map(tx => tx.price)), JSON.stringify([50000, 51000]));
+});
+
+test('generieke schema-v4 JSON bewaart cash, interne trades, dividend en splits', () => {
+  const rt = createRuntime(FILES);
+  const payload = JSON.stringify({ transactions: [
+    { id: 'cash', date: '2026-07-01', type: 'deposit', amount: 1000 },
+    { id: 'buy', date: '2026-07-02', type: 'buy', asset: 'V4X', qty: 10, price: 100, external: false },
+    { id: 'div', date: '2026-07-03', type: 'dividend', asset: 'V4X', amount: 20 },
+    { id: 'split', date: '2026-07-04', type: 'split', asset: 'V4X', ratio: 2 },
+  ] });
+  const result = rt.evaluate(`(() => {
+    const imported = importPortfolioJSON(${JSON.stringify(payload)});
+    const txs = JSON.parse(localStorage.getItem(TX_KEY));
+    const ledger = buildPortfolioLedger(txs);
+    return { imported, txs, cash: ledger.cash, qty: ledger.positions.V4X.qty, external: ledger.externalFlows.reduce((a, b) => a + b, 0) };
+  })()`);
+  assert.equal(result.imported.ok, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.txs.map(tx => tx.type))), ['deposit', 'buy', 'dividend', 'split']);
+  assert.equal(result.txs[1].external, false);
+  assert.equal(result.cash, 20);
+  assert.equal(result.qty, 20);
+  assert.equal(result.external, 1000);
+});
+
+test('DEGIRO-import boekt expliciete transactiekosten en blijft direct extern afgerekend', () => {
+  const rt = createRuntime(FILES);
+  const result = rt.evaluate(`(() => {
+    registerAsset({ id: 'NL0000000001', name: 'Degiro ETF', type: 'ETF' }, new Array(HISTORY_DAYS).fill(110), new Array(HISTORY_DAYS).fill(true));
+    const csv = [
+      'Datum,ISIN,Aantal,Waarde EUR,Transactiekosten EUR,Belasting EUR,Product,Order ID',
+      '01-07-2026,NL0000000001,2,200,-2.50,-0.50,Degiro ETF,order-fee',
+    ].join('\\n');
+    const txs = [];
+    const imported = importTransactionCSV(csv, txs);
+    return { imported, tx: txs[0], invested: totalInvested(txs) };
+  })()`);
+  assert.equal(result.imported.ok, true);
+  assert.equal(result.tx.price, 100);
+  assert.equal(result.tx.fee, 2.5);
+  assert.equal(result.tx.tax, 0.5);
+  assert.equal(result.tx.external, true);
+  assert.equal(result.invested, 203);
+});
+
+test('Bitvavo-cashfunding maakt trades intern en behoudt brokerfees', () => {
+  const rt = createRuntime(FILES);
+  const result = rt.evaluate(`(() => {
+    registerAsset({ id: 'BTC', name: 'Bitcoin', type: 'Crypto' }, new Array(HISTORY_DAYS).fill(50000), new Array(HISTORY_DAYS).fill(true));
+    const csv = [
+      'Date,Currency,Type,Amount,Quote Price,Timezone,Transaction ID,Fee,Fee Currency',
+      '2026-07-01,EUR,deposit,1000,1,UTC,cash-in,0,EUR',
+      '2026-07-02,BTC,buy,0.01,50000,UTC,buy-one,1,EUR',
+    ].join('\\n');
+    const txs = [];
+    const imported = importTransactionCSV(csv, txs);
+    const ledger = buildPortfolioLedger(txs);
+    return { imported, txs, cash: ledger.cash, invested: totalInvested(txs) };
+  })()`);
+  assert.equal(result.imported.ok, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.txs.map(tx => tx.type))), ['deposit', 'buy']);
+  assert.equal(result.txs[1].external, false);
+  assert.equal(result.txs[1].fee, 1);
+  assert.equal(result.cash, 499);
+  assert.equal(result.invested, 1000);
+});
+
+test('Bitvavo assetdeposit wordt transfer en stakingreward blijft een interne nulbasis-toename', () => {
+  const rt = createRuntime(FILES);
+  const result = rt.evaluate(`(() => {
+    registerAsset({ id: 'BTC', name: 'Bitcoin', type: 'Crypto' }, new Array(HISTORY_DAYS).fill(100), new Array(HISTORY_DAYS).fill(true));
+    const csv = [
+      'Date,Currency,Type,Amount,Quote Price,Timezone,Transaction ID',
+      '2026-07-01,BTC,deposit,0.1,0,UTC,asset-in',
+      '2026-07-02,BTC,staking,0.01,0,UTC,reward',
+    ].join('\\n');
+    const txs = [];
+    const imported = importTransactionCSV(csv, txs);
+    const ledger = buildPortfolioLedger(txs);
+    return { imported, txs, qty: ledger.positions.BTC.qty, cost: ledger.positions.BTC.cost, invested: totalInvested(txs) };
+  })()`);
+  assert.equal(result.imported.ok, true);
+  assert.equal(result.imported.transfers, 1);
+  assert.equal(result.imported.estimatedTransfers, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.txs.map(tx => tx.type))), ['transfer_in', 'transfer_in']);
+  assert.equal(result.txs[1].externalValue, 0);
+  assert.ok(Math.abs(result.qty - 0.11) < 1e-12);
+  assert.equal(result.cost, 10);
+  assert.equal(result.invested, 10);
 });
 
 test('netwerk staat standaard uit en veroorzaakt geen impliciete fetch', async () => {
@@ -316,4 +405,45 @@ test('backuprestore zet voorkeuren terug maar netwerktoestemming uit', () => {
   assert.equal(rt.storage.getItem('vermogen_network_consent_v1'), 'no');
   assert.equal(rt.storage.getItem('vermogen_auto_refresh_v1'), null);
   assert.equal(rt.storage.getItem('vermogen_price_refresh_meta_v1'), null);
+});
+
+test('schema-v3-backup herstelt alle boekingstypen en brokerreconciliatie', () => {
+  const rt = createRuntime(FILES);
+  const result = rt.evaluate(`(() => {
+    const prices = new Array(HISTORY_DAYS).fill(100);
+    const provenance = new Array(HISTORY_DAYS).fill(true);
+    const backup = {
+      schemaVersion: 3,
+      meta: { app: 'Vermogen', kind: 'vermogen-backup' },
+      state: {
+        transactions: [
+          { id: 'd', date: '2026-01-01', type: 'deposit', amount: 1000 },
+          { id: 'b', date: '2026-01-02', type: 'buy', asset: 'ETF', qty: 5, price: 100, fee: 2, external: false },
+          { id: 'i', date: '2026-01-03', type: 'dividend', asset: 'ETF', amount: 10 },
+        ],
+        assets: [{ id: 'ETF', name: 'ETF', type: 'ETF', histSource: 'import' }],
+        prices: { ETF: prices }, provenance: { ETF: provenance },
+        watchlist: [], alerts: [], dcaPlans: [], watchAssets: [], liveHistory: {}, yahooMap: {},
+        reconciliation: { assets: { ETF: 5 }, cash: 508, date: '2026-07-01T12:00:00.000Z' },
+      },
+    };
+    const restored = importPortfolioJSON(JSON.stringify(backup));
+    return {
+      restored,
+      txs: JSON.parse(localStorage.getItem(TX_KEY)),
+      reconciliation: JSON.parse(localStorage.getItem(RECONCILIATION_KEY)),
+    };
+  })()`);
+  assert.equal(result.restored.ok, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.txs.map(tx => tx.type))), ['deposit', 'buy', 'dividend']);
+  assert.equal(result.txs[1].external, false);
+  assert.equal(result.reconciliation.assets.ETF, 5);
+  assert.equal(result.reconciliation.cash, 508);
+});
+
+test('onbekende backupversies worden expliciet geweigerd', () => {
+  const rt = createRuntime(FILES);
+  const result = rt.evaluate(`importPortfolioJSON(JSON.stringify({ schemaVersion: 99, meta: { kind: 'vermogen-backup' }, state: {} }))`);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /Backupversie 99/);
 });
