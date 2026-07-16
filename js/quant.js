@@ -7,13 +7,52 @@
    ============================================================ */
 
 // ---------- rendementenmatrix & statistiek ----------
+const MIN_JOINT_RETURN_SAMPLES = 60;
+
+/**
+ * Bouwt rendementen uitsluitend tussen datums waarop álle assets een werkelijk
+ * waargenomen koers hebben. Zo worden beursweekenden niet als nulrendement voor
+ * aandelen naast een echt cryptorendement gezet.
+ */
+function jointObservedReturnSample(ids, days = 730) {
+  const assetIds = Array.isArray(ids) ? ids.map(normalizeAssetId) : [];
+  const end = HISTORY_DAYS - 1;
+  const requestedDays = Number.isFinite(Number(days)) ? Math.max(1, Math.floor(Number(days))) : 730;
+  const start = Math.max(0, end - requestedDays);
+  if (!assetIds.length || assetIds.some(id => !id || !MARKET.prices[id])) {
+    return {
+      ids: assetIds, returns: assetIds.map(() => []), observationIndices: [],
+      intervalDays: [], sampleCount: 0, spanDays: 0, periodsPerYear: 0,
+      firstDate: null, lastDate: null,
+    };
+  }
+
+  const observationIndices = [];
+  for (let index = start; index <= end; index++) {
+    if (assetIds.every(id => isObservedPrice(id, index))) observationIndices.push(index);
+  }
+  const returns = assetIds.map(() => []);
+  const intervalDays = [];
+  for (let row = 1; row < observationIndices.length; row++) {
+    const from = observationIndices[row - 1], to = observationIndices[row];
+    intervalDays.push(to - from);
+    for (let asset = 0; asset < assetIds.length; asset++) {
+      const prices = MARKET.prices[assetIds[asset]];
+      returns[asset].push(Math.log(prices[to] / prices[from]));
+    }
+  }
+  const sampleCount = Math.max(0, observationIndices.length - 1);
+  const spanDays = sampleCount ? observationIndices.at(-1) - observationIndices[0] : 0;
+  return {
+    ids: assetIds, returns, observationIndices, intervalDays, sampleCount, spanDays,
+    periodsPerYear: spanDays > 0 ? sampleCount / spanDays * CALENDAR_DAYS_PER_YEAR : 0,
+    firstDate: observationIndices.length ? localDateKey(MARKET.dates[observationIndices[0]]) : null,
+    lastDate: observationIndices.length ? localDateKey(MARKET.dates[observationIndices.at(-1)]) : null,
+  };
+}
+
 function returnsMatrix(ids, days = 730) {
-  return ids.map(id => {
-    const p = MARKET.prices[id].slice(-(days + 1));
-    const r = new Array(p.length - 1);
-    for (let i = 1; i < p.length; i++) r[i - 1] = Math.log(p[i] / p[i - 1]);
-    return r;
-  });
+  return jointObservedReturnSample(ids, days).returns;
 }
 
 function meanOf(a) { return a.reduce((s, v) => s + v, 0) / a.length; }
@@ -24,21 +63,33 @@ function covariance(a, b, ma, mb) {
   return s / a.length;
 }
 
-function correlationMatrix(ids, days = 730) {
-  const R = returnsMatrix(ids, days);
+function correlationAnalysis(ids, days = 730, minSamples = MIN_JOINT_RETURN_SAMPLES) {
+  const sampling = jointObservedReturnSample(ids, days);
+  const R = sampling.returns;
+  const minimum = Number.isFinite(Number(minSamples)) ? Math.max(2, Math.floor(Number(minSamples))) : MIN_JOINT_RETURN_SAMPLES;
+  if (sampling.sampleCount < minimum) {
+    return { available: false, matrix: [], sampling, reason: `Minimaal ${minimum} gezamenlijke waargenomen rendementsintervallen nodig.` };
+  }
   const means = R.map(meanOf);
-  const n = ids.length;
+  const n = sampling.ids.length;
   const cov = Array.from({ length: n }, () => new Array(n));
   for (let i = 0; i < n; i++)
     for (let j = i; j < n; j++) {
       cov[i][j] = cov[j][i] = covariance(R[i], R[j], means[i], means[j]);
     }
+  if (cov.some((row, index) => !Number.isFinite(row[index]) || row[index] <= 1e-18)) {
+    return { available: false, matrix: [], sampling, reason: 'De gezamenlijke steekproef bevat te weinig koersvariatie voor correlatie.' };
+  }
   const corr = Array.from({ length: n }, () => new Array(n));
   for (let i = 0; i < n; i++)
     for (let j = 0; j < n; j++) {
-      corr[i][j] = cov[i][j] / (Math.sqrt(cov[i][i] * cov[j][j]) || 1e-12);
+      corr[i][j] = i === j ? 1 : cov[i][j] / Math.sqrt(cov[i][i] * cov[j][j]);
     }
-  return corr;
+  return { available: true, matrix: corr, sampling, reason: '' };
+}
+
+function correlationMatrix(ids, days = 730) {
+  return correlationAnalysis(ids, days).matrix;
 }
 
 // ---------- Efficient frontier ----------
@@ -47,19 +98,32 @@ function correlationMatrix(ids, days = 730) {
  * berekent (σ, μ, Sharpe). Retourneert puntenwolk, frontier-envelop,
  * huidige portefeuille en max-Sharpe punt (elk met weights).
  */
-function efficientFrontier(positions, nSamples = 3500) {
-  const ids = positions.map(p => p.asset.id);
-  const total = positions.reduce((s, p) => s + p.value, 0);
-  const curW = positions.map(p => p.value / total);
+function efficientFrontier(positions, nSamples = 3500, days = 730) {
+  const portfolioPositions = Array.isArray(positions) ? positions : [];
+  const ids = portfolioPositions.map(p => p.asset.id);
+  const total = portfolioPositions.reduce((s, p) => s + p.value, 0);
+  const sampling = jointObservedReturnSample(ids, days);
+  if (portfolioPositions.length < 2 || total <= 0 || sampling.sampleCount < MIN_JOINT_RETURN_SAMPLES) {
+    return {
+      available: false, ids, positions: portfolioPositions, total, sampling,
+      reason: portfolioPositions.length < 2
+        ? 'Minimaal 2 posities nodig voor portefeuille-optimalisatie.'
+        : total <= 0
+          ? 'De belegde waarde moet positief zijn voor portefeuille-optimalisatie.'
+          : `Minimaal ${MIN_JOINT_RETURN_SAMPLES} gezamenlijke waargenomen rendementsintervallen nodig.`,
+    };
+  }
+  const curW = portfolioPositions.map(p => p.value / total);
 
-  const R = returnsMatrix(ids);
+  const R = sampling.returns;
   const means = R.map(meanOf);
-  const mu = means.map(m => m * CALENDAR_DAYS_PER_YEAR);
+  const annualization = sampling.periodsPerYear;
+  const mu = means.map(m => m * annualization);
   const n = ids.length;
   const cov = Array.from({ length: n }, () => new Array(n));
   for (let i = 0; i < n; i++)
     for (let j = i; j < n; j++) {
-      cov[i][j] = cov[j][i] = covariance(R[i], R[j], means[i], means[j]) * CALENDAR_DAYS_PER_YEAR;
+      cov[i][j] = cov[j][i] = covariance(R[i], R[j], means[i], means[j]) * annualization;
     }
 
   const portStats = (w) => {
@@ -75,7 +139,8 @@ function efficientFrontier(positions, nSamples = 3500) {
   const rng = mulberry32(2024);
   const points = [];
   let maxSharpe = null;
-  for (let k = 0; k < nSamples; k++) {
+  const sampleTarget = Number.isFinite(Number(nSamples)) ? Math.max(1, Math.floor(Number(nSamples))) : 3500;
+  for (let k = 0; k < sampleTarget; k++) {
     const w = new Array(n);
     let sum = 0;
     for (let i = 0; i < n; i++) { w[i] = -Math.log(rng() || 1e-12); sum += w[i]; }
@@ -104,7 +169,7 @@ function efficientFrontier(positions, nSamples = 3500) {
   }
 
   const current = { ...portStats(curW), weights: curW };
-  return { ids, points, frontier, current, maxSharpe, total, mu, positions };
+  return { available: true, ids, points, frontier, current, maxSharpe, total, mu, positions: portfolioPositions, sampling };
 }
 
 /** Vertaalt doelgewichten naar concrete koop/verkoop-orders. */
@@ -135,24 +200,25 @@ const STRESS_SCENARIOS = [
   { id: 'zwaan', icon: '🦢', name: 'Zwarte zwaan', desc: 'onvoorspelbare systeemschok', shocks: { Aandeel: -0.30, ETF: -0.28, Crypto: -0.45 } },
 ];
 
-function applyStress(positions, scenario) {
-  const rows = positions.map(p => {
-    const shock = scenario.shocks[p.asset.type] ?? -0.25;
+function applyStress(positions, scenario, cash = 0) {
+  const rows = (Array.isArray(positions) ? positions : []).map(p => {
+    const shock = scenario?.shocks?.[p.asset.type] ?? -0.25;
     return { asset: p.asset, before: p.value, loss: p.value * shock, after: p.value * (1 + shock), shock };
   });
-  const before = rows.reduce((s, r) => s + r.before, 0);
-  const after = rows.reduce((s, r) => s + r.after, 0);
-  const lossPct = (after / before - 1) * 100;
+  const cashValue = Number.isFinite(Number(cash)) ? Number(cash) : 0;
+  const before = rows.reduce((s, r) => s + r.before, cashValue);
+  const after = rows.reduce((s, r) => s + r.after, cashValue);
+  const lossPct = before > 0 ? (after / before - 1) * 100 : 0;
   // hersteltijd bij 6%/jaar
-  const years = Math.log(before / after) / Math.log(1.06);
-  return { rows, before, after, lossPct, recoveryYears: Math.max(0, years) };
+  const years = before > 0 && after > 0 ? Math.log(before / after) / Math.log(1.06) : Infinity;
+  return { rows, cash: cashValue, before, after, lossPct, recoveryYears: Math.max(0, years) };
 }
 
 // ---------- Benchmark: zelfde cashflows in één ETF ----------
-function benchmarkSeries(txs, benchId = 'VWCE') {
+function benchmarkSeries(txs, benchId = 'VWCE', ledger = null) {
   const bench = MARKET.prices[benchId];
   if (!bench) return null;
-  const flows = computeCashflowSeries(txs);
+  const flows = computeCashflowSeries(txs, ledger);
   const values = new Array(HISTORY_DAYS).fill(null);
   let units = 0, started = false;
   for (let i = 0; i < HISTORY_DAYS; i++) {
@@ -265,8 +331,8 @@ function portfolioXirr(txs, finalValue, valuationDate = MARKET.dates[HISTORY_DAY
  * als "rendement" (in tegenstelling tot winst t.o.v. netto-inleg).
  * Retourneert een cumulatieve reeks (fractie, 0 = startpunt) op het datumgrid.
  */
-function twrSeries(txs, values) {
-  const cumulative = cumulativeFromReturns(cashflowAdjustedReturns(txs, values).returns);
+function twrSeries(txs, values, ledger = null) {
+  const cumulative = cumulativeFromReturns(cashflowAdjustedReturns(txs, values, ledger).returns);
   return cumulative.map(v => v === null ? null : v - 1);
 }
 

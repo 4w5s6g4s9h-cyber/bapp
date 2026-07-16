@@ -663,7 +663,17 @@ function buildPortfolioLedger(txs) {
   return { ...ledger, timeline, cashTimeline, externalFlows, values };
 }
 
-function computeHoldingsTimeline(txs) { return buildPortfolioLedger(txs).timeline; }
+function resolvedPortfolioLedger(txs, ledger = null) {
+  return ledger
+    && Array.isArray(ledger.values) && ledger.values.length === HISTORY_DAYS
+    && Array.isArray(ledger.externalFlows) && ledger.externalFlows.length === HISTORY_DAYS
+    && Array.isArray(ledger.timeline) && ledger.timeline.length === HISTORY_DAYS
+    && ledger.positions && typeof ledger.positions === 'object'
+    ? ledger
+    : buildPortfolioLedger(txs);
+}
+
+function computeHoldingsTimeline(txs, ledger = null) { return resolvedPortfolioLedger(txs, ledger).timeline; }
 
 function computePortfolioSeries(txs) {
   const ledger = buildPortfolioLedger(txs);
@@ -674,7 +684,7 @@ function computePortfolioSeries(txs) {
 }
 
 /** Externe stortingen/onttrekkingen; interne trades, inkomsten en kosten tellen niet mee. */
-function computeCashflowSeries(txs) { return buildPortfolioLedger(txs).externalFlows; }
+function computeCashflowSeries(txs, ledger = null) { return resolvedPortfolioLedger(txs, ledger).externalFlows; }
 
 function externalCashflowEvents(txs) {
   const ledger = {
@@ -699,8 +709,8 @@ function externalCashflowEvents(txs) {
  * verondersteld: V_t / (V_t-1 + flow_t) - 1. Dit voorkomt dat een aankoop
  * als winst en een verkoop als verlies wordt weergegeven.
  */
-function cashflowAdjustedReturns(txs, values) {
-  const flows = computeCashflowSeries(txs);
+function cashflowAdjustedReturns(txs, values, ledger = null) {
+  const flows = computeCashflowSeries(txs, ledger);
   const returns = new Array(HISTORY_DAYS).fill(null);
   for (let i = 0; i < HISTORY_DAYS; i++) {
     const previous = i === 0 ? 0 : values[i - 1];
@@ -723,8 +733,8 @@ function cumulativeFromReturns(returns) {
   return started ? out : new Array(returns.length).fill(null);
 }
 
-function dailyPortfolioPnl(txs, values, index = HISTORY_DAYS - 1) {
-  const flows = computeCashflowSeries(txs);
+function dailyPortfolioPnl(txs, values, index = HISTORY_DAYS - 1, ledger = null) {
+  const flows = computeCashflowSeries(txs, ledger);
   const previous = index > 0 ? values[index - 1] : 0;
   const pnl = values[index] - previous - flows[index];
   const base = previous + flows[index];
@@ -732,12 +742,12 @@ function dailyPortfolioPnl(txs, values, index = HISTORY_DAYS - 1) {
 }
 
 // Huidige posities met gemiddelde kostbasis, inclusief kosten en splits.
-function computePositions(txs) {
-  const ledger = buildPortfolioLedger(txs);
+function computePositions(txs, ledger = null) {
+  const resolvedLedger = resolvedPortfolioLedger(txs, ledger);
   return ASSETS
-    .filter(a => ledger.positions[a.id] && ledger.positions[a.id].qty > 1e-9 && MARKET.prices[a.id])
+    .filter(a => resolvedLedger.positions[a.id] && resolvedLedger.positions[a.id].qty > 1e-9 && MARKET.prices[a.id])
     .map(a => {
-      const { qty, cost, realized } = ledger.positions[a.id];
+      const { qty, cost, realized } = resolvedLedger.positions[a.id];
       const price = lastPrice(a.id);
       const value = qty * price;
       const avgPrice = cost / qty;
@@ -751,8 +761,31 @@ function computePositions(txs) {
     .sort((x, y) => y.value - x.value);
 }
 
-function totalInvested(txs) {
-  return computeCashflowSeries(txs).reduce((sum, amount) => sum + amount, 0);
+function totalInvested(txs, ledger = null) {
+  return computeCashflowSeries(txs, ledger).reduce((sum, amount) => sum + amount, 0);
+}
+
+/** Eén definitie voor asset- en cashwegingen ten opzichte van het totale vermogen. */
+function portfolioAllocation(positions, cash = 0) {
+  const rows = (Array.isArray(positions) ? positions : [])
+    .filter(position => Number.isFinite(Number(position?.value)))
+    .map(position => ({ position, value: Number(position.value) }));
+  const securitiesValue = rows.reduce((sum, row) => sum + row.value, 0);
+  const cashValue = Number.isFinite(Number(cash)) ? Number(cash) : 0;
+  const total = securitiesValue + cashValue;
+  const denominator = total > 1e-9 ? total : 0;
+  const weights = rows.map(row => ({
+    assetId: row.position.asset.id,
+    value: row.value,
+    weight: denominator ? row.value / denominator : 0,
+  }));
+  const cashWeight = denominator ? cashValue / denominator : 0;
+  return {
+    securitiesValue, cashValue, total, weights, cashWeight,
+    concentrationWeights: denominator
+      ? [...weights.map(row => row.weight), ...(Math.abs(cashValue) > 1e-9 ? [cashWeight] : [])]
+      : [],
+  };
 }
 
 function loadReconciliation() {
@@ -788,8 +821,8 @@ function saveReconciliation(snapshot) {
   return clean;
 }
 
-function reconcilePortfolio(txs, snapshot = {}) {
-  const ledger = buildPortfolioLedger(txs);
+function reconcilePortfolio(txs, snapshot = {}, ledger = null) {
+  const resolvedLedger = resolvedPortfolioLedger(txs, ledger);
   const actualAssets = {};
   if (snapshot?.assets && typeof snapshot.assets === 'object' && !Array.isArray(snapshot.assets)) {
     for (const [rawId, rawQty] of Object.entries(snapshot.assets)) {
@@ -798,11 +831,11 @@ function reconcilePortfolio(txs, snapshot = {}) {
     }
   }
   const ids = new Set([
-    ...Object.keys(ledger.positions).filter(id => ledger.positions[id].qty > 1e-9),
+    ...Object.keys(resolvedLedger.positions).filter(id => resolvedLedger.positions[id].qty > 1e-9),
     ...Object.keys(actualAssets).map(normalizeAssetId).filter(Boolean),
   ]);
   const rows = [...ids].sort().map(asset => {
-    const expected = ledger.positions[asset]?.qty || 0;
+    const expected = resolvedLedger.positions[asset]?.qty || 0;
     const rawActual = Object.prototype.hasOwnProperty.call(actualAssets, asset) ? Number(actualAssets[asset]) : null;
     const actual = Number.isFinite(rawActual) ? rawActual : null;
     const difference = actual === null ? null : actual - expected;
@@ -814,9 +847,9 @@ function reconcilePortfolio(txs, snapshot = {}) {
   const rawCash = snapshot?.cash;
   const actualCash = rawCash === '' || rawCash === null || rawCash === undefined ? null : Number(rawCash);
   const cash = {
-    expected: ledger.cash,
+    expected: resolvedLedger.cash,
     actual: Number.isFinite(actualCash) ? actualCash : null,
-    difference: Number.isFinite(actualCash) ? actualCash - ledger.cash : null,
+    difference: Number.isFinite(actualCash) ? actualCash - resolvedLedger.cash : null,
   };
   cash.balanced = cash.difference !== null && Math.abs(cash.difference) <= 0.01;
   const complete = rows.every(row => row.actual !== null) && cash.actual !== null;
