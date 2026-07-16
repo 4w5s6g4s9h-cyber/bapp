@@ -16,8 +16,16 @@ export class MemoryStorage {
   snapshot() { return Object.fromEntries(this.data); }
 }
 
-export function createRuntime(files, { storage = new MemoryStorage(), fetchImpl } = {}) {
+export function createRuntime(files, { storage = new MemoryStorage(), fetchImpl, now } = {}) {
   let fetchCalls = 0;
+  const HostDate = Date;
+  let frozenNow = now === undefined ? null : Number(new HostDate(now));
+  if (frozenNow !== null && !Number.isFinite(frozenNow)) throw new Error('Ongeldige testklok.');
+  const currentTime = () => frozenNow === null ? HostDate.now() : frozenNow;
+  class RuntimeDate extends HostDate {
+    constructor(...args) { super(...(args.length ? args : [currentTime()])); }
+    static now() { return currentTime(); }
+  }
   const context = vm.createContext({
     console,
     localStorage: storage,
@@ -27,8 +35,9 @@ export function createRuntime(files, { storage = new MemoryStorage(), fetchImpl 
     AbortController,
     Blob,
     URL,
-    performance: { now: () => Date.now() },
-    requestAnimationFrame: callback => setTimeout(() => callback(Date.now()), 0),
+    Date: RuntimeDate,
+    performance: { now: () => currentTime() },
+    requestAnimationFrame: callback => setTimeout(() => callback(currentTime()), 0),
     cancelAnimationFrame: clearTimeout,
     fetch: async (...args) => {
       fetchCalls++;
@@ -45,5 +54,10 @@ export function createRuntime(files, { storage = new MemoryStorage(), fetchImpl 
     storage,
     evaluate: expression => vm.runInContext(expression, context),
     fetchCalls: () => fetchCalls,
+    setNow: value => {
+      const next = Number(new HostDate(value));
+      if (!Number.isFinite(next)) throw new Error('Ongeldige testklok.');
+      frozenNow = next;
+    },
   };
 }

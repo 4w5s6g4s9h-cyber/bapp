@@ -19,10 +19,10 @@ test('identieke JSON-herimport bewaart assetdefinities en overleeft reload', () 
   const storage = new MemoryStorage();
   const first = createRuntime(FILES, { storage });
   assert.equal(first.evaluate(`importPortfolioJSON(${JSON.stringify(genericPortfolio())}).ok`), true);
-  assert.equal(JSON.parse(storage.getItem('vermogen_custom_v1')).assets.length, 1);
+  assert.equal(JSON.parse(storage.getItem('vermogen_custom_v2')).assets.length, 1);
   assert.equal(JSON.parse(storage.getItem('vermogen_transactions_v4'))[0].external, true);
   assert.equal(first.evaluate(`importPortfolioJSON(${JSON.stringify(genericPortfolio())}).ok`), true);
-  assert.equal(JSON.parse(storage.getItem('vermogen_custom_v1')).assets.length, 1);
+  assert.equal(JSON.parse(storage.getItem('vermogen_custom_v2')).assets.length, 1);
 
   const reload = createRuntime(FILES, { storage });
   assert.equal(reload.evaluate('ASSETS.length'), 1);
@@ -247,11 +247,11 @@ test('automatische dagkoersen selecteren maximaal tien oudste assets', () => {
   const stockWindow = 24 * 60 * 60 * 1000;
   const liveHistory = Object.fromEntries(Array.from({ length: 12 }, (_, i) => {
     const id = 'S' + String(i).padStart(2, '0');
-    return [id, { at: i === 11 ? now - stockWindow / 2 : now - 2 * stockWindow + i * 1000 }];
+    return [id, { at: i === 11 ? now - stockWindow / 2 : now - 2 * stockWindow + i * 1000, points: [['2027-01-01', 100]], src: 'yahoo' }];
   }));
   liveHistory.S01.at = now - 3 * stockWindow;
   const storage = new MemoryStorage({
-    vermogen_livehist_v1: JSON.stringify(liveHistory),
+    vermogen_livehist_v2: JSON.stringify(liveHistory),
   });
   const rt = createRuntime(FILES, { storage });
   rt.evaluate(`Array.from({ length: 12 }, (_, i) => {
@@ -315,7 +315,7 @@ test('watchlist gebruikt Alpha Vantage wanneer de browser Yahoo blokkeert', asyn
   assert.equal(rt.evaluate(`assetById('SPCX').name`), 'SPCX');
   assert.equal(rt.evaluate(`assetById('SPCX').histSource`), 'alpha');
   assert.ok(Math.abs(rt.evaluate(`lastPrice('SPCX')`) - 130.77) < 1e-9);
-  assert.equal(JSON.parse(storage.getItem('vermogen_livehist_v1')).SPCX.src, 'alpha');
+  assert.equal(JSON.parse(storage.getItem('vermogen_livehist_v2')).SPCX.src, 'alpha');
 });
 
 test('dynamische CoinGecko-koppeling overleeft reload en bewaart de uurkoers', async () => {
@@ -346,7 +346,7 @@ test('dynamische CoinGecko-koppeling overleeft reload en bewaart de uurkoers', a
   });
   reload.evaluate('loadWatchAssets(); applyLiveHistory()');
   const updated = await reload.evaluate('fetchLivePrices()');
-  const saved = JSON.parse(storage.getItem('vermogen_livehist_v1')).PRV;
+  const saved = JSON.parse(storage.getItem('vermogen_livehist_v2')).PRV;
 
   assert.equal(JSON.stringify(updated), JSON.stringify(['PRV']));
   assert.match(liveUrl, /ids=privacy-coin/);
@@ -355,7 +355,7 @@ test('dynamische CoinGecko-koppeling overleeft reload en bewaart de uurkoers', a
   assert.equal(reload.evaluate(`lastPrice('PRV')`), 42.25);
   assert.equal(saved.cg, 'privacy-coin');
   assert.equal(saved.quoteAt, providerSeconds * 1000);
-  assert.deepEqual(saved.points.find(([index]) => index === 1094), [1094, 42.25]);
+  assert.ok(saved.points.some(([date, price]) => /^\d{4}-\d{2}-\d{2}$/.test(date) && price === 42.25));
 });
 
 test('een opgeslagen spotkoers herschaalt geïmporteerde historie niet bij reload', async () => {
@@ -367,7 +367,7 @@ test('een opgeslagen spotkoers herschaalt geïmporteerde historie niet bij reloa
   });
   first.evaluate(`registerAsset({ id: 'BTC', name: 'Bitcoin', type: 'Crypto', histSource: 'import' }, Array.from({ length: HISTORY_DAYS }, (_, i) => 100 + i / 100), new Array(HISTORY_DAYS).fill(true))`);
   await first.evaluate('fetchLivePrices()');
-  assert.equal(JSON.parse(storage.getItem('vermogen_livehist_v1')).BTC.spotOnly, true);
+  assert.equal(JSON.parse(storage.getItem('vermogen_livehist_v2')).BTC.spotOnly, true);
 
   const reload = createRuntime(FILES, { storage });
   const result = reload.evaluate(`(() => {
@@ -378,6 +378,104 @@ test('een opgeslagen spotkoers herschaalt geïmporteerde historie niet bij reloa
   assert.equal(result.first, 100);
   assert.equal(result.last, 200);
   assert.equal(result.source, 'import');
+});
+
+test('gedateerde marktdata blijft na een week aan de oorspronkelijke kalenderdag gekoppeld', () => {
+  const storage = new MemoryStorage();
+  const history = Array.from({ length: 30 }, (_, index) => ({
+    date: `2026-06-${String(17 + index).padStart(2, '0')}`,
+    price: 90 + index,
+  }));
+  // Corrigeer de laatste zestien datums naar juli, zodat de reeks exact op
+  // 16 juli eindigt zonder van de hostklok afhankelijk te zijn.
+  for (let index = 14; index < history.length; index++) {
+    history[index].date = `2026-07-${String(index - 13).padStart(2, '0')}`;
+  }
+  const payload = JSON.stringify({
+    transactions: [{ id: 'dated', date: '2026-07-16', side: 'buy', ticker: 'SAFE', quantity: 1, price: 100 }],
+    histories: { SAFE: history },
+  });
+  const first = createRuntime(FILES, { storage, now: '2026-07-16T12:00:00+02:00' });
+  assert.equal(first.evaluate(`importPortfolioJSON(${JSON.stringify(payload)}).ok`), true);
+  const stored = JSON.parse(storage.getItem('vermogen_custom_v2')).market.SAFE;
+  assert.match(stored.startDate, /^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(stored.quality.at(-1), 'o');
+
+  const later = createRuntime(FILES, { storage, now: '2026-07-23T12:00:00+02:00' });
+  const result = later.evaluate(`(() => {
+    const original = dateToIndexUnclamped(localDateFromKey('2026-07-16'));
+    return {
+      originalDate: localDateKey(MARKET.dates[original]),
+      originalPrice: MARKET.prices.SAFE[original],
+      originalQuality: priceQualityAt('SAFE', original),
+      currentPrice: lastPrice('SAFE'),
+      currentQuality: priceQualityAt('SAFE', HISTORY_DAYS - 1),
+    };
+  })()`);
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), {
+    originalDate: '2026-07-16', originalPrice: 119, originalQuality: 'observed',
+    currentPrice: 119, currentQuality: 'carried',
+  });
+});
+
+test('legacy positionele marktdata migreert fail-closed zonder transacties te wissen', () => {
+  const prices = new Array(1095).fill(100);
+  const storage = new MemoryStorage({
+    vermogen_mode: 'import',
+    vermogen_custom_v1: JSON.stringify({
+      schemaVersion: 3,
+      assets: [{ id: 'OLD', name: 'Oud', type: 'ETF', histSource: 'import' }],
+      prices: { OLD: prices }, provenance: { OLD: new Array(1095).fill(true) },
+      report: { date: '2026-07-16T12:00:00.000Z' },
+    }),
+    vermogen_transactions_v4: JSON.stringify([{ id: 'old-buy', date: '2026-07-01', type: 'buy', asset: 'OLD', qty: 1, price: 100, external: true }]),
+  });
+  const rt = createRuntime(FILES, { storage, now: '2026-07-23T12:00:00+02:00' });
+  const result = rt.evaluate(`({
+    observed: observedCoverage('OLD'),
+    reliable: marketCoverage('OLD'),
+    warning: IMPORT_REPORT.migrationWarning,
+    txCount: loadTransactions().length,
+  })`);
+  assert.equal(result.observed, 0);
+  assert.equal(result.reliable, 0);
+  assert.match(result.warning, /niet hard worden bewezen/);
+  assert.equal(result.txCount, 1);
+  assert.ok(storage.getItem('vermogen_custom_v2'));
+  assert.ok(storage.getItem('vermogen_custom_v1'));
+});
+
+test('spotupdates bouwen datumvaste daghistorie op in plaats van dezelfde index te overschrijven', async () => {
+  const storage = new MemoryStorage({ vermogen_network_consent_v1: 'yes' });
+  const response = (price, timestamp) => ({ bitcoin: { eur: price, last_updated_at: Math.floor(Date.parse(timestamp) / 1000) } });
+  const first = createRuntime(FILES, {
+    storage, now: '2026-07-16T12:00:00+02:00',
+    fetchImpl: async () => ({ ok: true, json: async () => response(100, '2026-07-16T10:00:00Z') }),
+  });
+  first.evaluate(`registerAsset({ id: 'BTC', name: 'Bitcoin', type: 'Crypto' }, new Array(HISTORY_DAYS).fill(90), new Array(HISTORY_DAYS).fill(false))`);
+  await first.evaluate('fetchLivePrices()');
+
+  const second = createRuntime(FILES, {
+    storage, now: '2026-07-17T12:00:00+02:00',
+    fetchImpl: async () => ({ ok: true, json: async () => response(110, '2026-07-17T10:00:00Z') }),
+  });
+  second.evaluate(`registerAsset({ id: 'BTC', name: 'Bitcoin', type: 'Crypto' }, new Array(HISTORY_DAYS).fill(90), new Array(HISTORY_DAYS).fill(false)); applyLiveHistory()`);
+  await second.evaluate('fetchLivePrices()');
+  const points = JSON.parse(storage.getItem('vermogen_livehist_v2')).BTC.points;
+  assert.deepEqual(points.slice(-2), [['2026-07-16', 100], ['2026-07-17', 110]]);
+});
+
+test('forward-filled marktdagen blijven carried en worden niet als waarneming gelabeld', () => {
+  const rt = createRuntime(FILES, { now: '2026-07-14T12:00:00+02:00' });
+  const result = rt.evaluate(`(() => {
+    registerAsset({ id: 'WKND', name: 'Weekend', type: 'ETF' }, new Array(HISTORY_DAYS).fill(90));
+    mergeRealHistory('WKND', [['2026-07-10', 100], ['2026-07-13', 110]], { source: 'test' });
+    const quality = date => priceQualityAt('WKND', dateToIndexUnclamped(localDateFromKey(date)));
+    return { friday: quality('2026-07-10'), saturday: quality('2026-07-11'), sunday: quality('2026-07-12'), monday: quality('2026-07-13') };
+  })()`);
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), {
+    friday: 'observed', saturday: 'carried', sunday: 'carried', monday: 'observed',
+  });
 });
 
 test('backuprestore zet voorkeuren terug maar netwerktoestemming uit', () => {
@@ -439,6 +537,77 @@ test('schema-v3-backup herstelt alle boekingstypen en brokerreconciliatie', () =
   assert.equal(result.txs[1].external, false);
   assert.equal(result.reconciliation.assets.ETF, 5);
   assert.equal(result.reconciliation.cash, 508);
+});
+
+test('schema-v4-backup herstelt marktdata op de oorspronkelijke datum', () => {
+  const storage = new MemoryStorage();
+  const source = createRuntime(FILES, { now: '2026-07-16T12:00:00+02:00' });
+  const market = source.evaluate(`(() => {
+    const prices = new Array(HISTORY_DAYS).fill(100);
+    const quality = new Array(HISTORY_DAYS).fill(PRICE_QUALITY.RECONSTRUCTED);
+    quality[HISTORY_DAYS - 1] = PRICE_QUALITY.OBSERVED;
+    registerAsset({ id: 'V4', name: 'Versie vier', type: 'ETF', histSource: 'import' }, prices, quality.map(qualityIsReliable), quality, { source: 'import' });
+    return serializeMarketSeries('V4');
+  })()`);
+  const backup = {
+    schemaVersion: 4,
+    meta: { app: 'Vermogen', kind: 'vermogen-backup', exportedAt: '2026-07-16T12:00:00.000Z' },
+    state: {
+      transactions: [{ id: 'v4-buy', date: '2026-07-16', type: 'buy', asset: 'V4', qty: 1, price: 100, external: true }],
+      assets: [{ id: 'V4', name: 'Versie vier', type: 'ETF', histSource: 'import' }],
+      market: { V4: market }, watchlist: [], alerts: [], dcaPlans: [], watchAssets: [], liveHistory: {}, yahooMap: {},
+    },
+  };
+  const restore = createRuntime(FILES, { storage, now: '2026-07-23T12:00:00+02:00' });
+  assert.equal(restore.evaluate(`importPortfolioJSON(${JSON.stringify(JSON.stringify(backup))}).ok`), true);
+  restore.evaluate('loadCustomData()');
+  const result = restore.evaluate(`(() => {
+    const original = dateToIndexUnclamped(localDateFromKey('2026-07-16'));
+    return { original: priceQualityAt('V4', original), current: priceQualityAt('V4', HISTORY_DAYS - 1), price: lastPrice('V4') };
+  })()`);
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { original: 'observed', current: 'carried', price: 100 });
+});
+
+test('een onbewezen schema-v4-datumanker kan observed-flags niet betrouwbaar maken', () => {
+  const rt = createRuntime(FILES, { now: '2026-07-16T12:00:00+02:00' });
+  const result = rt.evaluate(`(() => {
+    registerAsset(
+      { id: 'ANCHOR', name: 'Onbewezen anker', type: 'ETF' },
+      new Array(HISTORY_DAYS).fill(100),
+      new Array(HISTORY_DAYS).fill(true),
+    );
+    const stored = serializeMarketSeries('ANCHOR');
+    stored.anchorConfidence = 'unverified';
+    stored.quality = 'o'.repeat(HISTORY_DAYS);
+    const parsed = normalizeMarketSeriesEntry(stored, 'ANCHOR');
+    return {
+      anchor: parsed.stored.anchorConfidence,
+      observed: parsed.quality.filter(value => value === PRICE_QUALITY.OBSERVED).length,
+      reconstructed: parsed.quality.filter(value => value === PRICE_QUALITY.RECONSTRUCTED).length,
+    };
+  })()`);
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), {
+    anchor: 'unverified', observed: 0, reconstructed: 1095,
+  });
+});
+
+test('legacy livehistorie gebruikt quoteAt als datumanker tijdens migratie', () => {
+  const quoteAt = Date.parse('2026-07-16T10:00:00Z');
+  const storage = new MemoryStorage({
+    vermogen_livehist_v1: JSON.stringify({ BTC: {
+      at: quoteAt + 1000, quoteAt, points: [[1094, 42]], src: 'coingecko', cg: 'bitcoin', spotOnly: true,
+    } }),
+  });
+  const rt = createRuntime(FILES, { storage, now: '2026-07-23T12:00:00+02:00' });
+  const result = rt.evaluate(`(() => {
+    registerAsset({ id: 'BTC', name: 'Bitcoin', type: 'Crypto' }, new Array(HISTORY_DAYS).fill(10));
+    applyLiveHistory();
+    const original = dateToIndexUnclamped(localDateFromKey('2026-07-16'));
+    return { date: localDateKey(MARKET.dates[original]), quality: priceQualityAt('BTC', original), price: MARKET.prices.BTC[original], current: priceQualityAt('BTC', HISTORY_DAYS - 1) };
+  })()`);
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { date: '2026-07-16', quality: 'observed', price: 42, current: 'carried' });
+  assert.ok(storage.getItem('vermogen_livehist_v1'));
+  assert.ok(storage.getItem('vermogen_livehist_v2'));
 });
 
 test('onbekende backupversies worden expliciet geweigerd', () => {

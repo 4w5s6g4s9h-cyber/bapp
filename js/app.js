@@ -32,7 +32,7 @@ function portfolioAnalysisAvailable(positions, days = 365) {
 }
 
 function unavailableHTML(days = 365) {
-  return `<div class="palette-empty">Analyse geblokkeerd: minimaal 90% echte koersdekking over ${days} kalenderdagen nodig. Importeer historie of haal die na toestemming op bij Instellingen.</div>`;
+  return `<div class="palette-empty">Analyse geblokkeerd: minimaal 90% bron-gedekte koerswaarden over ${days} kalenderdagen nodig. Importeer historie of haal die na toestemming op bij Instellingen.</div>`;
 }
 
 /* ---------- helpers ---------- */
@@ -125,6 +125,7 @@ let prevTotal = 0;
 let brushHandle = null;
 
 function renderDashboard(animate = true) {
+  ensureCurrentMarketGrid();
   state.portfolio = computePortfolioSeries(state.txs);
   const { values } = state.portfolio;
   const positions = computePositions(state.txs);
@@ -133,8 +134,8 @@ function renderDashboard(animate = true) {
   const todayResult = dailyPortfolioPnl(state.txs, values);
   const dayDelta = todayResult.pnl;
   const dayPct = todayResult.pct * 100;
-  const currentReliable = positions.length > 0 && positions.every(p => MARKET.provenance[p.asset.id]?.[HISTORY_DAYS - 1]);
-  const dayReliable = currentReliable && positions.every(p => MARKET.provenance[p.asset.id]?.[HISTORY_DAYS - 2]);
+  const currentReliable = positions.length > 0 && positions.every(p => isReliablePrice(p.asset.id, HISTORY_DAYS - 1));
+  const dayReliable = currentReliable && positions.every(p => isObservedPrice(p.asset.id, HISTORY_DAYS - 1) && isObservedPrice(p.asset.id, HISTORY_DAYS - 2));
   const historyReliable = portfolioAnalysisAvailable(positions, 730);
   const totReturn = total - invested;
   const totPct = invested > 0 ? (totReturn / invested) * 100 : 0;
@@ -152,7 +153,7 @@ function renderDashboard(animate = true) {
 
   $('#kpi-day').textContent = dayReliable ? fmtSignedEUR(dayDelta) : '—';
   const dayPctEl = $('#kpi-day-pct');
-  dayPctEl.textContent = dayReliable ? fmtPct(dayPct) : 'onvoldoende echte koersdekking';
+  dayPctEl.textContent = dayReliable ? fmtPct(dayPct) : 'onvoldoende waargenomen dagkoersen';
   dayPctEl.className = 'kpi-delta ' + (dayReliable ? (dayDelta >= 0 ? 'up' : 'down') : 'muted');
 
   $('#kpi-return').textContent = fmtSignedEUR(totReturn);
@@ -173,7 +174,7 @@ function renderDashboard(animate = true) {
     retEl.textContent = moneyWeighted !== null
       ? `XIRR ${fmtPct(moneyWeighted * 100, 1)}/jr`
       : currentReliable ? `${fmtPct(totPct)} t.o.v. netto-inleg` : 'historisch rendement geblokkeerd';
-    retEl.title = currentReliable ? 'XIRR gebruikt de exacte datums en omvang van externe geldstromen; onvoldoende echte historie voor TWR.' : 'De huidige waardering bevat gereconstrueerde koersen.';
+    retEl.title = currentReliable ? 'XIRR gebruikt de exacte datums en omvang van externe geldstromen; onvoldoende bron-gedekte historie voor TWR.' : 'De huidige waardering bevat gereconstrueerde koersen.';
     retEl.className = 'kpi-delta ' + (currentReliable ? (totReturn >= 0 ? 'up' : 'down') : 'muted');
   }
 
@@ -228,7 +229,7 @@ $('#tf-selector').addEventListener('click', e => {
 });
 
 $('#btn-benchmark').addEventListener('click', () => {
-  if (!assetById('VWCE') || !analysisAvailable('VWCE', 730)) { toast('⚠️ Benchmark vereist minimaal 90% echte VWCE-historie over twee jaar'); return; }
+  if (!assetById('VWCE') || !analysisAvailable('VWCE', 730)) { toast('⚠️ Benchmark vereist minimaal 90% bron-gedekte VWCE-historie over twee jaar'); return; }
   state.showBenchmark = !state.showBenchmark;
   $('#btn-benchmark').classList.toggle('on', state.showBenchmark);
   renderPortfolioChart();
@@ -255,7 +256,7 @@ function renderHoldings(positions) {
     const prices = MARKET.prices[p.asset.id];
     const reliable = analysisAvailable(p.asset.id, 365);
     const sig = reliable ? computeSignal(prices, state.models[p.asset.id]?.forecastPct ?? null) : { label: '—', score: 0 };
-    const day = MARKET.provenance[p.asset.id]?.[HISTORY_DAYS - 1] && MARKET.provenance[p.asset.id]?.[HISTORY_DAYS - 2]
+    const day = isObservedPrice(p.asset.id, HISTORY_DAYS - 1) && isObservedPrice(p.asset.id, HISTORY_DAYS - 2)
       ? (prices[prices.length - 1] / prices[prices.length - 2] - 1) * 100 : null;
     return {
       p, sig,
@@ -291,7 +292,7 @@ function renderHoldings(positions) {
       <td><b>${fmtEUR.format(p.value)}</b></td>
       <td><span class="pct ${p.gain >= 0 ? 'up' : 'down'}">${fmtSignedEUR(p.gain)}<br><span style="font-size:11px">${fmtPct(p.gainPct, 1)}</span></span></td>
       <td>${sparklineSVG(spark)}</td>
-      <td>${sig.label === '—' ? '<span class="muted" title="Onvoldoende echte koershistorie">—</span>' : `<span class="signal-badge signal-${sig.label.toLowerCase()}">${sig.label}</span>`}</td>`;
+      <td>${sig.label === '—' ? '<span class="muted" title="Onvoldoende bron-gedekte koershistorie">—</span>' : `<span class="signal-badge signal-${sig.label.toLowerCase()}">${sig.label}</span>`}</td>`;
     tr.addEventListener('click', () => {
       state.selectedAsset = p.asset.id;
       gotoView('asset');
@@ -325,8 +326,8 @@ function renderWatchlist() {
     if (!a) continue;
     const prices = MARKET.prices[id];
     const last = prices[prices.length - 1];
-    const real = MARKET.provenance[id] || [];
-    const day = real[HISTORY_DAYS - 1] && real[HISTORY_DAYS - 2] ? (last / prices[prices.length - 2] - 1) * 100 : null;
+    const day = isObservedPrice(id, HISTORY_DAYS - 1) && isObservedPrice(id, HISTORY_DAYS - 2)
+      ? (last / prices[prices.length - 2] - 1) * 100 : null;
     const m1 = marketCoverage(id, HISTORY_DAYS - 31) >= ANALYSIS_MIN_COVERAGE ? (last / prices[prices.length - 31] - 1) * 100 : null;
     const m3 = marketCoverage(id, HISTORY_DAYS - 91) >= ANALYSIS_MIN_COVERAGE ? (last / prices[prices.length - 91] - 1) * 100 : null;
     const sig = analysisAvailable(id, 365) ? computeSignal(prices, state.models[id]?.forecastPct ?? null) : null;
@@ -478,19 +479,22 @@ $('#chart-mode').addEventListener('click', e => {
 
 function renderAssetView() {
   if (!ASSETS.length) return;
+  ensureCurrentMarketGrid();
   const asset = assetById(state.selectedAsset) || ASSETS[0];
   state.selectedAsset = asset.id;
   assetSelect.value = asset.id;
   const prices = MARKET.prices[asset.id];
   const last = prices[prices.length - 1];
-  const day = (last / prices[prices.length - 2] - 1) * 100;
+  const day = isObservedPrice(asset.id, HISTORY_DAYS - 1) && isObservedPrice(asset.id, HISTORY_DAYS - 2)
+    ? (last / prices[prices.length - 2] - 1) * 100
+    : null;
 
   $('#asset-title').textContent = asset.name;
   $('#asset-subtitle').textContent = `${asset.id} · ${asset.type}${asset.custom ? ' · geïmporteerd' : ''}`;
   $('#a-price').textContent = fmtEUR2.format(last);
   const dayEl = $('#a-day');
-  dayEl.textContent = fmtPct(day) + ' vandaag';
-  dayEl.className = 'kpi-delta ' + (day >= 0 ? 'up' : 'down');
+  dayEl.textContent = day === null ? 'dagresultaat niet beschikbaar' : fmtPct(day) + ' vandaag';
+  dayEl.className = 'kpi-delta ' + (day === null ? 'muted' : day >= 0 ? 'up' : 'down');
   const reliable = analysisAvailable(asset.id, 500);
   $('#a-vol').textContent = reliable ? (annualizedVol(prices) * 100).toFixed(1).replace('.', ',') + '%' : '—';
 
@@ -511,11 +515,11 @@ function renderAssetView() {
       series: [{ name: asset.name, color: asset.color, values: prices.slice(-histDays), fill: true, width: 2.2 }],
       yFmt: v => compactEUR(v),
     });
-    $('#forecast-note').innerHTML = `⚠️ <b>Alleen koersweergave:</b> ${historyCoverageLabel(asset.id, 500)} over de laatste 500 dagen. ML, indicatoren en signalen vereisen minimaal 90% aantoonbaar echte historie.`;
+    $('#forecast-note').innerHTML = `⚠️ <b>Alleen koersweergave:</b> ${historyCoverageLabel(asset.id, 500)} over de laatste 500 dagen. ML, indicatoren en signalen vereisen minimaal 90% bron-gedekte historie.`;
     $('#rsi-chart').innerHTML = unavailableHTML(500);
     $('#macd-chart').innerHTML = unavailableHTML(500);
     $('#a-signal').textContent = '—';
-    $('#a-signal-conf').textContent = 'onvoldoende echte historie';
+    $('#a-signal-conf').textContent = 'onvoldoende bron-gedekte historie';
     setAIStatus('analyse geblokkeerd');
     return;
   }
@@ -736,7 +740,7 @@ function renderLossChart(losses) {
 $('#btn-train').addEventListener('click', () => {
   if (labTraining) { labTraining.cancel(); labTraining = null; }
   const asset = assetById(state.selectedAsset) || ASSETS[0];
-  if (!analysisAvailable(asset.id, 500)) { toast('⚠️ Training vereist minimaal 90% echte historie over 500 dagen'); return; }
+  if (!analysisAvailable(asset.id, 500)) { toast('⚠️ Training vereist minimaal 90% bron-gedekte historie over 500 dagen'); return; }
   const prices = MARKET.prices[asset.id];
   const btn = $('#btn-train');
   btn.textContent = '⏳ Trainen…';
@@ -821,7 +825,7 @@ function runMonteCarlo() {
   const startValue = values[values.length - 1];
   const positions = computePositions(state.txs);
   if (startValue <= 0 || !portfolioAnalysisAvailable(positions, 730)) {
-    $('#mc-meta').textContent = 'onvoldoende echte historie';
+    $('#mc-meta').textContent = 'onvoldoende bron-gedekte historie';
     $('#mc-results').innerHTML = unavailableHTML(730);
     const ctx = $('#mc-canvas').getContext('2d');
     ctx.clearRect(0, 0, $('#mc-canvas').width, $('#mc-canvas').height);
@@ -973,7 +977,7 @@ function renderInsights() {
     $('#i-vol').textContent = '—';
     $('#i-sharpe').textContent = '—';
     $('#i-dd').textContent = '—';
-    $('#i-sharpe-label').textContent = 'onvoldoende echte historie';
+    $('#i-sharpe-label').textContent = 'onvoldoende bron-gedekte historie';
     $('#i-sharpe-label').className = 'kpi-delta muted';
     $('#ef-advice').innerHTML = unavailableHTML(730);
     $('#corr-heatmap').innerHTML = unavailableHTML(730);
@@ -1301,8 +1305,9 @@ function renderImportReport() {
       <div style="font-size:17px">📥</div>
       <div>
         <b>Import geslaagd</b> — ${Number(r.txCount) || 0} transacties over ${Number(r.assetCount) || 0} assets (${symbols.join(', ')}).
-        ${histMatched ? `Voor ${histMatched} asset(s) is echte koershistorie uit het bestand gebruikt. ` : ''}
+        ${histMatched ? `Voor ${histMatched} asset(s) is gedateerde bronhistorie uit het bestand gebruikt. ` : ''}
         ${synthesized ? `Voor ${synthesized} asset(s) is de historie gereconstrueerd rond transactiekoersen. Deze reeks is alleen voor visualisatie en uitgesloten van analyse.` : ''}
+        ${r.migrationWarning ? `<div class="ledger-warning">⚠️ ${escapeHTML(r.migrationWarning)} Ververs of herimporteer koershistorie voordat je analyses gebruikt.</div>` : ''}
       </div>
     </div>`;
 }
@@ -1805,8 +1810,39 @@ async function initLivePrices() {
   return runAutomaticPriceRefresh({ reason: 'startup', startup: true });
 }
 
+let marketDayTimer = null;
+function refreshMarketDayBoundary() {
+  if (!ensureCurrentMarketGrid()) return false;
+  applyLiveHistory();
+  invalidateDerived();
+  state.twr = null;
+  state.models = {};
+  const active = document.querySelector('.view.active')?.id;
+  if (active === 'view-dashboard') renderDashboard(false);
+  else if (active === 'view-asset') renderAssetView();
+  else if (active === 'view-insights') renderInsights();
+  else if (active === 'view-transactions') renderTransactions();
+  else if (active === 'view-dca') renderDca();
+  else if (active === 'view-settings') renderSettings();
+  runAlertCheck(false);
+  return true;
+}
+
+function scheduleMarketDayRollover() {
+  if (marketDayTimer) clearTimeout(marketDayTimer);
+  const now = new Date();
+  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 2, 0);
+  marketDayTimer = setTimeout(() => {
+    refreshMarketDayBoundary();
+    scheduleMarketDayRollover();
+  }, Math.max(1000, next.getTime() - now.getTime()));
+}
+
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && autoRefreshEnabled()) runAutomaticPriceRefresh({ reason: 'focus' });
+  if (!document.hidden) {
+    refreshMarketDayBoundary();
+    if (autoRefreshEnabled()) runAutomaticPriceRefresh({ reason: 'focus' });
+  }
 });
 window.addEventListener('online', () => {
   if (autoRefreshEnabled()) runAutomaticPriceRefresh({ reason: 'online' });
@@ -1815,6 +1851,7 @@ window.addEventListener('online', () => {
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
+scheduleMarketDayRollover();
 
 let resizeTimer = null;
 window.addEventListener('resize', () => {
@@ -2087,7 +2124,7 @@ $('#al-add').addEventListener('click', () => {
 try {
   loadWatchAssets();      // watch-only assets (catalogus) registreren
   state.watchlist = loadWatchlist();
-  applyLiveHistory();     // eerder opgehaalde echte koershistorie toepassen
+  applyLiveHistory();     // eerder opgehaalde gedateerde bronhistorie toepassen
   const dcaBooked = executeDuePlans(state.txs);
   if (dcaBooked.length) setTimeout(() => toast(`⟳ ${dcaBooked.length} DCA-termijn${dcaBooked.length > 1 ? 'en' : ''} geboekt`), 1200);
   rebuildAssetSelects();
@@ -2257,7 +2294,7 @@ function renderDcaPlans() {
           ${plan.active ? '' : '<span class="tag tag-paused">gepauzeerd</span>'}
         </div>
         <div class="dca-plan-sub">${fmtEUR.format(plan.amount)}/maand → ${escapeHTML(a.name)} · dag ${plan.day}<br>
-        volgende: <b>${fmtDate.format(next)}</b>${plan.mode === 'ai' ? ` · verwacht ${fmtEUR.format(plan.amount * mult)} (signaal ${mult}×)` : ''}${plan.blockedAt ? '<br><span class="pct down">wacht op echte koersdata voor een openstaande termijn</span>' : ''}</div>
+        volgende: <b>${fmtDate.format(next)}</b>${plan.mode === 'ai' ? ` · verwacht ${fmtEUR.format(plan.amount * mult)} (signaal ${mult}×)` : ''}${plan.blockedAt ? '<br><span class="pct down">wacht op een waargenomen koers voor een openstaande termijn</span>' : ''}</div>
       </div>
       <div class="dca-stat"><div class="v">${stats.runs}</div><div class="l">termijnen</div></div>
       <div class="dca-stat"><div class="v">${fmtEUR.format(stats.invested)}</div><div class="l">ingelegd</div></div>

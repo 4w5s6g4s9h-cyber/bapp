@@ -9,10 +9,11 @@
    rond de bekende transactiekoersen.
    ============================================================ */
 
-const CUSTOM_KEY = 'vermogen_custom_v1';
+const CUSTOM_KEY = 'vermogen_custom_v2';
+const LEGACY_CUSTOM_KEY = 'vermogen_custom_v1';
 const MODE_KEY = 'vermogen_mode';
-const BACKUP_SCHEMA_VERSION = 3;
-const SUPPORTED_BACKUP_SCHEMA_VERSIONS = new Set([2, BACKUP_SCHEMA_VERSION]);
+const BACKUP_SCHEMA_VERSION = 4;
+const SUPPORTED_BACKUP_SCHEMA_VERSIONS = new Set([2, 3, BACKUP_SCHEMA_VERSION]);
 const NETWORK_CONSENT_KEY = 'vermogen_network_consent_v1';
 const AUTO_REFRESH_KEY = 'vermogen_auto_refresh_v1';
 const PRICE_REFRESH_META_KEY = 'vermogen_price_refresh_meta_v1';
@@ -387,15 +388,124 @@ function historyToGrid(points) {
   return grid.some(v => v === null) ? null : grid;
 }
 
-/** Echte brondekking: directe punten en forward-fill tussen eerste/laatste bronpunt. */
-function provenanceFromPoints(points) {
-  const provenance = new Array(HISTORY_DAYS).fill(false);
-  if (!points.length) return provenance;
+/** Kwaliteit: bronpunten zijn observed; gaten ertussen zijn carried. */
+function qualityFromPoints(points) {
+  const quality = new Array(HISTORY_DAYS).fill(PRICE_QUALITY.RECONSTRUCTED);
+  if (!points.length) return quality;
   const indices = points.map(p => p.idx).filter(i => Number.isInteger(i)).sort((a, b) => a - b);
-  if (!indices.length) return provenance;
+  if (!indices.length) return quality;
+  const observed = new Set(indices);
   const first = Math.max(0, indices[0]), last = Math.min(HISTORY_DAYS - 1, indices[indices.length - 1]);
-  for (let i = first; i <= last; i++) provenance[i] = true;
-  return provenance;
+  for (let i = first; i <= last; i++) quality[i] = observed.has(i) ? PRICE_QUALITY.OBSERVED : PRICE_QUALITY.CARRIED;
+  return quality;
+}
+
+const QUALITY_TO_CODE = Object.freeze({
+  [PRICE_QUALITY.OBSERVED]: 'o',
+  [PRICE_QUALITY.CARRIED]: 'c',
+  [PRICE_QUALITY.RECONSTRUCTED]: 'r',
+});
+const CODE_TO_QUALITY = Object.freeze({ o: PRICE_QUALITY.OBSERVED, c: PRICE_QUALITY.CARRIED, r: PRICE_QUALITY.RECONSTRUCTED });
+
+function encodePriceQuality(quality) {
+  return normalizePriceQuality(quality).map(value => QUALITY_TO_CODE[value]).join('');
+}
+
+function decodePriceQuality(value) {
+  if (typeof value === 'string' && value.length === HISTORY_DAYS && /^[ocr]+$/.test(value)) {
+    return [...value].map(code => CODE_TO_QUALITY[code]);
+  }
+  if (Array.isArray(value) && value.length === HISTORY_DAYS && value.every(item => PRICE_QUALITY_VALUES.has(item))) {
+    return [...value];
+  }
+  return null;
+}
+
+function serializeMarketSeries(assetId) {
+  const prices = normalizePriceSeries(MARKET.prices[assetId]);
+  const quality = normalizePriceQuality(MARKET.quality[assetId], MARKET.provenance[assetId]);
+  if (!prices) throw new Error(`Ongeldige marktdata voor ${assetId}.`);
+  const meta = MARKET.meta[assetId] || {};
+  const quoteAt = Number(meta.quoteAt), fetchedAt = Number(meta.fetchedAt);
+  return {
+    schemaVersion: MARKET_SERIES_SCHEMA_VERSION,
+    startDate: localDateKey(MARKET.dates[0]),
+    prices: prices.map(price => +price.toPrecision(10)),
+    quality: encodePriceQuality(quality),
+    source: cleanDisplayText(meta.source || assetById(assetId)?.histSource || '', 24),
+    ...(Number.isFinite(quoteAt) && quoteAt > 0 ? { quoteAt } : {}),
+    ...(Number.isFinite(fetchedAt) && fetchedAt > 0 ? { fetchedAt } : {}),
+    anchorConfidence: meta.anchorConfidence === 'unverified' ? 'unverified' : 'verified',
+  };
+}
+
+function normalizeMarketSeriesEntry(entry, assetId) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`Backup mist gedateerde marktdata voor ${assetId}.`);
+  if (entry.schemaVersion !== MARKET_SERIES_SCHEMA_VERSION) throw new Error(`Onbekend marktdataformaat voor ${assetId}.`);
+  const startDate = localDateFromKey(entry.startDate);
+  const prices = normalizePriceSeries(entry.prices);
+  const quality = decodePriceQuality(entry.quality);
+  if (!startDate || !prices || !quality) throw new Error(`Ongeldige gedateerde marktdata voor ${assetId}.`);
+  const quoteAt = Number(entry.quoteAt), fetchedAt = Number(entry.fetchedAt);
+  const anchorConfidence = entry.anchorConfidence === 'verified' ? 'verified' : 'unverified';
+  const effectiveQuality = anchorConfidence === 'verified'
+    ? quality
+    : new Array(HISTORY_DAYS).fill(PRICE_QUALITY.RECONSTRUCTED);
+  const stored = {
+    schemaVersion: MARKET_SERIES_SCHEMA_VERSION,
+    startDate: localDateKey(startDate),
+    prices: prices.map(price => +price.toPrecision(10)),
+    quality: encodePriceQuality(effectiveQuality),
+    source: cleanDisplayText(entry.source || '', 24),
+    ...(Number.isFinite(quoteAt) && quoteAt > 0 ? { quoteAt } : {}),
+    ...(Number.isFinite(fetchedAt) && fetchedAt > 0 ? { fetchedAt } : {}),
+    anchorConfidence,
+  };
+
+  const projectedPrices = new Array(HISTORY_DAYS);
+  const projectedQuality = new Array(HISTORY_DAYS);
+  for (let i = 0; i < HISTORY_DAYS; i++) {
+    const sourceIndex = calendarDayDiff(startDate, MARKET.dates[i]);
+    if (sourceIndex >= 0 && sourceIndex < HISTORY_DAYS) {
+      projectedPrices[i] = prices[sourceIndex];
+      projectedQuality[i] = effectiveQuality[sourceIndex];
+    } else if (sourceIndex < 0) {
+      projectedPrices[i] = prices[0];
+      projectedQuality[i] = PRICE_QUALITY.RECONSTRUCTED;
+    } else {
+      projectedPrices[i] = i > 0 ? projectedPrices[i - 1] : prices[HISTORY_DAYS - 1];
+      const previous = i > 0 ? projectedQuality[i - 1] : effectiveQuality[HISTORY_DAYS - 1];
+      projectedQuality[i] = qualityIsReliable(previous) ? PRICE_QUALITY.CARRIED : PRICE_QUALITY.RECONSTRUCTED;
+    }
+  }
+  return {
+    stored,
+    prices: projectedPrices,
+    quality: projectedQuality,
+    meta: {
+      source: stored.source,
+      quoteAt: stored.quoteAt || null,
+      fetchedAt: stored.fetchedAt || null,
+      storedStartDate: stored.startDate,
+      anchorConfidence: stored.anchorConfidence,
+    },
+  };
+}
+
+/** Zet legacy positionele arrays fail-closed om naar een expliciet gedateerde reeks. */
+function legacyMarketSeries(prices, candidateEndDate, source = '') {
+  const normalized = normalizePriceSeries(prices);
+  if (!normalized) return null;
+  const candidate = new Date(candidateEndDate || '');
+  const endDate = Number.isFinite(candidate.getTime()) ? localDateKey(candidate) : localDateKey(MARKET.dates[HISTORY_DAYS - 1]);
+  return {
+    schemaVersion: MARKET_SERIES_SCHEMA_VERSION,
+    startDate: addCalendarDays(endDate, -(HISTORY_DAYS - 1)),
+    prices: normalized.map(price => +price.toPrecision(10)),
+    quality: encodePriceQuality(new Array(HISTORY_DAYS).fill(PRICE_QUALITY.RECONSTRUCTED)),
+    source: cleanDisplayText(source || 'legacy-unverified', 24),
+    anchorConfidence: 'unverified',
+  };
 }
 
 function stableTransactionId(tx, index = 0) {
@@ -511,21 +621,40 @@ function restoreBackup(root) {
   if (!SUPPORTED_BACKUP_SCHEMA_VERSIONS.has(root?.schemaVersion)) throw new Error(`Backupversie ${root?.schemaVersion ?? 'onbekend'} wordt niet ondersteund.`);
   if (!root.state) throw new Error('Backupstructuur is incompleet.');
   const state = root.state;
-  if (!Array.isArray(state.transactions) || !Array.isArray(state.assets) || typeof state.prices !== 'object') {
+  const datedMarket = root.schemaVersion === BACKUP_SCHEMA_VERSION;
+  const hasMarketState = datedMarket
+    ? state.market && typeof state.market === 'object' && !Array.isArray(state.market)
+    : state.prices && typeof state.prices === 'object' && !Array.isArray(state.prices);
+  if (!Array.isArray(state.transactions) || !Array.isArray(state.assets) || !hasMarketState) {
     throw new Error('Backupstructuur is incompleet.');
   }
   if (state.transactions.length > MAX_IMPORT_TRANSACTIONS || state.assets.length > MAX_IMPORT_ASSETS) {
     throw new Error('Backup overschrijdt de veilige importlimieten.');
   }
+  const market = {};
   const assets = state.assets.map((asset, index) => {
     const id = normalizeAssetId(asset.id);
-    const prices = normalizePriceSeries(state.prices[id]);
-    if (!id || !prices) throw new Error(`Ongeldige asset of koersreeks op positie ${index + 1}.`);
+    if (!id) throw new Error(`Ongeldige asset op positie ${index + 1}.`);
+    let entry;
+    if (datedMarket) {
+      entry = normalizeMarketSeriesEntry(state.market[id], id);
+    } else {
+      const prices = normalizePriceSeries(state.prices[id]);
+      const sourceFlags = state.provenance?.[id];
+      if (!prices || !Array.isArray(sourceFlags) || sourceFlags.length !== HISTORY_DAYS
+          || !sourceFlags.every(value => typeof value === 'boolean')) {
+        throw new Error(`Ongeldige legacy-koersreeks op positie ${index + 1}.`);
+      }
+      const legacyEntry = legacyMarketSeries(prices, root.meta?.exportedAt, asset.histSource);
+      entry = normalizeMarketSeriesEntry(legacyEntry, id);
+    }
+    market[id] = entry.stored;
     return {
       ...asset, id,
       name: cleanDisplayText(asset.name || id, 80) || id,
       color: safeColor(asset.color, CUSTOM_COLORS[index % CUSTOM_COLORS.length]),
       type: ['Crypto', 'ETF', 'Aandeel'].includes(asset.type) ? asset.type : 'Aandeel',
+      histSource: datedMarket ? cleanDisplayText(asset.histSource || entry.meta.source || 'synth', 24) : 'synth',
       custom: true,
     };
   });
@@ -538,33 +667,27 @@ function restoreBackup(root) {
   if (transactionIds.size !== transactions.length) throw new Error('Backup bevat dubbele transactie-id’s.');
   const reconciliation = normalizeBackupReconciliation(state.reconciliation, assetIds);
 
-  const prices = {}, provenance = {};
-  for (const asset of assets) {
-    prices[asset.id] = normalizePriceSeries(state.prices[asset.id]).map(p => +p.toPrecision(10));
-    const sourceFlags = state.provenance?.[asset.id];
-    if (!Array.isArray(sourceFlags) || sourceFlags.length !== HISTORY_DAYS || !sourceFlags.every(value => typeof value === 'boolean')) {
-      throw new Error(`Backup mist geldige koersherkomst voor ${asset.id}.`);
-    }
-    provenance[asset.id] = normalizeProvenance(sourceFlags);
-  }
   const report = {
     txCount: transactions.length,
     assetCount: assets.length,
     symbols: assets.map(a => a.id),
-    histMatched: assets.filter(a => a.histSource !== 'synth').length,
-    synthesized: assets.filter(a => a.histSource === 'synth').length,
+    histMatched: datedMarket ? assets.filter(a => a.histSource !== 'synth').length : 0,
+    synthesized: datedMarket ? assets.filter(a => a.histSource === 'synth').length : assets.length,
     restoredBackup: true,
     date: new Date().toISOString(),
+    ...(datedMarket ? {} : { migrationWarning: 'Legacy-koersdatums konden niet hard worden bewezen; transacties zijn behouden en koerskwaliteit is fail-closed gemarkeerd.' }),
   };
   const updates = {
-    [CUSTOM_KEY]: JSON.stringify({ schemaVersion: BACKUP_SCHEMA_VERSION, assets, prices, provenance, report }),
+    [CUSTOM_KEY]: JSON.stringify({ schemaVersion: BACKUP_SCHEMA_VERSION, assets, market, report }),
+    [LEGACY_CUSTOM_KEY]: null,
     [MODE_KEY]: 'import',
     [TX_KEY]: JSON.stringify(transactions),
     vermogen_watchlist_v1: JSON.stringify(Array.isArray(state.watchlist) ? state.watchlist.map(normalizeAssetId).filter(id => id && assetIds.has(id)) : []),
     vermogen_alerts_v1: JSON.stringify(Array.isArray(state.alerts) ? state.alerts : []),
     vermogen_dca_v1: JSON.stringify(Array.isArray(state.dcaPlans) ? state.dcaPlans : []),
     vermogen_watchassets_v1: JSON.stringify(Array.isArray(state.watchAssets) ? state.watchAssets : []),
-    vermogen_livehist_v1: JSON.stringify(state.liveHistory && typeof state.liveHistory === 'object' ? state.liveHistory : {}),
+    [LIVEHIST_KEY]: datedMarket ? JSON.stringify(state.liveHistory && typeof state.liveHistory === 'object' ? state.liveHistory : {}) : null,
+    [LEGACY_LIVEHIST_KEY]: datedMarket ? null : JSON.stringify(state.liveHistory && typeof state.liveHistory === 'object' ? state.liveHistory : {}),
     vermogen_yahoo_v1: JSON.stringify(state.yahooMap && typeof state.yahooMap === 'object' ? state.yahooMap : {}),
     [RECONCILIATION_KEY]: reconciliation ? JSON.stringify(reconciliation) : null,
     [NETWORK_CONSENT_KEY]: 'no',
@@ -599,7 +722,7 @@ function importPortfolioJSON(jsonText) {
 
   const symbols = [...new Set(txs.map(t => t.asset).filter(Boolean))];
   if (symbols.length > MAX_IMPORT_ASSETS) return { ok: false, error: `Te veel assets; maximum is ${MAX_IMPORT_ASSETS}.` };
-  const customAssets = [], customPrices = {}, customProvenance = {};
+  const customAssets = [], customMarket = {};
   let histMatched = 0, synthesized = 0;
   const snapshotIdx = Math.max(...txs.map(t => dateToIndex(t.date)));
 
@@ -612,12 +735,12 @@ function importPortfolioJSON(jsonText) {
     const color = existing ? safeColor(existing.color) : CUSTOM_COLORS[i % CUSTOM_COLORS.length];
 
     let grid = null;
-    let provenance = new Array(HISTORY_DAYS).fill(false);
+    let quality = new Array(HISTORY_DAYS).fill(PRICE_QUALITY.RECONSTRUCTED);
     const histKey = Object.keys(histories).find(k => k === sym || k.startsWith(sym) || sym.startsWith(k));
     if (histKey && histories[histKey].length >= 20) {
       grid = historyToGrid(histories[histKey]);
       if (grid) {
-        provenance = provenanceFromPoints(histories[histKey]);
+        quality = qualityFromPoints(histories[histKey]);
         histMatched++;
       }
     }
@@ -635,17 +758,17 @@ function importPortfolioJSON(jsonText) {
     }
 
     const metadata = symTxs.find(t => t.isin || t.currency || t.venue || t.quoteSymbol) || {};
-    const histSource = provenance.some(Boolean) ? 'import' : 'synth';
+    const provenance = quality.map(qualityIsReliable);
+    const histSource = quality.some(value => value === PRICE_QUALITY.OBSERVED) ? 'import' : 'synth';
     const asset = {
       ...(existing || {}), id: sym, name, type, start: grid[0], drift: 0.08,
       vol: volForType(type), seed: existing?.seed || 1, color, custom: true, histSource,
       isin: metadata.isin || existing?.isin || '', currency: metadata.assetCurrency || existing?.currency || 'EUR',
       venue: metadata.venue || existing?.venue || '', yahoo: metadata.quoteSymbol || existing?.yahoo || '',
     };
-    registerAsset(asset, grid, provenance);
+    registerAsset(asset, grid, provenance, quality, { source: histSource, fetchedAt: Date.now() });
     customAssets.push({ ...assetById(sym) });
-    customPrices[sym] = grid.map(p => +p.toPrecision(10));
-    customProvenance[sym] = provenance;
+    customMarket[sym] = serializeMarketSeries(sym);
   }
 
   const usedTransactionIds = new Set();
@@ -669,7 +792,8 @@ function importPortfolioJSON(jsonText) {
   };
   try {
     commitStorage({
-      [CUSTOM_KEY]: JSON.stringify({ schemaVersion: BACKUP_SCHEMA_VERSION, assets: customAssets, prices: customPrices, provenance: customProvenance, report }),
+      [CUSTOM_KEY]: JSON.stringify({ schemaVersion: BACKUP_SCHEMA_VERSION, assets: customAssets, market: customMarket, report }),
+      [LEGACY_CUSTOM_KEY]: null,
       [MODE_KEY]: 'import',
       [TX_KEY]: JSON.stringify(cleanTxs),
       [LEGACY_TX_KEY]: null,
@@ -685,17 +809,39 @@ function importPortfolioJSON(jsonText) {
 function loadCustomData() {
   if (localStorage.getItem(MODE_KEY) !== 'import') return null;
   try {
-    const data = JSON.parse(localStorage.getItem(CUSTOM_KEY));
-    if (!data || typeof data.prices !== 'object') return null;
+    const currentRaw = localStorage.getItem(CUSTOM_KEY);
+    const legacyRaw = currentRaw ? null : localStorage.getItem(LEGACY_CUSTOM_KEY);
+    const data = JSON.parse(currentRaw || legacyRaw);
+    if (!data || typeof data !== 'object') return null;
+    const dated = data.schemaVersion === BACKUP_SCHEMA_VERSION && data.market && typeof data.market === 'object';
+    const legacy = !dated && data.prices && typeof data.prices === 'object';
+    if (!dated && !legacy) return null;
     const definitions = new Map((data.assets || []).map(asset => [normalizeAssetId(asset.id), asset]));
-    for (const [rawId, prices] of Object.entries(data.prices)) {
+    const sourceEntries = dated ? data.market : data.prices;
+    const migratedMarket = {};
+    for (const [rawId, rawSeries] of Object.entries(sourceEntries)) {
       const id = normalizeAssetId(rawId);
       if (!id) continue;
+      const parsed = dated
+        ? normalizeMarketSeriesEntry(rawSeries, id)
+        : normalizeMarketSeriesEntry(legacyMarketSeries(rawSeries, data.report?.date, definitions.get(id)?.histSource), id);
       const asset = definitions.get(id) || {
         id, name: id, type: guessType(id, id), color: CUSTOM_COLORS[ASSETS.length % CUSTOM_COLORS.length],
-        custom: true, histSource: data.provenance?.[id]?.some(Boolean) ? 'import' : 'synth',
+        custom: true, histSource: dated && parsed.quality.some(value => value === PRICE_QUALITY.OBSERVED) ? 'import' : 'synth',
       };
-      registerAsset(asset, prices, data.provenance?.[id]);
+      if (!dated) asset.histSource = 'synth';
+      registerAsset(asset, parsed.prices, parsed.quality.map(qualityIsReliable), parsed.quality, parsed.meta);
+      migratedMarket[id] = parsed.stored;
+    }
+    if (legacy) {
+      const report = {
+        ...(data.report || {}),
+        migrationWarning: 'Legacy-koersdatums konden niet hard worden bewezen; transacties zijn behouden, koerskwaliteit is fail-closed gemarkeerd en de oude opslag blijft lokaal als rollbackkopie staan.',
+      };
+      commitStorage({
+        [CUSTOM_KEY]: JSON.stringify({ schemaVersion: BACKUP_SCHEMA_VERSION, assets: ASSETS.filter(asset => asset.custom).map(asset => ({ ...asset })), market: migratedMarket, report }),
+      });
+      return report;
     }
     return data.report || null;
   } catch (e) {
@@ -735,6 +881,7 @@ function cryptoPriceTargets() {
 
 async function fetchLivePrices() {
   if (!networkConsentEnabled()) return null;
+  ensureCurrentMarketGrid();
   const wanted = cryptoPriceTargets();
   if (!wanted.length) return null;
   const ids = [...new Set(wanted.map(target => target.cgId))].join(',');
@@ -760,33 +907,31 @@ async function fetchLivePrices() {
       if (!Number.isFinite(eur) || eur <= 0 || eur >= 1e12) continue;
       const providerAt = Number(data[cgId]?.last_updated_at) * 1000;
       const quoteAt = Number.isFinite(providerAt) && providerAt > 0 && providerAt <= now + 5 * 60 * 1000 ? providerAt : now;
+      const quoteDate = localDateKey(new Date(quoteAt));
       const current = store[asset.id] && typeof store[asset.id] === 'object' ? store[asset.id] : {};
       const spotOnly = current.spotOnly === true || !Array.isArray(current.points) || current.points.length <= 1;
       const compact = new Map((Array.isArray(current.points) ? current.points : [])
-        .filter(point => Array.isArray(point) && Number.isInteger(Number(point[0]))
-          && Number(point[0]) >= 0 && Number(point[0]) < HISTORY_DAYS
+        .filter(point => Array.isArray(point) && localDateFromKey(point[0])
           && Number.isFinite(Number(point[1])) && Number(point[1]) > 0)
-        .map(([idx, price]) => [Number(idx), Number(price)]));
-      compact.set(HISTORY_DAYS - 1, +eur.toPrecision(10));
+        .map(([date, price]) => [localDateKey(localDateFromKey(date)), Number(price)]));
+      compact.set(quoteDate, +eur.toPrecision(10));
       store[asset.id] = {
         ...current,
         at: now,
         quoteAt,
-        points: [...compact.entries()].sort((a, b) => a[0] - b[0]).slice(-2000),
+        points: [...compact.entries()].sort((a, b) => a[0].localeCompare(b[0])).slice(-2000),
         src: 'coingecko',
         cg: cgId,
+        verified: true,
         ...(spotOnly ? { spotOnly: true } : {}),
       };
-      pending.push({ asset, cgId, eur });
+      pending.push({ asset, cgId, eur, quoteAt, quoteDate, now });
     }
     if (!pending.length) return null;
     commitStorage({ [LIVEHIST_KEY]: JSON.stringify(store) });
-    for (const { asset, cgId, eur } of pending) {
+    for (const { asset, cgId, eur, quoteAt, quoteDate, now: fetchedAt } of pending) {
       asset.cg = cgId;
-      // Alleen "vandaag" bijwerken; de historie blijft intact.
-      MARKET.prices[asset.id][HISTORY_DAYS - 1] = eur;
-      if (!MARKET.provenance[asset.id]) MARKET.provenance[asset.id] = new Array(HISTORY_DAYS).fill(false);
-      MARKET.provenance[asset.id][HISTORY_DAYS - 1] = true;
+      applyObservedSpot(asset.id, quoteDate, eur, { source: 'coingecko', quoteAt, fetchedAt });
     }
     return pending.map(item => item.asset.id);
   } catch (e) {
@@ -797,23 +942,93 @@ async function fetchLivePrices() {
 }
 
 /* ============================================================
-   Echte koershistorie (CoinGecko, maximaal 1.095 dagen) + export
+   Gedateerde koershistorie (CoinGecko, maximaal 1.095 dagen) + export
    ============================================================ */
-const LIVEHIST_KEY = 'vermogen_livehist_v1';
+const LIVEHIST_KEY = 'vermogen_livehist_v2';
+const LEGACY_LIVEHIST_KEY = 'vermogen_livehist_v1';
 
-function loadLiveHistory() {
-  try { return JSON.parse(localStorage.getItem(LIVEHIST_KEY)) || {}; }
-  catch (e) { return {}; }
+function normalizeLiveHistoryStore(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const clean = {};
+  for (const [rawId, rawEntry] of Object.entries(raw).slice(0, MAX_IMPORT_ASSETS)) {
+    const id = normalizeAssetId(rawId);
+    if (!id || !rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) continue;
+    const points = new Map();
+    for (const point of Array.isArray(rawEntry.points) ? rawEntry.points.slice(0, 2500) : []) {
+      const date = localDateFromKey(point?.[0]), price = Number(point?.[1]);
+      if (!date || !Number.isFinite(price) || price <= 0 || price >= 1e12) continue;
+      points.set(localDateKey(date), +price.toPrecision(10));
+    }
+    if (!points.size) continue;
+    const at = Number(rawEntry.at), quoteAt = Number(rawEntry.quoteAt);
+    clean[id] = {
+      at: Number.isFinite(at) && at > 0 ? at : 0,
+      quoteAt: Number.isFinite(quoteAt) && quoteAt > 0 ? quoteAt : 0,
+      points: [...points.entries()].sort((a, b) => a[0].localeCompare(b[0])).slice(-2000),
+      src: cleanDisplayText(rawEntry.src || '', 24),
+      ...(normalizeCoinGeckoId(rawEntry.cg) ? { cg: normalizeCoinGeckoId(rawEntry.cg) } : {}),
+      ...(rawEntry.verified === false ? { verified: false } : {}),
+      ...(rawEntry.spotOnly === true ? { spotOnly: true } : {}),
+    };
+  }
+  return clean;
 }
 
-/** Voegt echte dagkoersen samen met de bestaande reeks (echt venster wint;
+function migrateLegacyLiveHistory(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const migrated = {};
+  for (const [rawId, entry] of Object.entries(raw).slice(0, MAX_IMPORT_ASSETS)) {
+    const id = normalizeAssetId(rawId);
+    if (!id || !entry || typeof entry !== 'object' || !Array.isArray(entry.points)) continue;
+    const legacyPoints = entry.points
+      .map(point => [Number(point?.[0]), Number(point?.[1])])
+      .filter(([index, price]) => Number.isInteger(index) && index >= 0 && index < HISTORY_DAYS
+        && Number.isFinite(price) && price > 0 && price < 1e12);
+    if (!legacyPoints.length) continue;
+    const maxIndex = Math.max(...legacyPoints.map(([index]) => index));
+    const quoteAt = Number(entry.quoteAt), fetchedAt = Number(entry.at);
+    const hasQuoteAnchor = Number.isFinite(quoteAt) && quoteAt > 0;
+    const anchorTimestamp = hasQuoteAnchor ? quoteAt : fetchedAt;
+    const anchorDate = localDateKey(new Date(anchorTimestamp));
+    if (!anchorDate) continue;
+    const points = legacyPoints.map(([index, price]) => [addCalendarDays(anchorDate, index - maxIndex), +price.toPrecision(10)]);
+    migrated[id] = {
+      at: Number.isFinite(fetchedAt) && fetchedAt > 0 ? fetchedAt : 0,
+      quoteAt: hasQuoteAnchor ? quoteAt : 0,
+      points,
+      src: cleanDisplayText(entry.src || '', 24),
+      ...(normalizeCoinGeckoId(entry.cg) ? { cg: normalizeCoinGeckoId(entry.cg) } : {}),
+      ...(hasQuoteAnchor ? {} : { verified: false }),
+      ...(entry.spotOnly === true ? { spotOnly: true } : {}),
+    };
+  }
+  return normalizeLiveHistoryStore(migrated);
+}
+
+function loadLiveHistory() {
+  try {
+    const current = localStorage.getItem(LIVEHIST_KEY);
+    if (current) return normalizeLiveHistoryStore(JSON.parse(current));
+    const legacy = localStorage.getItem(LEGACY_LIVEHIST_KEY);
+    if (!legacy) return {};
+    const migrated = migrateLegacyLiveHistory(JSON.parse(legacy));
+    // De legacybron blijft als lokale rollbackkopie staan totdat de gebruiker
+    // bewust nieuwe data importeert of alles wist.
+    commitStorage({ [LIVEHIST_KEY]: JSON.stringify(migrated) });
+    return migrated;
+  } catch (e) { return {}; }
+}
+
+/** Voegt gedateerde bronkoersen samen met de bestaande reeks (bronvenster wint;
     het stuk ervóór wordt geschaald zodat er geen sprong op de naad zit). */
-function mergeRealHistory(assetId, points) {
+function mergeRealHistory(assetId, points, { verified = true, source = '', quoteAt = null, fetchedAt = null } = {}) {
   const series = MARKET.prices[assetId];
   if (!series || !points.length) return false;
   const byIdx = new Map();
   for (const [ts, price] of points) {
-    const idx = dateToIndex(new Date(ts).toISOString());
+    const pointDate = typeof ts === 'string' && localDateFromKey(ts) ? localDateFromKey(ts) : (ts instanceof Date ? ts : new Date(ts));
+    const idx = dateToIndexUnclamped(pointDate);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= HISTORY_DAYS) continue;
     byIdx.set(idx, price); // laatste waarde per dag wint
   }
   const idxs = [...byIdx.keys()].sort((a, b) => a - b);
@@ -824,16 +1039,58 @@ function mergeRealHistory(assetId, points) {
   if (isFinite(ratio) && ratio > 0) {
     for (let i = 0; i < first; i++) series[i] *= ratio;
   }
-  // echt venster invullen (gaten forward-fillen)
+  if (!MARKET.quality[assetId]) MARKET.quality[assetId] = new Array(HISTORY_DAYS).fill(PRICE_QUALITY.RECONSTRUCTED);
+  // Bronvenster invullen: directe punten observed, gaten carried. Een
+  // legacyreeks zonder betrouwbaar anker blijft volledig reconstructed.
   let cur = byIdx.get(first);
   for (let i = first; i <= last; i++) {
     if (byIdx.has(i)) cur = byIdx.get(i);
     series[i] = cur;
+    MARKET.quality[assetId][i] = verified
+      ? (byIdx.has(i) ? PRICE_QUALITY.OBSERVED : PRICE_QUALITY.CARRIED)
+      : PRICE_QUALITY.RECONSTRUCTED;
   }
-  // na het venster (zeldzaam): doortrekken naar de laatste echte koers
-  for (let i = last + 1; i < HISTORY_DAYS; i++) series[i] = cur;
-  if (!MARKET.provenance[assetId]) MARKET.provenance[assetId] = new Array(HISTORY_DAYS).fill(false);
-  for (let i = first; i <= last; i++) MARKET.provenance[assetId][i] = true;
+  // Na het venster doortrekken, maar niet als nieuwe waarneming markeren.
+  for (let i = last + 1; i < HISTORY_DAYS; i++) {
+    series[i] = cur;
+    MARKET.quality[assetId][i] = verified ? PRICE_QUALITY.CARRIED : PRICE_QUALITY.RECONSTRUCTED;
+  }
+  MARKET.provenance[assetId] = MARKET.quality[assetId].map(qualityIsReliable);
+  MARKET.meta[assetId] = {
+    ...(MARKET.meta[assetId] || {}),
+    source: cleanDisplayText(source || MARKET.meta[assetId]?.source || '', 24),
+    quoteAt: Number.isFinite(Number(quoteAt)) ? Number(quoteAt) : MARKET.meta[assetId]?.quoteAt || null,
+    fetchedAt: Number.isFinite(Number(fetchedAt)) ? Number(fetchedAt) : MARKET.meta[assetId]?.fetchedAt || null,
+    gridStartDate: localDateKey(MARKET.dates[0]),
+    gridEndDate: localDateKey(MARKET.dates[HISTORY_DAYS - 1]),
+  };
+  return true;
+}
+
+function applyObservedSpot(assetId, dateValue, price, { verified = true, source = '', quoteAt = null, fetchedAt = null } = {}) {
+  const series = MARKET.prices[assetId];
+  const pointDate = typeof dateValue === 'string' && localDateFromKey(dateValue)
+    ? localDateFromKey(dateValue)
+    : new Date(dateValue);
+  const idx = dateToIndexUnclamped(pointDate);
+  const value = Number(price);
+  if (!series || !Number.isInteger(idx) || idx < 0 || idx >= HISTORY_DAYS || !Number.isFinite(value) || value <= 0) return false;
+  if (!MARKET.quality[assetId]) MARKET.quality[assetId] = new Array(HISTORY_DAYS).fill(PRICE_QUALITY.RECONSTRUCTED);
+  series[idx] = value;
+  MARKET.quality[assetId][idx] = verified ? PRICE_QUALITY.OBSERVED : PRICE_QUALITY.RECONSTRUCTED;
+  for (let i = idx + 1; i < HISTORY_DAYS; i++) {
+    series[i] = value;
+    MARKET.quality[assetId][i] = verified ? PRICE_QUALITY.CARRIED : PRICE_QUALITY.RECONSTRUCTED;
+  }
+  MARKET.provenance[assetId] = MARKET.quality[assetId].map(qualityIsReliable);
+  MARKET.meta[assetId] = {
+    ...(MARKET.meta[assetId] || {}),
+    source: cleanDisplayText(source || MARKET.meta[assetId]?.source || '', 24),
+    quoteAt: Number.isFinite(Number(quoteAt)) ? Number(quoteAt) : MARKET.meta[assetId]?.quoteAt || null,
+    fetchedAt: Number.isFinite(Number(fetchedAt)) ? Number(fetchedAt) : MARKET.meta[assetId]?.fetchedAt || null,
+    gridStartDate: localDateKey(MARKET.dates[0]),
+    gridEndDate: localDateKey(MARKET.dates[HISTORY_DAYS - 1]),
+  };
   return true;
 }
 
@@ -843,6 +1100,7 @@ function mergeRealHistory(assetId, points) {
  */
 async function fetchLiveHistory(onProgress) {
   if (!networkConsentEnabled()) return { ok: false, error: 'Externe koersdata staat uit.', updated: [] };
+  ensureCurrentMarketGrid();
   const wanted = cryptoPriceTargets();
   if (!wanted.length) return { ok: false, error: 'Geen crypto-assets met een bekende CoinGecko-koppeling.' };
   const store = loadLiveHistory();
@@ -862,10 +1120,10 @@ async function fetchLiveHistory(onProgress) {
       if (!res.ok) continue;
       const data = await res.json();
       if (Array.isArray(data.prices) && data.prices.length > 30 && data.prices.length <= 2000) {
-        // compact opslaan: [dagindex, koers]
+        // Compact en datumvast opslaan: [lokale ISO-datum, koers].
         const compact = data.prices
           .filter(point => Array.isArray(point) && Number.isFinite(Number(point[0])) && Number.isFinite(Number(point[1])) && Number(point[1]) > 0)
-          .map(([ts, p]) => [dateToIndex(new Date(Number(ts)).toISOString()), +Number(p).toPrecision(6)]);
+          .map(([ts, p]) => [localDateKey(new Date(Number(ts))), +Number(p).toPrecision(6)]);
         const dedup = new Map(compact);
         if (dedup.size > 30) {
           const sourceAt = Math.max(...data.prices.map(point => Number(point?.[0])).filter(Number.isFinite));
@@ -875,6 +1133,7 @@ async function fetchLiveHistory(onProgress) {
             points: [...dedup.entries()],
             src: 'coingecko',
             cg: cgId,
+            verified: true,
           };
           a.cg = cgId;
           updated.push(a.id);
@@ -891,35 +1150,42 @@ async function fetchLiveHistory(onProgress) {
   return { ok: updated.length > 0, updated };
 }
 
-/** Past opgeslagen echte historie toe op de reeksen in het geheugen. */
+/** Past opgeslagen gedateerde bronhistorie toe op de reeksen in het geheugen. */
 function applyLiveHistory() {
+  ensureCurrentMarketGrid();
   const store = loadLiveHistory();
   for (const [id, entry] of Object.entries(store)) {
     if (!MARKET.prices[id] || !entry || !Array.isArray(entry.points)) continue;
     if (entry.spotOnly === true) {
       for (const point of entry.points.slice(-10)) {
-        const idx = Number(point?.[0]), price = Number(point?.[1]);
-        if (!Number.isInteger(idx) || idx < 0 || idx >= HISTORY_DAYS || !Number.isFinite(price) || price <= 0) continue;
-        MARKET.prices[id][idx] = price;
-        if (!MARKET.provenance[id]) MARKET.provenance[id] = new Array(HISTORY_DAYS).fill(false);
-        MARKET.provenance[id][idx] = true;
+        applyObservedSpot(id, point?.[0], point?.[1], {
+          verified: entry.verified !== false,
+          source: entry.src,
+          quoteAt: entry.quoteAt,
+          fetchedAt: entry.at,
+        });
       }
       const asset = assetById(id);
       if (asset) {
         if (asset.type === 'Crypto' && entry.cg) asset.cg = normalizeCoinGeckoId(entry.cg) || asset.cg;
-        if (asset.histSource === 'synth') asset.histSource = 'live';
+        if (asset.histSource === 'synth' && entry.verified !== false) asset.histSource = 'live';
       }
       continue;
     }
     const points = entry.points
-      .filter(point => Array.isArray(point) && Number.isInteger(Number(point[0])) && Number.isFinite(Number(point[1])) && Number(point[1]) > 0)
+      .filter(point => Array.isArray(point) && localDateFromKey(point[0]) && Number.isFinite(Number(point[1])) && Number(point[1]) > 0)
       .slice(0, 2000)
-      .map(([idx, p]) => [MARKET.dates[Math.max(0, Math.min(HISTORY_DAYS - 1, Number(idx)))].getTime(), Number(p)]);
+      .map(([date, price]) => [localDateKey(localDateFromKey(date)), Number(price)]);
     if (!points.length) continue;
-    mergeRealHistory(id, points);
+    mergeRealHistory(id, points, {
+      verified: entry.verified !== false,
+      source: entry.src,
+      quoteAt: entry.quoteAt,
+      fetchedAt: entry.at,
+    });
     const a = assetById(id);
     if (a) {
-      a.histSource = ['yahoo', 'alpha'].includes(entry.src) ? entry.src : 'live';
+      if (entry.verified !== false) a.histSource = ['yahoo', 'alpha'].includes(entry.src) ? entry.src : 'live';
       if (a.type === 'Crypto' && entry.cg) a.cg = normalizeCoinGeckoId(entry.cg) || a.cg;
     }
   }
@@ -928,12 +1194,14 @@ function applyLiveHistory() {
 /** Status van de koershistorie per asset (voor de instellingen-pagina). */
 function historyStatus(asset) {
   const coverage = marketCoverage(asset.id);
-  const pct = Math.round(coverage * 100);
-  if (asset.histSource === 'live') return { label: `CoinGecko · ${pct}% echt`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
-  if (asset.histSource === 'yahoo') return { label: `Yahoo · ${pct}% echt`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
-  if (asset.histSource === 'alpha') return { label: `Alpha Vantage · ${pct}% echt`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
-  if (asset.histSource === 'import') return { label: `import · ${pct}% echt`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
-  return { label: `gereconstrueerd · ${pct}% echt`, cls: 'muted' };
+  const covered = Math.round(coverage * 100);
+  const observed = Math.round(observedCoverage(asset.id) * 100);
+  const suffix = `${covered}% gedekt · ${observed}% waargenomen`;
+  if (asset.histSource === 'live') return { label: `CoinGecko · ${suffix}`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
+  if (asset.histSource === 'yahoo') return { label: `Yahoo · ${suffix}`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
+  if (asset.histSource === 'alpha') return { label: `Alpha Vantage · ${suffix}`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
+  if (asset.histSource === 'import') return { label: `import · ${suffix}`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
+  return { label: `gereconstrueerd · ${suffix}`, cls: 'muted' };
 }
 
 /** Oudste aandelen/ETF's eerst, begrensd om gratis providerquota te sparen. */
@@ -952,17 +1220,20 @@ function autoStockRefreshIds(now = Date.now(), limit = AUTO_STOCK_BATCH_SIZE) {
 
 /** Exporteert alle data als downloadbare JSON (zelfde formaat als import). */
 function exportBackup(txs) {
+  ensureCurrentMarketGrid();
   const assets = ASSETS.map(a => ({ ...a }));
-  const prices = Object.fromEntries(ASSETS.map(a => [a.id, MARKET.prices[a.id].map(p => +p.toPrecision(10))]));
-  const provenance = Object.fromEntries(ASSETS.map(a => [a.id, normalizeProvenance(MARKET.provenance[a.id])]));
+  const market = Object.fromEntries(ASSETS.map(a => [a.id, serializeMarketSeries(a.id)]));
   const payload = {
     schemaVersion: BACKUP_SCHEMA_VERSION,
-    meta: { app: 'Vermogen', kind: 'vermogen-backup', exportedAt: new Date().toISOString(), note: 'Volledige lokale backup' },
+    meta: {
+      app: 'Vermogen', kind: 'vermogen-backup', exportedAt: new Date().toISOString(),
+      gridStartDate: localDateKey(MARKET.dates[0]), gridEndDate: localDateKey(MARKET.dates[HISTORY_DAYS - 1]),
+      note: 'Volledige lokale backup',
+    },
     state: {
       transactions: txs,
       assets,
-      prices,
-      provenance,
+      market,
       watchlist: JSON.parse(localStorage.getItem('vermogen_watchlist_v1') || '[]'),
       alerts: loadAlerts().map(({ value, triggered, ...rule }) => rule),
       dcaPlans: JSON.parse(localStorage.getItem('vermogen_dca_v1') || '[]'),
@@ -1151,7 +1422,7 @@ async function fetchAlphaVantageChart(symbol) {
 }
 
 /**
- * Haalt echte historie op voor aandelen/ETF's — beste-effort:
+ * Haalt gedateerde bronhistorie op voor aandelen/ETF's — beste-effort:
  * gebruikt met sleutel eerst Alpha Vantage en probeert anders Yahoo-beurzen.
  */
 async function fetchStockHistory(onProgress, assetIds = null) {
@@ -1161,6 +1432,7 @@ async function fetchStockHistory(onProgress, assetIds = null) {
   const wanted = ASSETS.filter(a => a.type !== 'Crypto' && (!selected || selected.has(a.id)));
   if (!networkConsentEnabled()) return { ok: false, updated: [], failed: wanted.map(a => a.id), error: 'Externe koersdata staat uit.' };
   if (!wanted.length) return { ok: false, updated: [], failed: [] };
+  ensureCurrentMarketGrid();
   let symMap;
   try { symMap = JSON.parse(localStorage.getItem(YAHOO_MAP_KEY)) || {}; } catch (e) { symMap = {}; }
   const store = loadLiveHistory();
@@ -1195,12 +1467,13 @@ async function fetchStockHistory(onProgress, assetIds = null) {
       if (!fx) { failed.push(a.id); continue; }
       points = points.map(([ts, p]) => [ts, p * fx[dateToIndex(new Date(ts).toISOString())]]);
     }
-    const compact = new Map(points.map(([ts, p]) => [dateToIndex(new Date(ts).toISOString()), +p.toPrecision(6)]));
+    const compact = new Map(points.map(([ts, p]) => [localDateKey(new Date(ts)), +p.toPrecision(6)]));
     store[a.id] = {
       at: Date.now(),
       quoteAt: Number.isFinite(sourceAt) ? sourceAt : Date.now(),
       points: [...compact.entries()],
       src: got.source || 'yahoo',
+      verified: true,
     };
     updated.push(a.id);
     await new Promise(r => setTimeout(r, got.source === 'alpha' ? 1100 : 400));

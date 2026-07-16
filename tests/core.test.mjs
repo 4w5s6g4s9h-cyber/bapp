@@ -209,3 +209,36 @@ test('DCA-signaal kijkt niet voorbij het historische inlegmoment', () => {
   })()`);
   assert.equal(values[0], values[1]);
 });
+
+test('DCA op een weekend wacht op de eerste werkelijk waargenomen handelsdag', () => {
+  const rt = createRuntime(['js/data.js', 'js/ml.js', 'js/dca.js'], { now: '2026-07-14T12:00:00+02:00' });
+  const result = rt.evaluate(`(() => {
+    const prices = new Array(HISTORY_DAYS).fill(90);
+    const quality = new Array(HISTORY_DAYS).fill(PRICE_QUALITY.RECONSTRUCTED);
+    const set = (date, price, state) => {
+      const index = dateToIndexUnclamped(localDateFromKey(date));
+      prices[index] = price;
+      quality[index] = state;
+    };
+    set('2026-07-10', 100, PRICE_QUALITY.OBSERVED);
+    set('2026-07-11', 100, PRICE_QUALITY.CARRIED);
+    set('2026-07-12', 100, PRICE_QUALITY.CARRIED);
+    set('2026-07-13', 110, PRICE_QUALITY.OBSERVED);
+    registerAsset({ id: 'WKDCA', name: 'Weekend DCA', type: 'ETF' }, prices, quality.map(qualityIsReliable), quality);
+    saveDcaPlans([{
+      id: 'weekend', name: 'Weekendplan', asset: 'WKDCA', amount: 110, day: 11,
+      mode: 'fixed', active: true, createdAt: '2026-06-01T12:00:00.000Z', lastRun: '2026-06-11T12:00:00.000Z',
+    }]);
+    const txs = [];
+    const created = executeDuePlans(txs);
+    return {
+      count: created.length,
+      executionDate: created[0] ? localDateKey(new Date(created[0].date)) : null,
+      price: created[0]?.price,
+      weekendObserved: isObservedPrice('WKDCA', dateToIndexUnclamped(localDateFromKey('2026-07-11'))),
+    };
+  })()`);
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), {
+    count: 1, executionDate: '2026-07-13', price: 110, weekendObserved: false,
+  });
+});

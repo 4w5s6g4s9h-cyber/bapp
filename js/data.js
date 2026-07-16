@@ -3,8 +3,9 @@
 
    Het datumgrid bevat kalenderdagen. Daarom annualiseren alle
    afgeleide statistieken met CALENDAR_DAYS_PER_YEAR. Per koerspunt
-   wordt daarnaast provenance bijgehouden: alleen aantoonbaar echte
-   historie mag financiële analyses en signalen voeden.
+   wordt daarnaast kwaliteit bijgehouden: waargenomen marktdata,
+   een doorgetrokken kalenderdag, of gereconstrueerde data. De
+   legacy-provenance-array blijft als afgeleide compatibiliteitslaag.
    ============================================================ */
 
 // ---------- Seeded RNG ----------
@@ -38,13 +39,52 @@ function gaussianFactory(rng) {
 const HISTORY_DAYS = 1095; // ~3 jaar datumgrid
 const CALENDAR_DAYS_PER_YEAR = 365;
 const ANALYSIS_MIN_COVERAGE = 0.90;
+const MARKET_SERIES_SCHEMA_VERSION = 2;
+const PRICE_QUALITY = Object.freeze({
+  OBSERVED: 'observed',
+  CARRIED: 'carried',
+  RECONSTRUCTED: 'reconstructed',
+});
+const PRICE_QUALITY_VALUES = new Set(Object.values(PRICE_QUALITY));
 
 const ASSETS = [];
 
-// ---------- Datums (kalenderdagen, eindigend vandaag) ----------
-function generateDates() {
+// ---------- Datums (lokale kalenderdagen, eindigend vandaag) ----------
+function localDateKey(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) return '';
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function localDateFromKey(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))) return null;
+  const [year, month, day] = String(value).split('-').map(Number);
+  const date = new Date(year, month - 1, day, 12, 0, 0, 0);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day ? date : null;
+}
+
+function calendarDayNumber(value) {
+  const date = value instanceof Date ? value : localDateFromKey(value) || new Date(value);
+  if (!Number.isFinite(date.getTime())) return NaN;
+  return Math.trunc(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86400000);
+}
+
+function calendarDayDiff(from, to) {
+  const start = calendarDayNumber(from), end = calendarDayNumber(to);
+  return Number.isFinite(start) && Number.isFinite(end) ? end - start : NaN;
+}
+
+function addCalendarDays(dayKey, amount) {
+  const date = localDateFromKey(dayKey);
+  if (!date || !Number.isInteger(Number(amount))) return '';
+  date.setDate(date.getDate() + Number(amount));
+  return localDateKey(date);
+}
+
+function generateDates(endDate = new Date()) {
   const dates = new Array(HISTORY_DAYS);
-  const today = new Date();
+  const today = new Date(endDate);
+  if (!Number.isFinite(today.getTime())) throw new Error('Ongeldige einddatum voor marktgrid.');
   today.setHours(12, 0, 0, 0);
   for (let i = 0; i < HISTORY_DAYS; i++) {
     const d = new Date(today);
@@ -54,7 +94,7 @@ function generateDates() {
   return dates;
 }
 
-const MARKET = { dates: generateDates(), prices: {}, provenance: {} };
+const MARKET = { dates: generateDates(), prices: {}, quality: {}, provenance: {}, meta: {} };
 
 // Kleuren voor geïmporteerde assets
 const CUSTOM_COLORS = ['#f472b6', '#4ade80', '#38bdf8', '#facc15', '#c084fc', '#fb923c', '#2dd4bf', '#a3e635', '#f87171', '#818cf8', '#e879f9', '#fde047'];
@@ -114,8 +154,21 @@ function normalizeProvenance(provenance, fallback = false) {
   return provenance.map(value => value === true);
 }
 
-/** Registreert of actualiseert een asset inclusief koersprovenance. */
-function registerAsset(asset, prices, provenance = null) {
+function normalizePriceQuality(quality, provenance = null) {
+  if (Array.isArray(quality) && quality.length === HISTORY_DAYS
+      && quality.every(value => PRICE_QUALITY_VALUES.has(value))) {
+    return [...quality];
+  }
+  return normalizeProvenance(provenance, false)
+    .map(value => value ? PRICE_QUALITY.OBSERVED : PRICE_QUALITY.RECONSTRUCTED);
+}
+
+function qualityIsReliable(value) {
+  return value === PRICE_QUALITY.OBSERVED || value === PRICE_QUALITY.CARRIED;
+}
+
+/** Registreert of actualiseert een asset inclusief koerskwaliteit. */
+function registerAsset(asset, prices, provenance = null, quality = null, marketMeta = null) {
   const id = normalizeAssetId(asset?.id);
   const series = normalizePriceSeries(prices);
   if (!id || !series) throw new Error(`Ongeldige asset of koersreeks: ${id || 'onbekend'}`);
@@ -135,22 +188,104 @@ function registerAsset(asset, prices, provenance = null) {
   if (existing) Object.assign(existing, normalized);
   else ASSETS.push(normalized);
   MARKET.prices[id] = series;
-  // Afwezigheid van expliciete herkomst is nooit bewijs van echte historie.
-  MARKET.provenance[id] = normalizeProvenance(provenance, false);
+  const normalizedQuality = normalizePriceQuality(quality, provenance);
+  MARKET.quality[id] = normalizedQuality;
+  MARKET.provenance[id] = normalizedQuality.map(qualityIsReliable);
+  MARKET.meta[id] = {
+    ...(MARKET.meta[id] || {}),
+    ...(marketMeta && typeof marketMeta === 'object' ? marketMeta : {}),
+    gridStartDate: localDateKey(MARKET.dates[0]),
+    gridEndDate: localDateKey(MARKET.dates[HISTORY_DAYS - 1]),
+  };
 }
 
 function assetById(id) { return ASSETS.find(a => a.id === id); }
 function lastPrice(id) { return MARKET.prices[id][HISTORY_DAYS - 1]; }
 function priceAt(id, i) { return MARKET.prices[id][i]; }
 
+function priceQualityAt(assetId, index) {
+  return MARKET.quality[assetId]?.[index] || PRICE_QUALITY.RECONSTRUCTED;
+}
+
+function isObservedPrice(assetId, index = HISTORY_DAYS - 1) {
+  return priceQualityAt(assetId, index) === PRICE_QUALITY.OBSERVED;
+}
+
+function isReliablePrice(assetId, index = HISTORY_DAYS - 1) {
+  return qualityIsReliable(priceQualityAt(assetId, index));
+}
+
+/**
+ * Schuift het runtimegrid naar de actuele lokale kalenderdag zonder bestaande
+ * prijzen opnieuw te dateren. Nieuwe dagen krijgen uitsluitend carried- of
+ * reconstructed-kwaliteit; nooit stilzwijgend observed.
+ */
+function ensureCurrentMarketGrid(now = new Date()) {
+  const nextDates = generateDates(now);
+  const currentEnd = localDateKey(MARKET.dates[HISTORY_DAYS - 1]);
+  const nextEnd = localDateKey(nextDates[HISTORY_DAYS - 1]);
+  if (currentEnd === nextEnd) return false;
+
+  const oldDateIndex = new Map(MARKET.dates.map((date, index) => [localDateKey(date), index]));
+  const oldStart = localDateKey(MARKET.dates[0]);
+  const oldEnd = currentEnd;
+  for (const id of Object.keys(MARKET.prices)) {
+    const oldPrices = MARKET.prices[id];
+    const oldQuality = normalizePriceQuality(MARKET.quality[id], MARKET.provenance[id]);
+    const nextPrices = new Array(HISTORY_DAYS);
+    const nextQuality = new Array(HISTORY_DAYS);
+    for (let i = 0; i < HISTORY_DAYS; i++) {
+      const key = localDateKey(nextDates[i]);
+      const oldIndex = oldDateIndex.get(key);
+      if (oldIndex !== undefined) {
+        nextPrices[i] = oldPrices[oldIndex];
+        nextQuality[i] = oldQuality[oldIndex];
+      } else if (key < oldStart) {
+        nextPrices[i] = oldPrices[0];
+        nextQuality[i] = PRICE_QUALITY.RECONSTRUCTED;
+      } else if (key > oldEnd) {
+        const previousPrice = i > 0 ? nextPrices[i - 1] : oldPrices[HISTORY_DAYS - 1];
+        const previousQuality = i > 0 ? nextQuality[i - 1] : oldQuality[HISTORY_DAYS - 1];
+        nextPrices[i] = previousPrice;
+        nextQuality[i] = qualityIsReliable(previousQuality) ? PRICE_QUALITY.CARRIED : PRICE_QUALITY.RECONSTRUCTED;
+      } else {
+        nextPrices[i] = i > 0 ? nextPrices[i - 1] : oldPrices[0];
+        nextQuality[i] = i > 0 && qualityIsReliable(nextQuality[i - 1])
+          ? PRICE_QUALITY.CARRIED
+          : PRICE_QUALITY.RECONSTRUCTED;
+      }
+    }
+    MARKET.prices[id] = nextPrices;
+    MARKET.quality[id] = nextQuality;
+    MARKET.provenance[id] = nextQuality.map(qualityIsReliable);
+    MARKET.meta[id] = {
+      ...(MARKET.meta[id] || {}),
+      gridStartDate: localDateKey(nextDates[0]),
+      gridEndDate: nextEnd,
+    };
+  }
+  MARKET.dates = nextDates;
+  return true;
+}
+
 function marketCoverage(assetId, start = 0, end = HISTORY_DAYS - 1) {
-  const provenance = MARKET.provenance[assetId];
-  if (!provenance) return 0;
+  const quality = MARKET.quality[assetId];
+  if (!quality) return 0;
   const i0 = Math.max(0, start), i1 = Math.min(HISTORY_DAYS - 1, end);
   if (i1 < i0) return 0;
-  let real = 0;
-  for (let i = i0; i <= i1; i++) if (provenance[i]) real++;
-  return real / (i1 - i0 + 1);
+  let covered = 0;
+  for (let i = i0; i <= i1; i++) if (qualityIsReliable(quality[i])) covered++;
+  return covered / (i1 - i0 + 1);
+}
+
+function observedCoverage(assetId, start = 0, end = HISTORY_DAYS - 1) {
+  const quality = MARKET.quality[assetId];
+  if (!quality) return 0;
+  const i0 = Math.max(0, start), i1 = Math.min(HISTORY_DAYS - 1, end);
+  if (i1 < i0) return 0;
+  let observed = 0;
+  for (let i = i0; i <= i1; i++) if (quality[i] === PRICE_QUALITY.OBSERVED) observed++;
+  return observed / (i1 - i0 + 1);
 }
 
 function hasReliableHistory(assetId, days = 365, minCoverage = ANALYSIS_MIN_COVERAGE) {
@@ -159,7 +294,10 @@ function hasReliableHistory(assetId, days = 365, minCoverage = ANALYSIS_MIN_COVE
 }
 
 function historyCoverageLabel(assetId, days = 365) {
-  return `${Math.round(marketCoverage(assetId, Math.max(0, HISTORY_DAYS - days), HISTORY_DAYS - 1) * 100)}% echt`;
+  const start = Math.max(0, HISTORY_DAYS - days);
+  const covered = Math.round(marketCoverage(assetId, start, HISTORY_DAYS - 1) * 100);
+  const observed = Math.round(observedCoverage(assetId, start, HISTORY_DAYS - 1) * 100);
+  return `${covered}% bron-gedekt · ${observed}% waargenomen`;
 }
 
 // ---------- Transacties + cashledger (schema v4) ----------
@@ -319,10 +457,15 @@ function transactionTransferCostEur(tx) {
 
 // ---------- Portefeuille-berekeningen ----------
 function dateToIndex(isoDate) {
-  const t = new Date(isoDate).getTime();
-  const start = MARKET.dates[0].getTime();
-  const idx = Math.round((t - start) / 86400000);
+  const date = new Date(isoDate);
+  const idx = calendarDayDiff(MARKET.dates[0], date);
+  if (!Number.isFinite(idx)) return 0;
   return Math.max(0, Math.min(HISTORY_DAYS - 1, idx));
+}
+
+function dateToIndexUnclamped(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  return calendarDayDiff(MARKET.dates[0], date);
 }
 
 function emptyLedgerPosition() { return { qty: 0, cost: 0, realized: 0 }; }
