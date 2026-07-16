@@ -46,6 +46,7 @@ const PRICE_QUALITY = Object.freeze({
   RECONSTRUCTED: 'reconstructed',
 });
 const PRICE_QUALITY_VALUES = new Set(Object.values(PRICE_QUALITY));
+const MAX_CARRY_DAYS = Object.freeze({ Crypto: 1, ETF: 4, Aandeel: 4 });
 
 const ASSETS = [];
 
@@ -167,6 +168,32 @@ function qualityIsReliable(value) {
   return value === PRICE_QUALITY.OBSERVED || value === PRICE_QUALITY.CARRIED;
 }
 
+function carryLimitForAsset(assetOrType) {
+  const type = typeof assetOrType === 'string' ? assetOrType : assetOrType?.type;
+  return MAX_CARRY_DAYS[type] ?? MAX_CARRY_DAYS.Aandeel;
+}
+
+/** Een carried punt is alleen betrouwbaar zolang het direct op een recente
+    waarneming voortbouwt. Langdurige datagaten worden fail-closed. */
+function sanitizePriceQuality(quality, assetOrType) {
+  const normalized = normalizePriceQuality(quality);
+  const limit = carryLimitForAsset(assetOrType);
+  const out = new Array(HISTORY_DAYS);
+  let lastObserved = -Infinity;
+  for (let i = 0; i < HISTORY_DAYS; i++) {
+    if (normalized[i] === PRICE_QUALITY.OBSERVED) {
+      out[i] = PRICE_QUALITY.OBSERVED;
+      lastObserved = i;
+    } else if (normalized[i] === PRICE_QUALITY.CARRIED
+        && i > 0 && qualityIsReliable(out[i - 1]) && i - lastObserved <= limit) {
+      out[i] = PRICE_QUALITY.CARRIED;
+    } else {
+      out[i] = PRICE_QUALITY.RECONSTRUCTED;
+    }
+  }
+  return out;
+}
+
 /** Registreert of actualiseert een asset inclusief koerskwaliteit. */
 function registerAsset(asset, prices, provenance = null, quality = null, marketMeta = null) {
   const id = normalizeAssetId(asset?.id);
@@ -188,7 +215,7 @@ function registerAsset(asset, prices, provenance = null, quality = null, marketM
   if (existing) Object.assign(existing, normalized);
   else ASSETS.push(normalized);
   MARKET.prices[id] = series;
-  const normalizedQuality = normalizePriceQuality(quality, provenance);
+  const normalizedQuality = sanitizePriceQuality(normalizePriceQuality(quality, provenance), normalized);
   MARKET.quality[id] = normalizedQuality;
   MARKET.provenance[id] = normalizedQuality.map(qualityIsReliable);
   MARKET.meta[id] = {
@@ -215,6 +242,37 @@ function isReliablePrice(assetId, index = HISTORY_DAYS - 1) {
   return qualityIsReliable(priceQualityAt(assetId, index));
 }
 
+function latestObservedPriceIndex(assetId, end = HISTORY_DAYS - 1) {
+  const quality = MARKET.quality[assetId];
+  if (!quality) return -1;
+  for (let i = Math.min(HISTORY_DAYS - 1, Math.max(0, end)); i >= 0; i--) {
+    if (quality[i] === PRICE_QUALITY.OBSERVED) return i;
+  }
+  return -1;
+}
+
+function marketFreshness(assetId, end = HISTORY_DAYS - 1) {
+  const index = Math.min(HISTORY_DAYS - 1, Math.max(0, Number(end) || 0));
+  const observedIndex = latestObservedPriceIndex(assetId, index);
+  const ageDays = observedIndex >= 0 ? index - observedIndex : null;
+  const limitDays = carryLimitForAsset(assetById(assetId));
+  const currentQuality = priceQualityAt(assetId, index);
+  return {
+    assetId,
+    index,
+    currentQuality,
+    observedIndex,
+    observedDate: observedIndex >= 0 ? localDateKey(MARKET.dates[observedIndex]) : null,
+    ageDays,
+    limitDays,
+    fresh: observedIndex >= 0 && ageDays <= limitDays && qualityIsReliable(currentQuality),
+  };
+}
+
+function isFreshPrice(assetId, index = HISTORY_DAYS - 1) {
+  return marketFreshness(assetId, index).fresh;
+}
+
 /**
  * Schuift het runtimegrid naar de actuele lokale kalenderdag zonder bestaande
  * prijzen opnieuw te dateren. Nieuwe dagen krijgen uitsluitend carried- of
@@ -230,8 +288,9 @@ function ensureCurrentMarketGrid(now = new Date()) {
   const oldStart = localDateKey(MARKET.dates[0]);
   const oldEnd = currentEnd;
   for (const id of Object.keys(MARKET.prices)) {
+    const asset = assetById(id);
     const oldPrices = MARKET.prices[id];
-    const oldQuality = normalizePriceQuality(MARKET.quality[id], MARKET.provenance[id]);
+    const oldQuality = sanitizePriceQuality(normalizePriceQuality(MARKET.quality[id], MARKET.provenance[id]), asset);
     const nextPrices = new Array(HISTORY_DAYS);
     const nextQuality = new Array(HISTORY_DAYS);
     for (let i = 0; i < HISTORY_DAYS; i++) {
@@ -256,8 +315,8 @@ function ensureCurrentMarketGrid(now = new Date()) {
       }
     }
     MARKET.prices[id] = nextPrices;
-    MARKET.quality[id] = nextQuality;
-    MARKET.provenance[id] = nextQuality.map(qualityIsReliable);
+    MARKET.quality[id] = sanitizePriceQuality(nextQuality, asset);
+    MARKET.provenance[id] = MARKET.quality[id].map(qualityIsReliable);
     MARKET.meta[id] = {
       ...(MARKET.meta[id] || {}),
       gridStartDate: localDateKey(nextDates[0]),
@@ -290,7 +349,8 @@ function observedCoverage(assetId, start = 0, end = HISTORY_DAYS - 1) {
 
 function hasReliableHistory(assetId, days = 365, minCoverage = ANALYSIS_MIN_COVERAGE) {
   const start = Math.max(0, HISTORY_DAYS - days);
-  return marketCoverage(assetId, start, HISTORY_DAYS - 1) >= minCoverage;
+  return isFreshPrice(assetId, HISTORY_DAYS - 1)
+    && marketCoverage(assetId, start, HISTORY_DAYS - 1) >= minCoverage;
 }
 
 function historyCoverageLabel(assetId, days = 365) {
@@ -468,6 +528,11 @@ function dateToIndexUnclamped(value) {
   return calendarDayDiff(MARKET.dates[0], date);
 }
 
+function isFutureCalendarDate(value, reference = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  return calendarDayDiff(reference, date) > 0;
+}
+
 function emptyLedgerPosition() { return { qty: 0, cost: 0, realized: 0 }; }
 
 function addLedgerIssue(ledger, tx, code, message) {
@@ -547,18 +612,27 @@ function applyLedgerTransaction(ledger, tx) {
 /** Bouwt effecten, cash, kostbasis en externe flows op één gedeelde tijdlijn. */
 function buildPortfolioLedger(txs) {
   const eventsByDay = new Map();
+  const preflightIssues = [];
   const normalized = (Array.isArray(txs) ? txs : [])
     .map(tx => normalizeStoredTransaction(tx))
     .filter(Boolean)
     .sort((a, b) => new Date(a.date) - new Date(b.date) || a.id.localeCompare(b.id));
   for (const tx of normalized) {
-    const idx = dateToIndex(tx.date);
+    const rawIndex = dateToIndexUnclamped(tx.date);
+    if (rawIndex >= HISTORY_DAYS) {
+      preflightIssues.push({
+        txId: tx.id, date: tx.date, asset: tx.asset || '', code: 'future-transaction',
+        message: `Boeking ${tx.id} ligt na de huidige kalenderdag en is niet verwerkt.`,
+      });
+      continue;
+    }
+    const idx = Math.max(0, rawIndex);
     if (!eventsByDay.has(idx)) eventsByDay.set(idx, []);
     eventsByDay.get(idx).push(tx);
   }
 
   const ledger = {
-    cash: 0, minCash: 0, positions: {}, issues: [],
+    cash: 0, minCash: 0, positions: {}, issues: preflightIssues,
     realized: 0, income: 0, fees: 0, taxes: 0,
   };
   const timeline = new Array(HISTORY_DAYS);
@@ -613,6 +687,7 @@ function externalCashflowEvents(txs) {
     .filter(Boolean)
     .sort((a, b) => new Date(a.date) - new Date(b.date) || a.id.localeCompare(b.id));
   for (const tx of normalized) {
+    if (dateToIndexUnclamped(tx.date) >= HISTORY_DAYS) continue;
     const amount = applyLedgerTransaction(ledger, tx);
     if (Math.abs(amount) > 1e-12) events.push({ date: tx.date, amount });
   }
