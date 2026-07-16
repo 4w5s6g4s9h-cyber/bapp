@@ -23,11 +23,15 @@ test('publieke shell heeft CSP, geen externe fonts en consistente cacheversie', 
   assert.match(html, /id="set-auto-refresh"/);
   assert.match(html, /id="kpi-price-asof"/);
   assert.match(html, /id="a-price-asof"/);
+  assert.match(html, /id="import-preview-modal"/);
+  assert.match(html, /id="import-preview-confirm"/);
   assert.match(html, /crypto maximaal eenmaal per uur/);
   assert.match(app, /visibilitychange/);
   assert.match(app, /setInterval\(.*runAutomaticPriceRefresh/s);
   assert.match(app, /function invalidateDerived\(\)[\s\S]*?state\.twr = null/);
   assert.match(app, /isFutureCalendarDate\(date\)/);
+  assert.match(app, /importPortfolioJSON\(reader\.result, \{ confirmed: true \}\)/);
+  assert.match(app, /importTransactionCSV\(reader\.result, state\.txs, \{ confirmed: true \}\)/);
   assert.match(sw, /res\.ok && res\.type === 'basic'/);
   assert.doesNotMatch(fs.readFileSync(path.join(ROOT, 'js/importer.js'), 'utf8'), /corsproxy|allorigins|codetabs/i);
 });

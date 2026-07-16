@@ -1356,6 +1356,10 @@ function renderImportReport() {
   const symbols = Array.isArray(r.symbols) ? r.symbols.map(normalizeAssetId).filter(Boolean).map(escapeHTML) : [];
   const histMatched = Math.max(0, Number(r.histMatched) || 0);
   const synthesized = Math.max(0, Number(r.synthesized) || 0);
+  const diagnostics = r.importDiagnostics && typeof r.importDiagnostics === 'object' ? r.importDiagnostics : null;
+  const diagnosticText = diagnostics && (diagnostics.rejectedRows || diagnostics.ignoredRows || diagnostics.assumptionCount)
+    ? `<div class="ledger-warning">Importcontrole: ${Number(diagnostics.rejectedRows) || 0} afgewezen, ${Number(diagnostics.ignoredRows) || 0} genegeerd en ${Number(diagnostics.assumptionCount) || 0} expliciet geïnterpreteerd.</div>`
+    : '';
   holder.innerHTML = `
     <div class="import-report-card">
       <div style="font-size:17px">📥</div>
@@ -1363,12 +1367,105 @@ function renderImportReport() {
         <b>Import geslaagd</b> — ${Number(r.txCount) || 0} transacties over ${Number(r.assetCount) || 0} assets (${symbols.join(', ')}).
         ${histMatched ? `Voor ${histMatched} asset(s) is gedateerde bronhistorie uit het bestand gebruikt. ` : ''}
         ${synthesized ? `Voor ${synthesized} asset(s) is de historie gereconstrueerd rond transactiekoersen. Deze reeks is alleen voor visualisatie en uitgesloten van analyse.` : ''}
+        ${diagnosticText}
         ${r.migrationWarning ? `<div class="ledger-warning">⚠️ ${escapeHTML(r.migrationWarning)} Ververs of herimporteer koershistorie voordat je analyses gebruikt.</div>` : ''}
       </div>
     </div>`;
 }
 
 /* ---------- import-flow ---------- */
+const importPreviewModal = $('#import-preview-modal');
+const importPreviewConfirm = $('#import-preview-confirm');
+const importPreviewApply = $('#import-preview-apply');
+let pendingImportAction = null;
+
+function importPreviewSection(title, items, warning = false) {
+  const rows = (Array.isArray(items) ? items : []).filter(Boolean);
+  if (!rows.length) return '';
+  const visible = rows.slice(0, 12);
+  const remainder = rows.length - visible.length;
+  return `<section class="import-preview-section${warning ? ' warning' : ''}">
+    <h3>${escapeHTML(title)}</h3>
+    <ul>${visible.map(item => `<li>${escapeHTML(item)}</li>`).join('')}${remainder ? `<li>… en ${remainder} meer</li>` : ''}</ul>
+  </section>`;
+}
+
+function openImportPreview(preview, onConfirm) {
+  modalReturnFocus = document.activeElement;
+  pendingImportAction = onConfirm;
+  const mode = preview.mode === 'merge' ? 'samenvoegen' : 'volledig vervangen/herstellen';
+  $('#import-preview-intro').textContent = `${preview.source || 'Importbestand'} · ${mode}. Controleer vooral afgewezen regels en aannames.`;
+  const stats = [
+    [preview.recognized || 0, 'herkend'],
+    [preview.added ?? preview.recognized ?? 0, preview.mode === 'merge' ? 'nieuw' : 'toe te passen'],
+    [preview.rejectedRows || 0, 'afgewezen'],
+    [preview.ignoredRows || 0, 'genegeerd'],
+    [preview.assumptionCount || 0, 'aannames'],
+    [preview.duplicateRows || 0, 'duplicaten'],
+  ];
+  $('#import-preview-summary').innerHTML = stats.map(([value, label]) => `
+    <div class="import-preview-stat"><b>${Number(value) || 0}</b><span>${escapeHTML(label)}</span></div>`).join('');
+  const assets = Array.isArray(preview.assets) && preview.assets.length
+    ? [`Assets: ${preview.assets.map(normalizeAssetId).filter(Boolean).join(', ')}`]
+    : [];
+  $('#import-preview-details').innerHTML = [
+    importPreviewSection('Gevolg', preview.warnings, true),
+    importPreviewSection('Afgewezen / overgeslagen', preview.rejected, true),
+    importPreviewSection('Genegeerd', preview.ignored),
+    importPreviewSection('Expliciete interpretaties', preview.assumptions),
+    importPreviewSection('Instrumenten', assets),
+  ].join('');
+  importPreviewConfirm.checked = false;
+  importPreviewApply.disabled = true;
+  importPreviewApply.textContent = preview.mode === 'merge' ? 'Samenvoegen' : 'Vervangen en importeren';
+  importPreviewModal.classList.add('open');
+  importPreviewModal.setAttribute('aria-hidden', 'false');
+  setTimeout(() => importPreviewConfirm.focus(), 0);
+}
+
+function closeImportPreview() {
+  importPreviewModal.classList.remove('open');
+  importPreviewModal.setAttribute('aria-hidden', 'true');
+  pendingImportAction = null;
+  modalReturnFocus?.focus?.();
+}
+
+importPreviewConfirm.addEventListener('change', () => { importPreviewApply.disabled = !importPreviewConfirm.checked; });
+$('#import-preview-cancel').addEventListener('click', closeImportPreview);
+importPreviewModal.addEventListener('click', event => { if (event.target === importPreviewModal) closeImportPreview(); });
+importPreviewModal.addEventListener('keydown', event => {
+  if (event.key === 'Escape') { event.preventDefault(); closeImportPreview(); return; }
+  if (event.key !== 'Tab') return;
+  const items = focusableIn(importPreviewModal);
+  if (!items.length) return;
+  const first = items[0], last = items[items.length - 1];
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+});
+importPreviewApply.addEventListener('click', () => {
+  if (!importPreviewConfirm.checked || !pendingImportAction) return;
+  const apply = pendingImportAction;
+  closeImportPreview();
+  apply();
+});
+
+function finishCSVImport(result) {
+  if (!result.ok) { toast('⚠️ ' + result.error); return; }
+  const skipped = result.skippedAssets.length
+    ? ` · ${result.skippedAssets.length} onbekende assets bewust overgeslagen (${result.skippedAssets.slice(0, 5).join(', ')}${result.skippedAssets.length > 5 ? '…' : ''})`
+    : '';
+  const transfers = result.transfers ? ` · ${result.transfers} nieuwe cash- of assettransfer${result.transfers === 1 ? '' : 's'}${result.estimatedTransfers ? ` (${result.estimatedTransfers} op een waargenomen bronkoers gewaardeerd)` : ''}` : '';
+  const reclassified = result.reclassifiedTrades ? ` · ${result.reclassifiedTrades} eerdere Bitvavo-trade(s) intern geclassificeerd` : '';
+  toast(`📥 ${result.bron}: ${result.added} nieuwe transacties, ${result.dedupe} al bekend${skipped}${transfers}${reclassified}`);
+  if (result.added || result.reclassifiedTrades) setTimeout(() => location.reload(), 1800);
+}
+
+function finishJSONImport(result) {
+  if (!result.ok) { toast('⚠️ ' + result.error); return; }
+  toast(`📥 ${result.report.txCount} transacties geïmporteerd — app herstart…`);
+  setTimeout(() => location.reload(), 900);
+}
+
 function handleImportFile(file) {
   if (!file) return;
   if (file.size > MAX_IMPORT_BYTES) { toast('⚠️ Bestand is groter dan de veilige limiet van 8 MB'); return; }
@@ -1378,19 +1475,19 @@ function handleImportFile(file) {
       // CSV = aanvullen (merge); JSON = volledige (her)import
       if (!state.txs.length) { toast('⚠️ CSV-import vult bestaande data aan — importeer eerst je portfolio-JSON'); return; }
       const result = importTransactionCSV(reader.result, state.txs);
-      if (!result.ok) { toast('⚠️ ' + result.error); return; }
-      const skipped = result.skippedAssets.length
-        ? ` · ${result.skippedAssets.length} onbekende assets overgeslagen (${result.skippedAssets.slice(0, 5).join(', ')}${result.skippedAssets.length > 5 ? '…' : ''})`
-        : '';
-      const transfers = result.transfers ? ` · ${result.transfers} cash- of assettransfer verwerkt${result.estimatedTransfers ? ` (${result.estimatedTransfers} gewaardeerd op de beschikbare dagkoers)` : ''}` : '';
-      toast(`📥 ${result.bron}: ${result.added} nieuwe transacties toegevoegd, ${result.dedupe} al bekend${skipped}${transfers}`);
-      if (result.added) setTimeout(() => location.reload(), 1600);
+      if (result.needsConfirmation) {
+        openImportPreview(result.preview, () => finishCSVImport(importTransactionCSV(reader.result, state.txs, { confirmed: true })));
+        return;
+      }
+      finishCSVImport(result);
       return;
     }
     const result = importPortfolioJSON(reader.result);
-    if (!result.ok) { toast('⚠️ ' + result.error); return; }
-    toast(`📥 ${result.report.txCount} transacties geïmporteerd — app herstart…`);
-    setTimeout(() => location.reload(), 900);
+    if (result.needsConfirmation) {
+      openImportPreview(result.preview, () => finishJSONImport(importPortfolioJSON(reader.result, { confirmed: true })));
+      return;
+    }
+    finishJSONImport(result);
   };
   reader.onerror = () => toast('⚠️ Kon het bestand niet lezen');
   reader.readAsText(file);

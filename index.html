@@ -8,7 +8,7 @@
 <meta name="theme-color" content="#0a0c14">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="css/style.css?v=18">
+<link rel="stylesheet" href="css/style.css?v=19">
 </head>
 <body>
 
@@ -434,7 +434,7 @@
           </table>
         </div>
       </div>
-      <p class="explain">💡 Sleep een bestand hierheen of gebruik de knop. <b>JSON</b> = volledige (her)import; <b>CSV</b> (DEGIRO Transactions.csv of Bitvavo Volledige geschiedenis.csv) = aanvullen — alleen nieuwe transacties worden toegevoegd, dubbele rijen worden automatisch overgeslagen. Zo houd je de app bij met een periodieke export van je broker.</p>
+      <p class="explain">💡 Sleep een bestand hierheen of gebruik de knop. Eerst verschijnt altijd een preview met herkende, afgewezen, genegeerde, afgeleide en dubbele rijen; zonder bevestiging wordt niets opgeslagen. <b>JSON</b> = volledige (her)import; <b>CSV</b> (DEGIRO Transactions.csv of Bitvavo Volledige geschiedenis.csv) = aanvullen. Importeer voor Bitvavo ook de EUR-funding, eventueel in een eerdere export, zodat trades niet als dubbele externe inleg eindigen.</p>
     </section>
 
     <!-- ===== DCA-PLANNEN ===== -->
@@ -486,7 +486,7 @@
           <button class="btn btn-ghost" id="set-export">⬇ Exporteer backup</button>
           <button class="btn btn-ghost btn-danger" id="set-clear">🗑 Alles wissen</button>
         </div>
-        <p class="explain">JSON-import vervangt portfoliodata; CSV-import (DEGIRO/Bitvavo) vult aan. Een versie-4-backup bevat de volledige cashledger, assets, gedateerde koershistorie met kwaliteitsstatus, watchlist, alerts, DCA-plannen en brokerreconciliatie. Versies 2 en 3 blijven importeerbaar; hun ongedateerde koersreeksen worden uit voorzorg als gereconstrueerd gemarkeerd. <b>Let op:</b> localStorage is gekoppeld aan de website-origin en is niet versleuteld; gebruik een privéapparaat en commit of deel je backup niet.</p>
+        <p class="explain">JSON-import vervangt portfoliodata; CSV-import (DEGIRO/Bitvavo) vult aan. Iedere route toont eerst een niet-schrijvende preview en vereist bevestiging. Een versie-4-backup bevat de volledige cashledger, assets, gedateerde koershistorie met kwaliteitsstatus, watchlist, alerts, DCA-plannen en brokerreconciliatie. Versies 2 en 3 blijven importeerbaar; hun ongedateerde koersreeksen worden uit voorzorg als gereconstrueerd gemarkeerd. <b>Let op:</b> localStorage is gekoppeld aan de website-origin en is niet versleuteld; gebruik een privéapparaat en commit of deel je backup niet.</p>
         <div id="set-data-info"></div>
       </div>
 
@@ -604,6 +604,24 @@
   </div>
 </div>
 
+<!-- ===== IMPORTPREVIEW MODAL ===== -->
+<div class="modal-backdrop" id="import-preview-modal" role="dialog" aria-modal="true" aria-labelledby="import-preview-title" aria-hidden="true">
+  <div class="modal import-preview-modal" tabindex="-1">
+    <h2 id="import-preview-title">Import controleren</h2>
+    <p class="explain" id="import-preview-intro"></p>
+    <div class="import-preview-grid" id="import-preview-summary"></div>
+    <div class="import-preview-details" id="import-preview-details"></div>
+    <label class="check-row import-confirm-row" for="import-preview-confirm">
+      <input type="checkbox" id="import-preview-confirm">
+      <span><b>Ik heb deze verwerking gecontroleerd</b><small>Pas na deze bevestiging schrijft de app transacties of instellingen naar lokale opslag.</small></span>
+    </label>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="import-preview-cancel">Annuleren</button>
+      <button class="btn btn-primary" id="import-preview-apply" disabled>Import toepassen</button>
+    </div>
+  </div>
+</div>
+
 <!-- ===== COMMAND PALETTE ===== -->
 <div class="modal-backdrop" id="palette" role="dialog" aria-modal="true" aria-label="Opdrachten zoeken" aria-hidden="true">
   <div class="palette-box" tabindex="-1">
@@ -614,15 +632,15 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<script src="js/data.js?v=18"></script>
-<script src="js/ml.js?v=18"></script>
-<script src="js/charts.js?v=18"></script>
-<script src="js/quant.js?v=18"></script>
-<script src="js/backtest.js?v=18"></script>
-<script src="js/catalog.js?v=18"></script>
-<script src="js/dca.js?v=18"></script>
-<script src="js/importer.js?v=18"></script>
-<script src="js/alerts.js?v=18"></script>
-<script src="js/app.js?v=18"></script>
+<script src="js/data.js?v=19"></script>
+<script src="js/ml.js?v=19"></script>
+<script src="js/charts.js?v=19"></script>
+<script src="js/quant.js?v=19"></script>
+<script src="js/backtest.js?v=19"></script>
+<script src="js/catalog.js?v=19"></script>
+<script src="js/dca.js?v=19"></script>
+<script src="js/importer.js?v=19"></script>
+<script src="js/alerts.js?v=19"></script>
+<script src="js/app.js?v=19"></script>
 </body>
 </html>
