@@ -388,8 +388,8 @@ function historyToGrid(points) {
   return grid.some(v => v === null) ? null : grid;
 }
 
-/** Kwaliteit: bronpunten zijn observed; gaten ertussen zijn carried. */
-function qualityFromPoints(points) {
+/** Kwaliteit: bronpunten zijn observed; korte gaten worden per marktvenster carried. */
+function qualityFromPoints(points, assetOrType = 'Aandeel') {
   const quality = new Array(HISTORY_DAYS).fill(PRICE_QUALITY.RECONSTRUCTED);
   if (!points.length) return quality;
   const indices = points.map(p => p.idx).filter(i => Number.isInteger(i)).sort((a, b) => a - b);
@@ -397,7 +397,7 @@ function qualityFromPoints(points) {
   const observed = new Set(indices);
   const first = Math.max(0, indices[0]), last = Math.min(HISTORY_DAYS - 1, indices[indices.length - 1]);
   for (let i = first; i <= last; i++) quality[i] = observed.has(i) ? PRICE_QUALITY.OBSERVED : PRICE_QUALITY.CARRIED;
-  return quality;
+  return sanitizePriceQuality(quality, assetOrType);
 }
 
 const QUALITY_TO_CODE = Object.freeze({
@@ -439,7 +439,7 @@ function serializeMarketSeries(assetId) {
   };
 }
 
-function normalizeMarketSeriesEntry(entry, assetId) {
+function normalizeMarketSeriesEntry(entry, assetId, assetOrType = assetById(assetId) || 'Aandeel') {
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`Backup mist gedateerde marktdata voor ${assetId}.`);
   if (entry.schemaVersion !== MARKET_SERIES_SCHEMA_VERSION) throw new Error(`Onbekend marktdataformaat voor ${assetId}.`);
   const startDate = localDateFromKey(entry.startDate);
@@ -448,9 +448,9 @@ function normalizeMarketSeriesEntry(entry, assetId) {
   if (!startDate || !prices || !quality) throw new Error(`Ongeldige gedateerde marktdata voor ${assetId}.`);
   const quoteAt = Number(entry.quoteAt), fetchedAt = Number(entry.fetchedAt);
   const anchorConfidence = entry.anchorConfidence === 'verified' ? 'verified' : 'unverified';
-  const effectiveQuality = anchorConfidence === 'verified'
+  const effectiveQuality = sanitizePriceQuality(anchorConfidence === 'verified'
     ? quality
-    : new Array(HISTORY_DAYS).fill(PRICE_QUALITY.RECONSTRUCTED);
+    : new Array(HISTORY_DAYS).fill(PRICE_QUALITY.RECONSTRUCTED), assetOrType);
   const stored = {
     schemaVersion: MARKET_SERIES_SCHEMA_VERSION,
     startDate: localDateKey(startDate),
@@ -579,6 +579,7 @@ function normalizeBackupTransaction(tx, index, { legacy = false } = {}) {
   if (!tx || typeof tx !== 'object' || Array.isArray(tx)) throw new Error(`Ongeldige transactie op positie ${index + 1}.`);
   const date = parseDateFlexible(tx.date);
   if (!date) throw new Error(`Ongeldige transactie op positie ${index + 1}.`);
+  if (isFutureCalendarDate(date)) throw new Error(`Transactie op positie ${index + 1} ligt in de toekomst.`);
   const candidate = {
     ...tx,
     id: cleanDisplayText(tx.id || stableTransactionId({ ...tx, date: date.toISOString() }, index), 100),
@@ -635,9 +636,10 @@ function restoreBackup(root) {
   const assets = state.assets.map((asset, index) => {
     const id = normalizeAssetId(asset.id);
     if (!id) throw new Error(`Ongeldige asset op positie ${index + 1}.`);
+    const assetType = ['Crypto', 'ETF', 'Aandeel'].includes(asset.type) ? asset.type : 'Aandeel';
     let entry;
     if (datedMarket) {
-      entry = normalizeMarketSeriesEntry(state.market[id], id);
+      entry = normalizeMarketSeriesEntry(state.market[id], id, assetType);
     } else {
       const prices = normalizePriceSeries(state.prices[id]);
       const sourceFlags = state.provenance?.[id];
@@ -646,14 +648,14 @@ function restoreBackup(root) {
         throw new Error(`Ongeldige legacy-koersreeks op positie ${index + 1}.`);
       }
       const legacyEntry = legacyMarketSeries(prices, root.meta?.exportedAt, asset.histSource);
-      entry = normalizeMarketSeriesEntry(legacyEntry, id);
+      entry = normalizeMarketSeriesEntry(legacyEntry, id, assetType);
     }
     market[id] = entry.stored;
     return {
       ...asset, id,
       name: cleanDisplayText(asset.name || id, 80) || id,
       color: safeColor(asset.color, CUSTOM_COLORS[index % CUSTOM_COLORS.length]),
-      type: ['Crypto', 'ETF', 'Aandeel'].includes(asset.type) ? asset.type : 'Aandeel',
+      type: assetType,
       histSource: datedMarket ? cleanDisplayText(asset.histSource || entry.meta.source || 'synth', 24) : 'synth',
       custom: true,
     };
@@ -718,6 +720,10 @@ function importPortfolioJSON(jsonText) {
   if (!txs.length) {
     return { ok: false, error: 'Geen transacties of posities herkend in dit bestand. Verwacht: een array met datum, aantal, koers/bedrag en ticker.' };
   }
+  const futureTransaction = txs.find(tx => isFutureCalendarDate(tx.date));
+  if (futureTransaction) {
+    return { ok: false, error: `Import bevat een toekomstige boeking (${localDateKey(new Date(futureTransaction.date))}); pas de boekingsdatum aan.` };
+  }
   if (txs.length > MAX_IMPORT_TRANSACTIONS) return { ok: false, error: `Te veel transacties; maximum is ${MAX_IMPORT_TRANSACTIONS}.` };
 
   const symbols = [...new Set(txs.map(t => t.asset).filter(Boolean))];
@@ -740,7 +746,7 @@ function importPortfolioJSON(jsonText) {
     if (histKey && histories[histKey].length >= 20) {
       grid = historyToGrid(histories[histKey]);
       if (grid) {
-        quality = qualityFromPoints(histories[histKey]);
+        quality = qualityFromPoints(histories[histKey], type);
         histMatched++;
       }
     }
@@ -822,11 +828,15 @@ function loadCustomData() {
     for (const [rawId, rawSeries] of Object.entries(sourceEntries)) {
       const id = normalizeAssetId(rawId);
       if (!id) continue;
+      const definition = definitions.get(id);
+      const assetType = ['Crypto', 'ETF', 'Aandeel'].includes(definition?.type)
+        ? definition.type
+        : guessType(id, id);
       const parsed = dated
-        ? normalizeMarketSeriesEntry(rawSeries, id)
-        : normalizeMarketSeriesEntry(legacyMarketSeries(rawSeries, data.report?.date, definitions.get(id)?.histSource), id);
-      const asset = definitions.get(id) || {
-        id, name: id, type: guessType(id, id), color: CUSTOM_COLORS[ASSETS.length % CUSTOM_COLORS.length],
+        ? normalizeMarketSeriesEntry(rawSeries, id, assetType)
+        : normalizeMarketSeriesEntry(legacyMarketSeries(rawSeries, data.report?.date, definition?.histSource), id, assetType);
+      const asset = definition || {
+        id, name: id, type: assetType, color: CUSTOM_COLORS[ASSETS.length % CUSTOM_COLORS.length],
         custom: true, histSource: dated && parsed.quality.some(value => value === PRICE_QUALITY.OBSERVED) ? 'import' : 'synth',
       };
       if (!dated) asset.histSource = 'synth';
@@ -1055,6 +1065,7 @@ function mergeRealHistory(assetId, points, { verified = true, source = '', quote
     series[i] = cur;
     MARKET.quality[assetId][i] = verified ? PRICE_QUALITY.CARRIED : PRICE_QUALITY.RECONSTRUCTED;
   }
+  MARKET.quality[assetId] = sanitizePriceQuality(MARKET.quality[assetId], assetById(assetId));
   MARKET.provenance[assetId] = MARKET.quality[assetId].map(qualityIsReliable);
   MARKET.meta[assetId] = {
     ...(MARKET.meta[assetId] || {}),
@@ -1082,6 +1093,7 @@ function applyObservedSpot(assetId, dateValue, price, { verified = true, source 
     series[i] = value;
     MARKET.quality[assetId][i] = verified ? PRICE_QUALITY.CARRIED : PRICE_QUALITY.RECONSTRUCTED;
   }
+  MARKET.quality[assetId] = sanitizePriceQuality(MARKET.quality[assetId], assetById(assetId));
   MARKET.provenance[assetId] = MARKET.quality[assetId].map(qualityIsReliable);
   MARKET.meta[assetId] = {
     ...(MARKET.meta[assetId] || {}),
@@ -1196,11 +1208,14 @@ function historyStatus(asset) {
   const coverage = marketCoverage(asset.id);
   const covered = Math.round(coverage * 100);
   const observed = Math.round(observedCoverage(asset.id) * 100);
-  const suffix = `${covered}% gedekt · ${observed}% waargenomen`;
-  if (asset.histSource === 'live') return { label: `CoinGecko · ${suffix}`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
-  if (asset.histSource === 'yahoo') return { label: `Yahoo · ${suffix}`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
-  if (asset.histSource === 'alpha') return { label: `Alpha Vantage · ${suffix}`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
-  if (asset.histSource === 'import') return { label: `import · ${suffix}`, cls: coverage >= ANALYSIS_MIN_COVERAGE ? 'up' : 'muted' };
+  const freshness = marketFreshness(asset.id);
+  const sourceDate = freshness.observedDate ? ` · bron t/m ${freshness.observedDate}` : ' · geen waargenomen bronkoers';
+  const suffix = `${covered}% gedekt · ${observed}% waargenomen${sourceDate}${freshness.fresh ? '' : ' · verouderd'}`;
+  const cls = coverage >= ANALYSIS_MIN_COVERAGE && freshness.fresh ? 'up' : 'muted';
+  if (asset.histSource === 'live') return { label: `CoinGecko · ${suffix}`, cls };
+  if (asset.histSource === 'yahoo') return { label: `Yahoo · ${suffix}`, cls };
+  if (asset.histSource === 'alpha') return { label: `Alpha Vantage · ${suffix}`, cls };
+  if (asset.histSource === 'import') return { label: `import · ${suffix}`, cls };
   return { label: `gereconstrueerd · ${suffix}`, cls: 'muted' };
 }
 
@@ -1665,6 +1680,9 @@ function importTransactionCSV(text, existingTxs) {
   let dedupe = 0, estimatedTransfers = 0;
   for (const t of parsed.txs) {
     if (t.asset && !known.has(t.asset)) { skippedAssets.add(t.asset); continue; }
+    if (isFutureCalendarDate(t.date)) {
+      return { ok: false, error: `${bron}-export bevat een toekomstige boeking (${localDateKey(new Date(t.date))}); import is niet toegepast.` };
+    }
     let estimatedTransfer = false;
     if (TRANSFER_TYPES.has(t.type) && t.price === 0 && t.externalValue === undefined && MARKET.prices[t.asset]) {
       t.price = MARKET.prices[t.asset][dateToIndex(t.date)];

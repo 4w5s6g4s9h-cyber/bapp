@@ -8,7 +8,7 @@
 <meta name="theme-color" content="#0a0c14">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="css/style.css?v=17">
+<link rel="stylesheet" href="css/style.css?v=18">
 </head>
 <body>
 
@@ -78,7 +78,7 @@
     <section class="view active" id="view-dashboard">
       <header class="view-header">
         <div>
-          <h1>Goedendag 👋 <span class="tag tag-live" id="live-badge" style="display:none">● live koersen</span> <span class="tag tag-alert" id="alert-chip" style="display:none"></span></h1>
+          <h1>Goedendag 👋 <span class="tag tag-live" id="live-badge" style="display:none">● koersdata</span> <span class="tag tag-alert" id="alert-chip" style="display:none"></span></h1>
           <p class="subtitle" id="today-date"></p>
         </div>
         <button class="btn btn-primary" id="btn-new-tx">+ Nieuwe transactie</button>
@@ -89,6 +89,7 @@
           <div class="kpi-label">Totale portefeuillewaarde</div>
           <div class="kpi-value" id="kpi-total">€ 0</div>
           <div class="kpi-delta" id="kpi-total-delta"></div>
+          <div class="kpi-freshness" id="kpi-price-asof"></div>
         </div>
         <div class="kpi-card">
           <div class="kpi-label">Vandaag</div>
@@ -183,7 +184,7 @@
       </header>
 
       <div class="kpi-grid four">
-        <div class="kpi-card"><div class="kpi-label">Koers</div><div class="kpi-value sm" id="a-price"></div><div class="kpi-delta" id="a-day"></div></div>
+        <div class="kpi-card"><div class="kpi-label">Koers</div><div class="kpi-value sm" id="a-price"></div><div class="kpi-delta" id="a-day"></div><div class="kpi-freshness" id="a-price-asof"></div></div>
         <div class="kpi-card"><div class="kpi-label">Volatiliteit (1j)</div><div class="kpi-value sm" id="a-vol"></div><div class="kpi-delta muted">geannualiseerd</div></div>
         <div class="kpi-card"><div class="kpi-label">RSI (14)</div><div class="kpi-value sm" id="a-rsi"></div><div class="kpi-delta" id="a-rsi-label"></div></div>
         <div class="kpi-card signal-card"><div class="kpi-label">AI-signaal</div><div class="kpi-value sm" id="a-signal"></div><div class="kpi-delta" id="a-signal-conf"></div></div>
@@ -519,7 +520,7 @@
           <h2>📈 Koershistorie</h2>
           <button class="btn btn-primary" id="set-fetch-hist">📡 Haal bronhistorie op</button>
         </div>
-        <p class="explain">Na expliciete toestemming haalt deze knop maximaal circa drie jaar op via CoinGecko en Yahoo Finance. Met een ingestelde Alpha Vantage-sleutel gebruikt de app voor aandelen/ETF’s eerst die browservriendelijke route (maximaal 100 recente handelsdagen) en blijft Yahoo beste-effort. Vreemde valuta worden via Frankfurter naar EUR omgerekend. Dit zijn dagkoersen, geen gegarandeerde intraday-koersen. De app onderscheidt waargenomen handelsdagen, doorgetrokken kalenderdagen en gereconstrueerde waarden. Gereconstrueerde reeksen worden niet gebruikt voor ML, backtests of risicoadvies.</p>
+        <p class="explain">Na expliciete toestemming haalt deze knop maximaal circa drie jaar op via CoinGecko en Yahoo Finance. Met een ingestelde Alpha Vantage-sleutel gebruikt de app voor aandelen/ETF’s eerst die browservriendelijke route (maximaal 100 recente handelsdagen) en blijft Yahoo beste-effort. Vreemde valuta worden via Frankfurter naar EUR omgerekend. Dit zijn dagkoersen, geen gegarandeerde intraday-koersen. De app onderscheidt waargenomen handelsdagen, kort doorgetrokken kalenderdagen en gereconstrueerde waarden. Doorgetrokken data blijft maximaal één dag actueel voor crypto en vier dagen voor aandelen/ETF’s; daarna worden analyses geblokkeerd tot een nieuwe bronkoers beschikbaar is.</p>
         <div id="hist-progress"></div>
         <div class="table-wrap">
           <table class="holdings-table" id="hist-table">
@@ -578,7 +579,7 @@
       </select>
     </div>
     <div class="form-grid two">
-      <div class="form-row"><label for="tx-date">Boekingsdatum</label><input type="date" id="tx-date" class="input"></div>
+      <div class="form-row"><label for="tx-date">Boekingsdatum</label><input type="date" id="tx-date" class="input" max=""></div>
       <div class="form-row tx-money-field"><label for="tx-currency">Valuta</label><input type="text" id="tx-currency" class="input" value="EUR" maxlength="3" autocomplete="off"></div>
     </div>
     <div class="form-row" data-tx-field="asset"><label for="tx-asset">Asset</label><select id="tx-asset" class="select full"></select></div>
@@ -613,15 +614,15 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<script src="js/data.js?v=17"></script>
-<script src="js/ml.js?v=17"></script>
-<script src="js/charts.js?v=17"></script>
-<script src="js/quant.js?v=17"></script>
-<script src="js/backtest.js?v=17"></script>
-<script src="js/catalog.js?v=17"></script>
-<script src="js/dca.js?v=17"></script>
-<script src="js/importer.js?v=17"></script>
-<script src="js/alerts.js?v=17"></script>
-<script src="js/app.js?v=17"></script>
+<script src="js/data.js?v=18"></script>
+<script src="js/ml.js?v=18"></script>
+<script src="js/charts.js?v=18"></script>
+<script src="js/quant.js?v=18"></script>
+<script src="js/backtest.js?v=18"></script>
+<script src="js/catalog.js?v=18"></script>
+<script src="js/dca.js?v=18"></script>
+<script src="js/importer.js?v=18"></script>
+<script src="js/alerts.js?v=18"></script>
+<script src="js/app.js?v=18"></script>
 </body>
 </html>

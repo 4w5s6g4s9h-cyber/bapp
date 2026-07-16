@@ -11,6 +11,8 @@ Versie 16 herstelde daarnaast de belangrijkste boekhoudkundige grens. Trades zij
 
 Versie 17 sluit vervolgens een kritieke tijdsdimensiefout: marktdata wordt met een expliciete begindatum opgeslagen en bij een nieuwe kalenderdag op datum geprojecteerd, in plaats van de oude positionele reeks stilzwijgend als “eindigend vandaag” te herinterpreteren. Iedere waarde heeft nu de status waargenomen, doorgetrokken of gereconstrueerd. Dagresultaat, koersalerts en DCA-uitvoering vereisen een waargenomen koers; historische analyses mogen waargenomen en transparant doorgetrokken kalenderdagen gebruiken, maar nooit reconstructies. Oude ongedateerde marktdata migreert fail-closed en blijft als lokale rollbackkopie bewaard. De app blijft bewust een statische browserapp; dat is tegelijk haar sterkste privacy-eigenschap en haar voornaamste operationele beperking.
 
+Versie 18 maakt ook de actualiteit van die marktdata afdwingbaar. Een doorgetrokken koers is maximaal één kalenderdag betrouwbaar voor crypto en vier voor aandelen/ETF’s; daarna blijft de waarde zichtbaar, maar wordt zij gereconstrueerd/verouderd en zijn actuele rendementen, analyses en wegingalerts geblokkeerd. Dashboard, posities, watchlist, assetdetail en instellingen tonen de laatste waargenomen bronkoersdatum. Toekomstige boekingen worden bij invoer en import geweigerd en reeds aanwezige toekomstige gebeurtenissen worden niet langer op vandaag geklemd. Afgeleide TWR-state wordt bij iedere relevante mutatie ongeldig gemaakt.
+
 ## Hoofddoel en expliciete aannames
 
 Het hoofddoel is inzicht geven in een zelf geïmporteerde portefeuille zonder een centrale applicatieserver. De implementatie gaat uit van:
@@ -78,9 +80,13 @@ Een toekomstige grotere versie hoort klassieke globals te vervangen door ES-modu
 | P1 | Watch-only assets verdwenen door verkeerde laadvolgorde | Assetdefinities laden vóór de watchlist | Afgerond |
 | P1 | Toegevoegde assets hadden geen betrouwbare vervolgverversing; dynamische CoinGecko-ID’s gingen bij reload verloren | CoinGecko-ID persistent; single-flight uurcontrole bij open/focus/online; aandelen providerbewust dagelijks in begrensde batches; bron- en ophaaltijd zichtbaar; observaties datumvast opgeslagen | Afgerond binnen browserbeperkingen |
 | P1 | DCA kon toekomstige data gebruiken en fictieve koersen boeken | Historisch venster eindigt exact op uitvoerdag; openstaande termijn wacht vanaf de vervaldatum op de eerste waargenomen koers | Afgerond |
+| P1 | Stilstaande koersdata werd zonder peildatum als actuele portefeuillewaarde gepresenteerd | Laatste bronkoersdatum per positie zichtbaar; carried-venster begrensd op 1/4 dagen; actuele rendementen en analyses sluiten daarna fail-closed | Afgerond in versie 18 |
+| P1 | Assetdetail toonde een dagrendement zonder dezelfde kwaliteitsgate als het dashboard | Dagresultaat vereist in beide schermen twee opeenvolgende waargenomen koersen | Afgerond in versie 17 |
+| P1 | Verwijderen of wijzigen van transacties kon gecachte TWR-resultaten laten staan | Centrale invalidatie wist portefeuille, TWR, frontier en backteststate | Afgerond in versie 18 |
 | P1 | Modals misten Escape, focuslus en dialoogsemantiek | ARIA, Escape, focus trap, focusherstel en live toast toegevoegd | Afgerond voor de twee modals |
 | P1 | Geen tests of CI | Node-testset, publieke-buildvalidator en minimale GitHub Actions-workflow | Afgerond |
 | P2 | Service worker cachete ook foutresponses | Alleen succesvolle same-origin-responses worden gecachet; expliciete offline 503 | Afgerond |
+| P2 | Toekomstige transacties werden door indexclamping stil op vandaag verwerkt | Formulier en imports weigeren toekomstige datums; bestaande rijen worden overgeslagen met een zichtbaar ledgerprobleem | Afgerond in versie 18 |
 
 ## Cybersecurity en privacy
 
@@ -114,18 +120,19 @@ Niet opgelost of bewust beperkt:
 
 ## Tests en deployment
 
-De regressiesuite controleert nu ook v3→v4-transactiemigratie, interne herbalancering, fees/dividend/kostbasis, realized P&L, splits, transfers, oversell-beveiliging, reconciliatie, XIRR en schema-2/3/4-backupherstel. Datumregressies starten dezelfde marktdata op een latere systeemdatum, controleren dat de bronobservatie op haar oorspronkelijke kalenderdag blijft staan en bewaken het onderscheid tussen waargenomen, doorgetrokken en gereconstrueerde waarden. Brokerfixtures bewijzen DEGIRO-fees, Bitvavo-cashfunding, assettransfers, stakingrewards en dedupe. Daarnaast blijven netwerkgrenzen, DCA zonder look-ahead, walk-forward-arena, syntaxis en statische security-/cache-eisen gedekt. Een lokale headless-Chrome-smokecheck doorliep storting, interne koop, reconciliatie en oversell-blokkade zonder runtime-exception; dit is nog geen geautomatiseerde cross-browser-CI.
+De regressiesuite controleert nu ook v3→v4-transactiemigratie, interne herbalancering, fees/dividend/kostbasis, realized P&L, splits, transfers, oversell-beveiliging, reconciliatie, XIRR en schema-2/3/4-backupherstel. Datumregressies starten dezelfde marktdata op een latere systeemdatum, controleren dat de bronobservatie op haar oorspronkelijke kalenderdag blijft staan, bewaken het 1/4-daagse actualiteitsvenster en toetsen kalenderdagverschillen over zomer- en wintertijd. Toekomstige transacties worden zowel bij import als in de ledger fail-closed getest. Brokerfixtures bewijzen DEGIRO-fees, Bitvavo-cashfunding, assettransfers, stakingrewards en dedupe. Daarnaast blijven netwerkgrenzen, DCA zonder look-ahead, walk-forward-arena, syntaxis en statische security-/cache-eisen gedekt. Een lokale headless-Chrome-smokecheck doorliep storting, interne koop, reconciliatie en oversell-blokkade zonder runtime-exception; dit is nog geen geautomatiseerde cross-browser-CI.
 
 De GitHub Actions-job is aanwezig, maar branch protection is een externe repository-instelling en moet handmatig worden geactiveerd. Ook productie-securityheaders zijn een hostingverantwoordelijkheid; GitHub Pages biedt daar beperkte controle over.
 
 ## Vervolgplan
 
-1. **P1 — instrumentidentiteit:** ISIN + beurs + quotevaluta als primaire sleutel; ticker alleen als label/zoekterm.
-2. **P1 — geautomatiseerde browser-end-to-endtests:** import, schema-2/3-backuprestore, modaltoetsenbord, service-workerupdate en een volledige lege-stateflow in Chromium, Firefox en WebKit.
-3. **P1 — fiscale lots en corporate actions:** optionele FIFO/lots, return-of-capital, fusies, spin-offs en symboolmigraties zonder historische breuk.
-4. **P2 — multi-currency ledger:** afzonderlijke cashrekeningen en gevalideerde historische FX-bronnen in plaats van één handmatige rate per event.
-5. **P2 — opslagmigratie:** IndexedDB-repository met schema-migraties, checksums en optionele versleutelde backup met een gebruikerswachtwoord.
-6. **P2 — modulegrenzen:** ES-modules, expliciete imports en afzonderlijke adapters voor opslag en koersproviders.
-7. **P2 — deploymenthardening:** eigen hosting met securityheaders, branch protection, verplichte CI en periodieke browsercompatibiliteitscontrole.
+1. **P1 — importpreview en brokerintegriteit:** expliciet tonen en laten bevestigen wat wordt herkend, overgeslagen, omgerekend of geschat; transfers zonder betrouwbare waarneming blokkeren.
+2. **P1 — kwantitatieve sampling:** correlaties op gezamenlijke waargenomen handelsdagen, consistente cashweging en expliciete samplingwaarschuwingen bij signalen/frontier.
+3. **P1 — geautomatiseerde browser-end-to-endtests:** import, schema-2/3/4-backuprestore, modaltoetsenbord, service-workerupdate en een volledige lege-stateflow in Chromium, Firefox en WebKit.
+4. **P1 — instrumentidentiteit:** ISIN + beurs + quotevaluta als primaire sleutel; ticker alleen als label/zoekterm.
+5. **P1 — fiscale lots en corporate actions:** optionele FIFO/lots, return-of-capital, fusies, spin-offs en symboolmigraties zonder historische breuk.
+6. **P2 — multi-currency ledger:** afzonderlijke cashrekeningen en gevalideerde historische FX-bronnen in plaats van één handmatige rate per event.
+7. **P2 — opslagmigratie en modulegrenzen:** IndexedDB met migraties/checksums, optionele versleutelde backup, ES-modules en expliciete provideradapters.
+8. **P2 — deploymenthardening:** eigen hosting met securityheaders, branch protection, verplichte CI en periodieke browsercompatibiliteitscontrole.
 
-De eerstvolgende investering hoort instrumentidentiteit en geautomatiseerde cross-browserflows te zijn. Daarna leveren fiscale lots en complexere corporate actions meer betrouwbaarheid op dan verdere verfijning van ML.
+De eerstvolgende investering hoort nu importintegriteit en kwantitatieve sampling te zijn. Daarna leveren browser-E2E en sterkere instrumentidentiteit meer betrouwbaarheid op dan verdere verfijning van ML.

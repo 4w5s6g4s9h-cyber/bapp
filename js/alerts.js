@@ -52,7 +52,7 @@ function alertMetricValue(rule, positions, total) {
       return r[r.length - 1];
     }
     case 'weight': {
-      if (!isReliablePrice(rule.asset, HISTORY_DAYS - 1)) return null;
+      if (!isFreshPrice(rule.asset, HISTORY_DAYS - 1)) return null;
       const pos = positions.find(p => p.asset.id === rule.asset);
       return pos && total > 0 ? (pos.value / total) * 100 : 0;
     }

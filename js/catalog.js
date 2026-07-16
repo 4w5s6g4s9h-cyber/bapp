@@ -171,7 +171,7 @@ async function addWatchAsset(entry) {
   const grid = pointsToGrid(points);
   if (!grid) return { ok: false, error: `Ongeldige koersdata voor ${entry.id}` };
   const pointRows = points.map(([ts, price]) => ({ idx: dateToIndex(new Date(Number(ts)).toISOString()), price }));
-  const quality = qualityFromPoints(pointRows);
+  const quality = qualityFromPoints(pointRows, entry.type);
   const color = CUSTOM_COLORS[(ASSETS.length + 3) % CUSTOM_COLORS.length];
   const sourceAt = Math.max(...points.map(([ts]) => Number(ts)).filter(Number.isFinite));
   const fetchedAt = Date.now();

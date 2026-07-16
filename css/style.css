@@ -146,6 +146,10 @@ h2 { font-size: 15px; font-weight: 700; letter-spacing: -0.01em; }
 .kpi-delta.up { color: var(--green); }
 .kpi-delta.down { color: var(--red); }
 .kpi-delta.muted { color: var(--text-3); font-weight: 500; }
+.kpi-freshness { margin-top: 7px; color: var(--text-3); font-size: 10.5px; line-height: 1.4; }
+.kpi-freshness.has-warning { color: var(--amber); }
+.price-asof { color: var(--text-3); font-size: 9.5px; line-height: 1.35; white-space: nowrap; }
+.price-asof.stale { color: var(--amber); }
 .signal-card { border-color: rgba(124, 107, 255, 0.4); }
 
 /* ============ LAYOUT GRIDS ============ */

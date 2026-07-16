@@ -13,6 +13,7 @@ const state = {
   training: null,
   mcTimer: null,
   portfolio: null,
+  twr: null,
   backtest: { data: null, playing: null },
   ef: null,                 // efficient frontier cache
   watchlist: null,          // wordt bij init geladen
@@ -32,7 +33,48 @@ function portfolioAnalysisAvailable(positions, days = 365) {
 }
 
 function unavailableHTML(days = 365) {
-  return `<div class="palette-empty">Analyse geblokkeerd: minimaal 90% bron-gedekte koerswaarden over ${days} kalenderdagen nodig. Importeer historie of haal die na toestemming op bij Instellingen.</div>`;
+  return `<div class="palette-empty">Analyse geblokkeerd: minimaal 90% bron-gedekte koerswaarden over ${days} kalenderdagen én een recente eindkoers nodig. Importeer historie of haal die na toestemming op bij Instellingen.</div>`;
+}
+
+function assetFreshnessPresentation(assetId, { compact = false } = {}) {
+  const status = marketFreshness(assetId);
+  if (!status.observedDate) {
+    return { ...status, text: 'geen waargenomen bronkoers', warning: true };
+  }
+  const date = localDateFromKey(status.observedDate);
+  const dateText = compact ? fmtDateShort.format(date) : fmtDate.format(date);
+  if (status.ageDays === 0) return { ...status, text: `bronkoers ${dateText}`, warning: false };
+  if (status.fresh) {
+    return { ...status, text: `bronkoers ${dateText} · ${status.ageDays}d doorgetrokken`, warning: false };
+  }
+  return { ...status, text: `verouderd · bronkoers ${dateText} (${status.ageDays}d)`, warning: true };
+}
+
+function portfolioFreshnessPresentation(positions) {
+  if (!positions.length) return { text: 'Alleen cash; geen marktkoersen nodig', title: '', warning: false };
+  const rows = positions.map(position => ({
+    id: position.asset.id,
+    ...assetFreshnessPresentation(position.asset.id, { compact: true }),
+  }));
+  const missing = rows.filter(row => !row.observedDate);
+  const stale = rows.filter(row => row.observedDate && !row.fresh);
+  const dates = rows.map(row => row.observedDate).filter(Boolean).sort();
+  let text;
+  if (missing.length) {
+    text = `${missing.length} positie${missing.length === 1 ? '' : 's'} zonder waargenomen bronkoers`;
+  } else {
+    const first = fmtDateShort.format(localDateFromKey(dates[0]));
+    const last = fmtDateShort.format(localDateFromKey(dates[dates.length - 1]));
+    text = `Bronkoersen per ${first}${dates[0] === dates[dates.length - 1] ? '' : `–${last}`}`;
+    if (stale.length) text += ` · ${stale.length} verouderd`;
+    else if (rows.some(row => row.ageDays > 0)) text += ' · niet alle markten vandaag open';
+    else text += ' · vandaag waargenomen';
+  }
+  return {
+    text,
+    title: rows.map(row => `${row.id}: ${row.text}`).join('\n'),
+    warning: Boolean(missing.length || stale.length),
+  };
 }
 
 /* ---------- helpers ---------- */
@@ -67,6 +109,7 @@ function setAIStatus(text) { $('#ai-status-text').textContent = text; }
 
 function invalidateDerived() {
   state.portfolio = null;
+  state.twr = null;
   state.ef = null;
   state.backtest.data = null;
 }
@@ -134,8 +177,9 @@ function renderDashboard(animate = true) {
   const todayResult = dailyPortfolioPnl(state.txs, values);
   const dayDelta = todayResult.pnl;
   const dayPct = todayResult.pct * 100;
-  const currentReliable = positions.length > 0 && positions.every(p => isReliablePrice(p.asset.id, HISTORY_DAYS - 1));
-  const dayReliable = currentReliable && positions.every(p => isObservedPrice(p.asset.id, HISTORY_DAYS - 1) && isObservedPrice(p.asset.id, HISTORY_DAYS - 2));
+  const currentReliable = positions.every(p => isFreshPrice(p.asset.id, HISTORY_DAYS - 1));
+  const dayReliable = positions.length > 0 && currentReliable
+    && positions.every(p => isObservedPrice(p.asset.id, HISTORY_DAYS - 1) && isObservedPrice(p.asset.id, HISTORY_DAYS - 2));
   const historyReliable = portfolioAnalysisAvailable(positions, 730);
   const totReturn = total - invested;
   const totPct = invested > 0 ? (totReturn / invested) * 100 : 0;
@@ -148,15 +192,20 @@ function renderDashboard(animate = true) {
   prevTotal = total;
 
   const deltaEl = $('#kpi-total-delta');
-  deltaEl.textContent = dayReliable ? `${fmtSignedEUR(dayDelta)} (${fmtPct(dayPct)}) vandaag` : 'dagresultaat niet beschikbaar zonder echte dagkoersen';
+  deltaEl.textContent = dayReliable ? `${fmtSignedEUR(dayDelta)} (${fmtPct(dayPct)}) vandaag` : 'dagresultaat niet beschikbaar zonder waargenomen dagkoersen';
   deltaEl.className = 'kpi-delta ' + (dayReliable ? (dayDelta >= 0 ? 'up' : 'down') : 'muted');
+  const freshness = portfolioFreshnessPresentation(positions);
+  const freshnessEl = $('#kpi-price-asof');
+  freshnessEl.textContent = freshness.text;
+  freshnessEl.title = freshness.title;
+  freshnessEl.className = `kpi-freshness${freshness.warning ? ' has-warning' : ''}`;
 
   $('#kpi-day').textContent = dayReliable ? fmtSignedEUR(dayDelta) : '—';
   const dayPctEl = $('#kpi-day-pct');
   dayPctEl.textContent = dayReliable ? fmtPct(dayPct) : 'onvoldoende waargenomen dagkoersen';
   dayPctEl.className = 'kpi-delta ' + (dayReliable ? (dayDelta >= 0 ? 'up' : 'down') : 'muted');
 
-  $('#kpi-return').textContent = fmtSignedEUR(totReturn);
+  $('#kpi-return').textContent = currentReliable ? fmtSignedEUR(totReturn) : '—';
   const retEl = $('#kpi-return-pct');
   state.twr = twrSeries(state.txs, values);
   const twrStartBoundary = HISTORY_DAYS - 730;
@@ -258,8 +307,9 @@ function renderHoldings(positions) {
     const sig = reliable ? computeSignal(prices, state.models[p.asset.id]?.forecastPct ?? null) : { label: '—', score: 0 };
     const day = isObservedPrice(p.asset.id, HISTORY_DAYS - 1) && isObservedPrice(p.asset.id, HISTORY_DAYS - 2)
       ? (prices[prices.length - 1] / prices[prices.length - 2] - 1) * 100 : null;
+    const freshness = assetFreshnessPresentation(p.asset.id, { compact: true });
     return {
-      p, sig,
+      p, sig, freshness,
       name: p.asset.name.toLowerCase(),
       price: p.price,
       day: day ?? -Infinity,
@@ -276,7 +326,7 @@ function renderHoldings(positions) {
   });
 
   for (const row of rows) {
-    const p = row.p, sig = row.sig, day = row.dayDisplay;
+    const p = row.p, sig = row.sig, day = row.dayDisplay, freshness = row.freshness;
     const prices = MARKET.prices[p.asset.id];
     const spark = prices.slice(-7);
 
@@ -286,7 +336,7 @@ function renderHoldings(positions) {
         <div class="asset-dot" style="background:${p.asset.color}">${escapeHTML(p.asset.id.slice(0, 4))}</div>
         <div><div class="asset-name">${escapeHTML(p.asset.name)}</div><div class="asset-ticker">${escapeHTML(p.asset.id)} · ${escapeHTML(p.asset.type)}</div></div>
       </div></td>
-      <td>${fmtEUR2.format(p.price)}</td>
+      <td>${fmtEUR2.format(p.price)}<br><span class="price-asof${freshness.warning ? ' stale' : ''}">${escapeHTML(freshness.text)}</span></td>
       <td>${day === null ? '<span class="muted">—</span>' : `<span class="pct ${day >= 0 ? 'up' : 'down'}">${fmtPct(day)}</span>`}</td>
       <td>${fmtNum.format(p.qty)}</td>
       <td><b>${fmtEUR.format(p.value)}</b></td>
@@ -328,8 +378,10 @@ function renderWatchlist() {
     const last = prices[prices.length - 1];
     const day = isObservedPrice(id, HISTORY_DAYS - 1) && isObservedPrice(id, HISTORY_DAYS - 2)
       ? (last / prices[prices.length - 2] - 1) * 100 : null;
-    const m1 = marketCoverage(id, HISTORY_DAYS - 31) >= ANALYSIS_MIN_COVERAGE ? (last / prices[prices.length - 31] - 1) * 100 : null;
-    const m3 = marketCoverage(id, HISTORY_DAYS - 91) >= ANALYSIS_MIN_COVERAGE ? (last / prices[prices.length - 91] - 1) * 100 : null;
+    const fresh = isFreshPrice(id);
+    const freshness = assetFreshnessPresentation(id, { compact: true });
+    const m1 = fresh && marketCoverage(id, HISTORY_DAYS - 31) >= ANALYSIS_MIN_COVERAGE ? (last / prices[prices.length - 31] - 1) * 100 : null;
+    const m3 = fresh && marketCoverage(id, HISTORY_DAYS - 91) >= ANALYSIS_MIN_COVERAGE ? (last / prices[prices.length - 91] - 1) * 100 : null;
     const sig = analysisAvailable(id, 365) ? computeSignal(prices, state.models[id]?.forecastPct ?? null) : null;
     const metric = value => value === null ? '<span class="muted">—</span>' : `<span class="pct ${value >= 0 ? 'up' : 'down'}">${fmtPct(value, 1)}</span>`;
 
@@ -339,7 +391,7 @@ function renderWatchlist() {
         <div class="asset-dot" style="background:${a.color}">${escapeHTML(a.id.slice(0, 4))}</div>
         <div><div class="asset-name">${escapeHTML(a.name)}</div><div class="asset-ticker">${escapeHTML(a.id)} · ${escapeHTML(a.type)}${held.has(id) ? ' · in bezit' : ''}</div></div>
       </div></td>
-      <td>${fmtEUR2.format(last)}</td>
+      <td>${fmtEUR2.format(last)}<br><span class="price-asof${freshness.warning ? ' stale' : ''}">${escapeHTML(freshness.text)}</span></td>
       <td>${metric(day)}</td>
       <td>${metric(m1)}</td>
       <td>${metric(m3)}</td>
@@ -492,6 +544,10 @@ function renderAssetView() {
   $('#asset-title').textContent = asset.name;
   $('#asset-subtitle').textContent = `${asset.id} · ${asset.type}${asset.custom ? ' · geïmporteerd' : ''}`;
   $('#a-price').textContent = fmtEUR2.format(last);
+  const freshness = assetFreshnessPresentation(asset.id);
+  const freshnessEl = $('#a-price-asof');
+  freshnessEl.textContent = freshness.text;
+  freshnessEl.className = `kpi-freshness${freshness.warning ? ' has-warning' : ''}`;
   const dayEl = $('#a-day');
   dayEl.textContent = day === null ? 'dagresultaat niet beschikbaar' : fmtPct(day) + ' vandaag';
   dayEl.className = 'kpi-delta ' + (day === null ? 'muted' : day >= 0 ? 'up' : 'down');
@@ -1391,7 +1447,9 @@ function localDateInputValue(date = new Date()) {
 
 function resetTxForm() {
   txTypeSelect.value = 'buy';
-  $('#tx-date').value = localDateInputValue();
+  const today = localDateInputValue();
+  $('#tx-date').max = today;
+  $('#tx-date').value = today;
   $('#tx-currency').value = 'EUR';
   $('#tx-fx').value = '1';
   $('#tx-qty').value = '1';
@@ -1477,6 +1535,7 @@ $('#tx-save').addEventListener('click', () => {
     const currency = normalizeCurrency($('#tx-currency').value);
     const fxRate = Number($('#tx-fx').value);
     if (!Number.isFinite(date.getTime())) throw new Error('Kies een geldige boekingsdatum.');
+    if (isFutureCalendarDate(date)) throw new Error('Een boekingsdatum in de toekomst is niet toegestaan.');
     if (!currency) throw new Error('Gebruik een geldige drieletterige valutacode, bijvoorbeeld EUR of USD.');
     if (type !== 'split' && (!Number.isFinite(fxRate) || fxRate <= 0)) throw new Error('Vul een geldige wisselkoers naar EUR in.');
 

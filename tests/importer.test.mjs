@@ -59,6 +59,20 @@ test('te diep geneste import wordt beheerst afgewezen', () => {
   assert.match(result.error, /te diep genest/);
 });
 
+test('een generieke import met een toekomstige boeking faalt zonder opslagmutatie', () => {
+  const storage = new MemoryStorage({ bestaand: 'blijft' });
+  const rt = createRuntime(FILES, { storage, now: '2026-07-16T12:00:00+02:00' });
+  const payload = JSON.stringify({
+    transactions: [{ date: '2026-07-17', side: 'buy', ticker: 'FUT', quantity: 1, price: 100 }],
+  });
+  const result = rt.evaluate(`importPortfolioJSON(${JSON.stringify(payload)})`);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /toekomstige boeking/i);
+  assert.equal(storage.getItem('bestaand'), 'blijft');
+  assert.equal(storage.getItem('vermogen_transactions_v4'), null);
+  assert.equal(storage.getItem('vermogen_custom_v2'), null);
+});
+
 test('CSV-dedupe behoudt afzonderlijke orders met andere prijs', () => {
   const rt = createRuntime(FILES);
   const result = rt.evaluate(`(() => {
@@ -414,7 +428,7 @@ test('gedateerde marktdata blijft na een week aan de oorspronkelijke kalenderdag
   })()`);
   assert.deepEqual(JSON.parse(JSON.stringify(result)), {
     originalDate: '2026-07-16', originalPrice: 119, originalQuality: 'observed',
-    currentPrice: 119, currentQuality: 'carried',
+    currentPrice: 119, currentQuality: 'reconstructed',
   });
 });
 
@@ -565,7 +579,7 @@ test('schema-v4-backup herstelt marktdata op de oorspronkelijke datum', () => {
     const original = dateToIndexUnclamped(localDateFromKey('2026-07-16'));
     return { original: priceQualityAt('V4', original), current: priceQualityAt('V4', HISTORY_DAYS - 1), price: lastPrice('V4') };
   })()`);
-  assert.deepEqual(JSON.parse(JSON.stringify(result)), { original: 'observed', current: 'carried', price: 100 });
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { original: 'observed', current: 'reconstructed', price: 100 });
 });
 
 test('een onbewezen schema-v4-datumanker kan observed-flags niet betrouwbaar maken', () => {
@@ -605,7 +619,7 @@ test('legacy livehistorie gebruikt quoteAt als datumanker tijdens migratie', () 
     const original = dateToIndexUnclamped(localDateFromKey('2026-07-16'));
     return { date: localDateKey(MARKET.dates[original]), quality: priceQualityAt('BTC', original), price: MARKET.prices.BTC[original], current: priceQualityAt('BTC', HISTORY_DAYS - 1) };
   })()`);
-  assert.deepEqual(JSON.parse(JSON.stringify(result)), { date: '2026-07-16', quality: 'observed', price: 42, current: 'carried' });
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { date: '2026-07-16', quality: 'observed', price: 42, current: 'reconstructed' });
   assert.ok(storage.getItem('vermogen_livehist_v1'));
   assert.ok(storage.getItem('vermogen_livehist_v2'));
 });

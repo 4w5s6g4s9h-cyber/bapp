@@ -242,3 +242,74 @@ test('DCA op een weekend wacht op de eerste werkelijk waargenomen handelsdag', (
     count: 1, executionDate: '2026-07-13', price: 110, weekendObserved: false,
   });
 });
+
+test('doorgetrokken koersen vervallen na de markt-afhankelijke actualiteitsgrens', () => {
+  const rt = createRuntime(['js/data.js'], { now: '2026-07-16T12:00:00+02:00' });
+  const result = rt.evaluate(`(() => {
+    const prices = new Array(HISTORY_DAYS).fill(100);
+    const stockQuality = new Array(HISTORY_DAYS).fill(PRICE_QUALITY.OBSERVED);
+    const cryptoQuality = new Array(HISTORY_DAYS).fill(PRICE_QUALITY.OBSERVED);
+    const stockObserved = dateToIndexUnclamped(localDateFromKey('2026-07-10'));
+    const cryptoObserved = dateToIndexUnclamped(localDateFromKey('2026-07-15'));
+    for (let i = stockObserved + 1; i < HISTORY_DAYS; i++) stockQuality[i] = PRICE_QUALITY.CARRIED;
+    for (let i = cryptoObserved + 1; i < HISTORY_DAYS; i++) cryptoQuality[i] = PRICE_QUALITY.CARRIED;
+    registerAsset({ id: 'STALE', name: 'Verouderd aandeel', type: 'Aandeel' }, prices, null, stockQuality);
+    registerAsset({ id: 'FRESH', name: 'Recente crypto', type: 'Crypto' }, prices, null, cryptoQuality);
+    return {
+      stock: marketFreshness('STALE'),
+      crypto: marketFreshness('FRESH'),
+      stockHistoryAllowed: hasReliableHistory('STALE', 365),
+      stockLastQuality: priceQualityAt('STALE', HISTORY_DAYS - 1),
+      stockWithinLimit: priceQualityAt('STALE', stockObserved + 4),
+    };
+  })()`);
+  const plain = JSON.parse(JSON.stringify(result));
+  assert.equal(plain.stock.observedDate, '2026-07-10');
+  assert.equal(plain.stock.ageDays, 6);
+  assert.equal(plain.stock.fresh, false);
+  assert.equal(plain.stockLastQuality, 'reconstructed');
+  assert.equal(plain.stockWithinLimit, 'carried');
+  assert.equal(plain.stockHistoryAllowed, false);
+  assert.equal(plain.crypto.observedDate, '2026-07-15');
+  assert.equal(plain.crypto.ageDays, 1);
+  assert.equal(plain.crypto.fresh, true);
+});
+
+test('kalenderdagverschillen blijven exact over zomer- en wintertijd', () => {
+  const rt = createRuntime(['js/data.js'], { now: '2026-07-16T12:00:00+02:00' });
+  const diffs = rt.evaluate(`[
+    calendarDayDiff(localDateFromKey('2026-03-28'), localDateFromKey('2026-03-29')),
+    calendarDayDiff(localDateFromKey('2026-03-29'), localDateFromKey('2026-03-30')),
+    calendarDayDiff(localDateFromKey('2026-10-24'), localDateFromKey('2026-10-25')),
+    calendarDayDiff(localDateFromKey('2026-10-25'), localDateFromKey('2026-10-26')),
+  ]`);
+  assert.deepEqual(JSON.parse(JSON.stringify(diffs)), [1, 1, 1, 1]);
+});
+
+test('toekomstige boekingen worden niet stil op vandaag geklemd', () => {
+  const rt = createRuntime(['js/data.js'], { now: '2026-07-16T12:00:00+02:00' });
+  const result = rt.evaluate(`(() => {
+    registerAsset({ id: 'FUT', name: 'Future', type: 'ETF' }, new Array(HISTORY_DAYS).fill(100), new Array(HISTORY_DAYS).fill(true));
+    const txs = [
+      { id: 'future-deposit', date: '2026-07-17T12:00:00.000Z', type: 'deposit', amount: 1000 },
+      { id: 'future-buy', date: '2026-07-17T12:00:00.000Z', type: 'buy', asset: 'FUT', qty: 10, price: 100, external: true },
+    ];
+    const portfolio = computePortfolioSeries(txs);
+    return {
+      future: isFutureCalendarDate(txs[0].date),
+      value: portfolio.values.at(-1),
+      cash: portfolio.cash,
+      issueCodes: portfolio.ledger.issues.map(issue => issue.code),
+      invested: totalInvested(txs),
+      xirrFlows: externalCashflowEvents(txs).length,
+    };
+  })()`);
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), {
+    future: true,
+    value: 0,
+    cash: 0,
+    issueCodes: ['future-transaction', 'future-transaction'],
+    invested: 0,
+    xirrFlows: 0,
+  });
+});
