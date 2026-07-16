@@ -405,10 +405,30 @@
         </div>
       </header>
       <div id="import-report"></div>
+      <div class="ledger-summary" id="ledger-summary"></div>
+      <div id="ledger-issues"></div>
+
+      <div class="card reconciliation-card">
+        <div class="card-head">
+          <div>
+            <h2>Reconciliatie met broker</h2>
+            <p class="card-subtitle">Vergelijk de berekende aantallen en cash met een momentopname uit je broker.</p>
+          </div>
+          <button class="btn btn-ghost btn-xs" id="recon-save">Momentopname bewaren</button>
+        </div>
+        <div class="table-wrap">
+          <table class="holdings-table reconciliation-table">
+            <thead><tr><th>Rekening / asset</th><th>Berekend</th><th>Broker</th><th>Verschil</th></tr></thead>
+            <tbody id="recon-rows"></tbody>
+          </table>
+        </div>
+        <div id="recon-status" class="recon-status"></div>
+      </div>
+
       <div class="card drop-target" id="tx-card">
         <div class="table-wrap">
           <table class="holdings-table" id="tx-table">
-            <thead><tr><th>Datum</th><th>Type</th><th>Asset</th><th>Aantal</th><th>Koers</th><th>Totaal</th><th></th></tr></thead>
+            <thead><tr><th>Datum</th><th>Type</th><th>Asset / rekening</th><th>Hoeveelheid</th><th>Eenheidsprijs</th><th>Bedrag (EUR)</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -534,17 +554,47 @@
 <!-- ===== TRANSACTIE MODAL ===== -->
 <div class="modal-backdrop" id="tx-modal" role="dialog" aria-modal="true" aria-labelledby="tx-modal-title" aria-hidden="true">
   <div class="modal" tabindex="-1">
-    <h2 id="tx-modal-title">Nieuwe transactie</h2>
+    <h2 id="tx-modal-title">Nieuwe portefeuilleboeking</h2>
     <div class="form-row">
-      <label>Type</label>
-      <div class="segmented full" id="tx-type">
-        <button data-type="buy" class="active">Kopen</button>
-        <button data-type="sell">Verkopen</button>
-      </div>
+      <label for="tx-type-select">Type gebeurtenis</label>
+      <select id="tx-type-select" class="select full">
+        <optgroup label="Handel">
+          <option value="buy">Koop</option>
+          <option value="sell">Verkoop</option>
+        </optgroup>
+        <optgroup label="Cash">
+          <option value="deposit">Storting</option>
+          <option value="withdrawal">Opname</option>
+          <option value="dividend">Dividend</option>
+          <option value="interest">Rente</option>
+          <option value="fee">Kosten</option>
+          <option value="tax">Belasting</option>
+        </optgroup>
+        <optgroup label="Effectenrekening">
+          <option value="split">Aandelensplit</option>
+          <option value="transfer_in">Assettransfer in</option>
+          <option value="transfer_out">Assettransfer uit</option>
+        </optgroup>
+      </select>
     </div>
-    <div class="form-row"><label>Asset</label><select id="tx-asset" class="select full"></select></div>
-    <div class="form-row"><label for="tx-qty">Aantal</label><input type="number" id="tx-qty" class="input" min="0" step="any" value="1"></div>
-    <div class="form-row"><label for="tx-price">Koers (€)</label><input type="number" id="tx-price" class="input" min="0" step="any"></div>
+    <div class="form-grid two">
+      <div class="form-row"><label for="tx-date">Boekingsdatum</label><input type="date" id="tx-date" class="input"></div>
+      <div class="form-row tx-money-field"><label for="tx-currency">Valuta</label><input type="text" id="tx-currency" class="input" value="EUR" maxlength="3" autocomplete="off"></div>
+    </div>
+    <div class="form-row" data-tx-field="asset"><label for="tx-asset">Asset</label><select id="tx-asset" class="select full"></select></div>
+    <div class="form-grid two">
+      <div class="form-row" data-tx-field="qty"><label for="tx-qty">Aantal</label><input type="number" id="tx-qty" class="input" min="0" step="any" value="1"></div>
+      <div class="form-row" data-tx-field="price"><label for="tx-price">Koers per stuk</label><input type="number" id="tx-price" class="input" min="0" step="any"></div>
+      <div class="form-row" data-tx-field="amount"><label for="tx-amount">Bedrag</label><input type="number" id="tx-amount" class="input" min="0" step="any"></div>
+      <div class="form-row" data-tx-field="ratio"><label for="tx-ratio">Nieuwe / oude aantallen</label><input type="number" id="tx-ratio" class="input" min="0" step="any" value="2"></div>
+      <div class="form-row" data-tx-field="fee"><label for="tx-fee">Transactiekosten</label><input type="number" id="tx-fee" class="input" min="0" step="any" value="0"></div>
+      <div class="form-row" data-tx-field="tax"><label for="tx-tax">Belasting</label><input type="number" id="tx-tax" class="input" min="0" step="any" value="0"></div>
+      <div class="form-row" data-tx-field="costBasis"><label for="tx-cost-basis">Totale kostbasis (optioneel)</label><input type="number" id="tx-cost-basis" class="input" min="0" step="any"></div>
+      <div class="form-row" data-tx-field="externalValue"><label for="tx-external-value">Marktwaarde bij transfer (optioneel)</label><input type="number" id="tx-external-value" class="input" min="0" step="any"></div>
+      <div class="form-row tx-money-field" data-tx-field="fx"><label for="tx-fx">1 valuta-eenheid in EUR</label><input type="number" id="tx-fx" class="input" min="0" step="any" value="1"></div>
+    </div>
+    <label class="check-row" data-tx-field="external"><input type="checkbox" id="tx-external" checked><span><b>Direct extern afgerekend</b><small>Gebruik dit als je geen afzonderlijke storting/opname boekt. Zet uit voor een trade vanuit het cashsaldo.</small></span></label>
+    <div class="form-row"><label for="tx-note">Notitie (optioneel)</label><input type="text" id="tx-note" class="input" maxlength="160" autocomplete="off"></div>
     <div class="modal-total" id="tx-total">Totaal: —</div>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="tx-cancel">Annuleren</button>

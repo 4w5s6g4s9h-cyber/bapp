@@ -137,6 +137,31 @@ test('assettransfers gebruiken afzonderlijke kostbasis en externe waarde', () =>
   assert.deepEqual(JSON.parse(JSON.stringify(result)), { cash: 0, value: 720, invested: 520, qty: 6, cost: 480 });
 });
 
+test('brokerreconciliatie vergelijkt aantallen en cash met expliciete toleranties', () => {
+  const rt = createRuntime(['js/data.js']);
+  const result = rt.evaluate(`(() => {
+    registerAsset({ id: 'REC', name: 'Recon', type: 'ETF' }, new Array(HISTORY_DAYS).fill(120), new Array(HISTORY_DAYS).fill(true));
+    const date = MARKET.dates[HISTORY_DAYS - 1].toISOString();
+    const txs = [
+      { id: '1', date, type: 'deposit', amount: 1000 },
+      { id: '2', date, type: 'buy', asset: 'REC', qty: 5, price: 100 },
+    ];
+    const exact = reconcilePortfolio(txs, { assets: { REC: 5 }, cash: 500, date });
+    const mismatch = reconcilePortfolio(txs, { assets: { REC: 4.5 }, cash: 499, date });
+    const saved = saveReconciliation({ assets: { REC: 5 }, cash: 500 });
+    const loaded = loadReconciliation();
+    return { exact, mismatch, saved, loaded };
+  })()`);
+  const resultPlain = JSON.parse(JSON.stringify(result));
+  assert.equal(resultPlain.exact.complete, true);
+  assert.equal(resultPlain.exact.balanced, true);
+  assert.equal(resultPlain.mismatch.balanced, false);
+  assert.equal(resultPlain.mismatch.rows[0].difference, -0.5);
+  assert.equal(resultPlain.mismatch.cash.difference, -1);
+  assert.equal(resultPlain.saved.assets.REC, 5);
+  assert.equal(resultPlain.loaded.cash, 500);
+});
+
 test('XIRR volgt de 365-dagenconventie en verwerkt onregelmatige cashflows', () => {
   const rt = createRuntime(['js/data.js', 'js/quant.js']);
   const result = rt.evaluate(`(() => {

@@ -570,6 +570,43 @@ function saveReconciliation(snapshot) {
   return clean;
 }
 
+function reconcilePortfolio(txs, snapshot = {}) {
+  const ledger = buildPortfolioLedger(txs);
+  const actualAssets = {};
+  if (snapshot?.assets && typeof snapshot.assets === 'object' && !Array.isArray(snapshot.assets)) {
+    for (const [rawId, rawQty] of Object.entries(snapshot.assets)) {
+      const id = normalizeAssetId(rawId), qty = Number(rawQty);
+      if (id && Number.isFinite(qty) && qty >= 0) actualAssets[id] = qty;
+    }
+  }
+  const ids = new Set([
+    ...Object.keys(ledger.positions).filter(id => ledger.positions[id].qty > 1e-9),
+    ...Object.keys(actualAssets).map(normalizeAssetId).filter(Boolean),
+  ]);
+  const rows = [...ids].sort().map(asset => {
+    const expected = ledger.positions[asset]?.qty || 0;
+    const rawActual = Object.prototype.hasOwnProperty.call(actualAssets, asset) ? Number(actualAssets[asset]) : null;
+    const actual = Number.isFinite(rawActual) ? rawActual : null;
+    const difference = actual === null ? null : actual - expected;
+    const tolerance = Math.max(1e-8, Math.abs(expected) * 1e-8);
+    return { asset, expected, actual, difference, balanced: difference !== null && Math.abs(difference) <= tolerance };
+  });
+  const rawCash = snapshot?.cash;
+  const actualCash = rawCash === '' || rawCash === null || rawCash === undefined ? null : Number(rawCash);
+  const cash = {
+    expected: ledger.cash,
+    actual: Number.isFinite(actualCash) ? actualCash : null,
+    difference: Number.isFinite(actualCash) ? actualCash - ledger.cash : null,
+  };
+  cash.balanced = cash.difference !== null && Math.abs(cash.difference) <= 0.01;
+  const complete = rows.every(row => row.actual !== null) && cash.actual !== null;
+  return {
+    rows, cash, complete,
+    balanced: complete && rows.every(row => row.balanced) && cash.balanced,
+    checkedAt: snapshot?.date || null,
+  };
+}
+
 // ---------- Helpers ----------
 function round2(x) { return Math.round(x * 100) / 100; }
 

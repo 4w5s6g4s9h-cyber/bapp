@@ -102,6 +102,12 @@ function rebuildAssetSelects() {
   for (const sel of [$('#asset-select'), $('#tx-asset'), $('#bt-asset'), $('#dca-asset')]) {
     const cur = sel.value;
     sel.innerHTML = '';
+    if (sel.id === 'tx-asset') {
+      const empty = document.createElement('option');
+      empty.value = '';
+      empty.textContent = 'Geen asset / cashrekening';
+      sel.appendChild(empty);
+    }
     ASSETS.forEach(a => {
       const opt = document.createElement('option');
       opt.value = a.id;
@@ -132,6 +138,7 @@ function renderDashboard(animate = true) {
   const historyReliable = portfolioAnalysisAvailable(positions, 730);
   const totReturn = total - invested;
   const totPct = invested > 0 ? (totReturn / invested) * 100 : 0;
+  const moneyWeighted = currentReliable ? portfolioXirr(state.txs, total) : null;
 
   $('#today-date').textContent = new Intl.DateTimeFormat('nl-NL', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).format(new Date());
 
@@ -157,21 +164,25 @@ function renderDashboard(animate = true) {
   const ytdIdx = MARKET.dates.findIndex(d => d.getFullYear() === new Date().getFullYear());
   const twrYtd = ytdIdx >= 0 ? twrBetween(state.twr, Math.max(ytdIdx, state.twr.findIndex(v => v !== null)), HISTORY_DAYS - 1) : null;
   if (twrTotal !== null && historyReliable) {
-    retEl.textContent = `TWR ${fmtPct(twrTotal * 100, 1)} (2j)` + (twrYtd !== null ? ` · YTD ${fmtPct(twrYtd * 100, 1)}` : '');
-    retEl.title = 'Tijdgewogen rendement: gecorrigeerd voor je stortingen en opnames. Geldgewogen: ' + fmtPct(totPct, 1);
+    retEl.textContent = `TWR ${fmtPct(twrTotal * 100, 1)} (2j)`
+      + (moneyWeighted !== null ? ` · XIRR ${fmtPct(moneyWeighted * 100, 1)}/jr` : '')
+      + (twrYtd !== null ? ` · YTD ${fmtPct(twrYtd * 100, 1)}` : '');
+    retEl.title = 'TWR corrigeert voor externe geldstromen; XIRR is het geannualiseerde geldgewogen rendement op basis van de exacte cashflowdatums.';
     retEl.className = 'kpi-delta ' + (twrTotal >= 0 ? 'up' : 'down');
   } else {
-    retEl.textContent = currentReliable ? `${fmtPct(totPct)} geldgewogen` : 'historisch rendement geblokkeerd';
-    retEl.title = currentReliable ? 'Geldgewogen resultaat ten opzichte van netto-inleg; onvoldoende echte historie voor TWR.' : 'De huidige waardering bevat gereconstrueerde koersen.';
+    retEl.textContent = moneyWeighted !== null
+      ? `XIRR ${fmtPct(moneyWeighted * 100, 1)}/jr`
+      : currentReliable ? `${fmtPct(totPct)} t.o.v. netto-inleg` : 'historisch rendement geblokkeerd';
+    retEl.title = currentReliable ? 'XIRR gebruikt de exacte datums en omvang van externe geldstromen; onvoldoende echte historie voor TWR.' : 'De huidige waardering bevat gereconstrueerde koersen.';
     retEl.className = 'kpi-delta ' + (currentReliable ? (totReturn >= 0 ? 'up' : 'down') : 'muted');
   }
 
   $('#kpi-invested').textContent = fmtEUR.format(invested);
-  $('#kpi-positions').textContent = `${positions.length} posities`;
+  $('#kpi-positions').textContent = `${positions.length} posities · cash ${fmtEUR.format(state.portfolio.cash)}`;
 
   renderPortfolioChart();
   renderDashboardBrush();
-  renderAllocation(positions, total);
+  renderAllocation(positions, total, state.portfolio.cash);
   renderHoldings(positions);
   renderWatchlist();
 }
@@ -223,13 +234,15 @@ $('#btn-benchmark').addEventListener('click', () => {
   renderPortfolioChart();
 });
 
-function renderAllocation(positions, total) {
+function renderAllocation(positions, total, cash = 0) {
   // dust-posities (< 1% van totaal) samenvoegen tot "Overig"
-  const main = positions.filter(p => p.value / total >= 0.01);
-  const rest = positions.filter(p => p.value / total < 0.01);
+  const denominator = Math.max(total, 1e-9);
+  const main = positions.filter(p => p.value / denominator >= 0.01);
+  const rest = positions.filter(p => p.value / denominator < 0.01);
   const segments = main.map(p => ({ name: p.asset.name, value: p.value, color: p.asset.color }));
   const restSum = rest.reduce((s, p) => s + p.value, 0);
   if (restSum > 0) segments.push({ name: `Overig (${rest.length})`, value: restSum, color: '#5c6580' });
+  if (cash > 0.005) segments.push({ name: 'Cash', value: cash, color: '#22d3ee' });
   renderDonut($('#allocation-donut'), $('#allocation-legend'), segments, compactEUR(total));
 }
 
@@ -1148,22 +1161,55 @@ function renderAIInsights(positions, total, m) {
 /* ============================================================
    TRANSACTIES + IMPORT
    ============================================================ */
+const TX_TYPE_UI = Object.freeze({
+  buy: { label: 'Koop', className: 'tx-buy' },
+  sell: { label: 'Verkoop', className: 'tx-sell' },
+  deposit: { label: 'Storting', className: 'tx-cash-in' },
+  withdrawal: { label: 'Opname', className: 'tx-cash-out' },
+  dividend: { label: 'Dividend', className: 'tx-income' },
+  interest: { label: 'Rente', className: 'tx-income' },
+  fee: { label: 'Kosten', className: 'tx-cost' },
+  tax: { label: 'Belasting', className: 'tx-cost' },
+  split: { label: 'Split', className: 'tx-action' },
+  transfer_in: { label: 'Transfer in', className: 'tx-transfer' },
+  transfer_out: { label: 'Transfer uit', className: 'tx-transfer' },
+});
+
+function transactionTableValues(tx) {
+  const currency = tx.currency || 'EUR';
+  if (TRADE_TYPES.has(tx.type)) {
+    const amount = tx.type === 'buy' ? transactionTradeGrossEur(tx) : transactionTradeNetEur(tx);
+    return { qty: fmtNum.format(tx.qty), price: `${fmtNum.format(tx.price)} ${currency}`, amount };
+  }
+  if (TRANSFER_TYPES.has(tx.type)) {
+    return { qty: fmtNum.format(tx.qty), price: `${fmtNum.format(tx.price)} ${currency}`, amount: transactionTransferValueEur(tx) };
+  }
+  if (tx.type === 'split') return { qty: `× ${fmtNum.format(tx.ratio)}`, price: '—', amount: null };
+  const amount = transactionAmountEur(tx);
+  const sign = ['withdrawal', 'fee', 'tax'].includes(tx.type) ? -1 : 1;
+  return { qty: '—', price: `${fmtNum.format(tx.amount)} ${currency}`, amount: sign * amount };
+}
+
 function renderTransactions() {
+  state.portfolio = computePortfolioSeries(state.txs);
   const tbody = $('#tx-table tbody');
   tbody.innerHTML = '';
   const sorted = [...state.txs].sort((a, b) => new Date(b.date) - new Date(a.date));
-  $('#tx-count').textContent = `${sorted.length} transacties`;
+  $('#tx-count').textContent = `${sorted.length} boekingen · cash ${fmtEUR2.format(state.portfolio.cash)}`;
   for (const tx of sorted) {
-    const a = assetById(tx.asset) || { color: '#5c6580', id: tx.asset, name: tx.asset };
+    const typeUi = TX_TYPE_UI[tx.type] || { label: tx.type, className: 'tx-action' };
+    const a = tx.asset ? (assetById(tx.asset) || { color: '#5c6580', id: tx.asset, name: tx.asset }) : null;
+    const display = transactionTableValues(tx);
     const tr = document.createElement('tr');
     tr.style.cursor = 'default';
+    if (tx.note) tr.title = tx.note;
     tr.innerHTML = `
       <td>${fmtDate.format(new Date(tx.date))}</td>
-      <td><span class="tx-badge ${tx.type === 'buy' ? 'tx-buy' : 'tx-sell'}">${tx.type === 'buy' ? 'Koop' : 'Verkoop'}</span>${String(tx.id).startsWith('dca-') ? ' <span class="tag tag-dca">DCA</span>' : ''}</td>
-      <td><div class="asset-cell"><div class="asset-dot" style="background:${a.color};width:26px;height:26px;border-radius:8px;font-size:9px">${a.id.slice(0, 3)}</div>${a.name}</div></td>
-      <td>${fmtNum.format(tx.qty)}</td>
-      <td>${fmtEUR2.format(tx.price)}</td>
-      <td><b>${fmtEUR.format(tx.qty * tx.price)}</b></td>
+      <td><span class="tx-badge ${typeUi.className}">${typeUi.label}</span>${String(tx.id).startsWith('dca-') ? ' <span class="tag tag-dca">DCA</span>' : ''}${tx.external ? ' <span class="tag tag-external" title="Direct extern afgerekend">extern</span>' : ''}</td>
+      <td>${a ? `<div class="asset-cell"><div class="asset-dot" style="background:${safeColor(a.color)};width:26px;height:26px;border-radius:8px;font-size:9px">${escapeHTML(a.id.slice(0, 3))}</div>${escapeHTML(a.name)}</div>` : '<span class="muted">Cashrekening</span>'}</td>
+      <td>${display.qty}</td>
+      <td>${display.price}</td>
+      <td class="${display.amount !== null && display.amount < 0 ? 'pct down' : ''}"><b>${display.amount === null ? '—' : fmtEUR2.format(display.amount)}</b></td>
       <td><button class="tx-del" title="Verwijderen">✕</button></td>`;
     tr.querySelector('.tx-del').addEventListener('click', () => {
       state.txs = state.txs.filter(t => t.id !== tx.id);
@@ -1174,8 +1220,74 @@ function renderTransactions() {
     });
     tbody.appendChild(tr);
   }
+  renderLedgerSummary();
+  renderReconciliation();
   renderImportReport();
 }
+
+function renderLedgerSummary() {
+  const ledger = state.portfolio?.ledger || buildPortfolioLedger(state.txs);
+  const openCost = Object.values(ledger.positions).reduce((sum, position) => sum + position.cost, 0);
+  const cards = [
+    ['Cashsaldo', fmtEUR2.format(ledger.cash), ledger.cash < -0.005 ? 'down' : ''],
+    ['Open kostbasis', fmtEUR.format(openCost), ''],
+    ['Gerealiseerd resultaat', fmtSignedEUR(ledger.realized), ledger.realized >= 0 ? 'up' : 'down'],
+    ['Inkomsten', fmtEUR2.format(ledger.income), ledger.income > 0 ? 'up' : ''],
+    ['Kosten + belasting', fmtEUR2.format(ledger.fees + ledger.taxes), ledger.fees + ledger.taxes > 0 ? 'down' : ''],
+  ];
+  $('#ledger-summary').innerHTML = cards.map(([label, value, tone]) => `
+    <div class="ledger-stat"><span>${label}</span><b class="${tone}">${value}</b></div>`).join('');
+  const issues = ledger.issues;
+  $('#ledger-issues').innerHTML = issues.length ? `
+    <div class="ledger-warning"><b>⚠ ${issues.length} boekhoudkundig aandachtspunt${issues.length > 1 ? 'en' : ''}</b>
+      <ul>${issues.map(issue => `<li>${escapeHTML(issue.message)}</li>`).join('')}</ul>
+    </div>` : '';
+}
+
+function renderReconciliation() {
+  const snapshot = loadReconciliation();
+  const report = reconcilePortfolio(state.txs, snapshot);
+  const rows = report.rows.map(row => {
+    const difference = row.difference === null ? '—' : fmtNum.format(row.difference);
+    const differenceClass = row.difference === null ? 'muted' : row.balanced ? 'up' : 'down';
+    return `<tr>
+      <td><b>${escapeHTML(assetById(row.asset)?.name || row.asset)}</b> <span class="muted">${escapeHTML(row.asset)}</span></td>
+      <td>${fmtNum.format(row.expected)}</td>
+      <td><input class="input recon-input" type="number" min="0" step="any" data-recon-asset="${escapeHTML(row.asset)}" value="${row.actual === null ? '' : row.actual}"></td>
+      <td><span class="pct ${differenceClass}">${difference}</span></td>
+    </tr>`;
+  });
+  rows.push(`<tr>
+    <td><b>Cashrekening</b> <span class="muted">EUR</span></td>
+    <td>${fmtEUR2.format(report.cash.expected)}</td>
+    <td><input class="input recon-input" type="number" step="any" id="recon-cash" value="${report.cash.actual === null ? '' : report.cash.actual}"></td>
+    <td><span class="pct ${report.cash.difference === null ? 'muted' : report.cash.balanced ? 'up' : 'down'}">${report.cash.difference === null ? '—' : fmtEUR2.format(report.cash.difference)}</span></td>
+  </tr>`);
+  $('#recon-rows').innerHTML = rows.join('');
+
+  const checked = report.checkedAt ? ` · opgeslagen ${fmtDate.format(new Date(report.checkedAt))}` : '';
+  const status = !report.complete
+    ? { className: 'pending', text: 'Vul voor alle berekende posities en cash de brokerstand in.' }
+    : report.balanced
+      ? { className: 'ok', text: '✓ Ledger en brokerstand sluiten volledig aan.' }
+      : { className: 'error', text: 'Verschillen gevonden. Controleer ontbrekende transacties, fees, splits of transfers.' };
+  $('#recon-status').className = `recon-status ${status.className}`;
+  $('#recon-status').textContent = status.text + checked;
+}
+
+$('#recon-save').addEventListener('click', () => {
+  try {
+    const assets = {};
+    $$('[data-recon-asset]').forEach(input => {
+      if (input.value !== '') assets[input.dataset.reconAsset] = Number(input.value);
+    });
+    saveReconciliation({ assets, cash: $('#recon-cash').value });
+    renderReconciliation();
+    toast('✅ Brokerstand opgeslagen en vergeleken');
+  } catch (error) {
+    toast('⚠️ ' + error.message);
+  }
+});
 
 function renderImportReport() {
   const holder = $('#import-report');
@@ -1239,12 +1351,26 @@ dropCard.addEventListener('drop', e => {
 
 /* ---------- modal ---------- */
 const txModal = $('#tx-modal');
-let txType = 'buy';
+const txTypeSelect = $('#tx-type-select');
 const txAssetSelect = $('#tx-asset');
 let modalReturnFocus = null;
+const TX_FORM_FIELDS = Object.freeze({
+  buy: ['asset', 'qty', 'price', 'fee', 'tax', 'fx', 'external'],
+  sell: ['asset', 'qty', 'price', 'fee', 'tax', 'fx', 'external'],
+  deposit: ['amount', 'fx'],
+  withdrawal: ['amount', 'fx'],
+  dividend: ['asset', 'amount', 'fx'],
+  interest: ['asset', 'amount', 'fx'],
+  fee: ['asset', 'amount', 'fx'],
+  tax: ['asset', 'amount', 'fx'],
+  split: ['asset', 'ratio'],
+  transfer_in: ['asset', 'qty', 'price', 'costBasis', 'externalValue', 'fx'],
+  transfer_out: ['asset', 'qty', 'price', 'externalValue', 'fx'],
+});
 
 function focusableIn(root) {
-  return [...root.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])')];
+  return [...root.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])')]
+    .filter(element => element.offsetParent !== null);
 }
 
 function closeTxModal() {
@@ -1253,14 +1379,37 @@ function closeTxModal() {
   modalReturnFocus?.focus?.();
 }
 
+function localDateInputValue(date = new Date()) {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 10);
+}
+
+function resetTxForm() {
+  txTypeSelect.value = 'buy';
+  $('#tx-date').value = localDateInputValue();
+  $('#tx-currency').value = 'EUR';
+  $('#tx-fx').value = '1';
+  $('#tx-qty').value = '1';
+  $('#tx-amount').value = '';
+  $('#tx-ratio').value = '2';
+  $('#tx-fee').value = '0';
+  $('#tx-tax').value = '0';
+  $('#tx-cost-basis').value = '';
+  $('#tx-external-value').value = '';
+  $('#tx-external').checked = true;
+  $('#tx-note').value = '';
+  if (!txAssetSelect.value && ASSETS.length) txAssetSelect.value = ASSETS[0].id;
+  $('#tx-price').value = txAssetSelect.value && MARKET.prices[txAssetSelect.value]
+    ? round2(lastPrice(txAssetSelect.value)) : '';
+  updateTxFormVisibility();
+}
+
 function openTxModal() {
-  if (!ASSETS.length) { toast('⚠️ Importeer eerst een portfolio'); return; }
   modalReturnFocus = document.activeElement;
+  resetTxForm();
   txModal.classList.add('open');
   txModal.setAttribute('aria-hidden', 'false');
-  $('#tx-price').value = round2(lastPrice(txAssetSelect.value));
-  updateTxTotal();
-  setTimeout(() => $('#tx-qty').focus(), 0);
+  setTimeout(() => txTypeSelect.focus(), 0);
 }
 $('#btn-new-tx').addEventListener('click', openTxModal);
 $('#btn-new-tx2').addEventListener('click', openTxModal);
@@ -1276,51 +1425,113 @@ txModal.addEventListener('keydown', e => {
   else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
 });
 
-$('#tx-type').addEventListener('click', e => {
-  const btn = e.target.closest('button');
-  if (!btn) return;
-  $$('#tx-type button').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  txType = btn.dataset.type;
-});
+function updateTxFormVisibility() {
+  const type = txTypeSelect.value;
+  const visible = new Set(TX_FORM_FIELDS[type] || []);
+  $$('[data-tx-field]').forEach(row => row.classList.toggle('hidden', !visible.has(row.dataset.txField)));
+  $$('.tx-money-field').forEach(row => row.classList.toggle('hidden', type === 'split'));
+  if (ASSET_REQUIRED_TYPES.has(type) && !txAssetSelect.value && ASSETS.length) txAssetSelect.value = ASSETS[0].id;
+  const currency = normalizeCurrency($('#tx-currency').value) || 'EUR';
+  $('label[for="tx-price"]').textContent = `Koers per stuk (${currency})`;
+  $('label[for="tx-amount"]').textContent = `Bedrag (${currency})`;
+  updateTxTotal();
+}
+
+txTypeSelect.addEventListener('change', updateTxFormVisibility);
 txAssetSelect.addEventListener('change', () => {
-  $('#tx-price').value = round2(lastPrice(txAssetSelect.value));
+  if (txAssetSelect.value && MARKET.prices[txAssetSelect.value]) $('#tx-price').value = round2(lastPrice(txAssetSelect.value));
   updateTxTotal();
 });
-$('#tx-qty').addEventListener('input', updateTxTotal);
-$('#tx-price').addEventListener('input', updateTxTotal);
+['tx-qty', 'tx-price', 'tx-amount', 'tx-ratio', 'tx-fee', 'tx-tax', 'tx-external-value', 'tx-fx']
+  .forEach(id => $(`#${id}`).addEventListener('input', updateTxTotal));
+$('#tx-currency').addEventListener('input', updateTxFormVisibility);
 
 function updateTxTotal() {
+  const type = txTypeSelect.value;
   const qty = parseFloat($('#tx-qty').value) || 0;
   const price = parseFloat($('#tx-price').value) || 0;
-  $('#tx-total').textContent = 'Totaal: ' + fmtEUR2.format(qty * price);
+  const fx = parseFloat($('#tx-fx').value) || 0;
+  const fee = parseFloat($('#tx-fee').value) || 0;
+  const tax = parseFloat($('#tx-tax').value) || 0;
+  const amount = parseFloat($('#tx-amount').value) || 0;
+  const externalValue = parseFloat($('#tx-external-value').value);
+  if (type === 'split') {
+    $('#tx-total').textContent = `Nieuwe aantallen = oude aantallen × ${fmtNum.format(parseFloat($('#tx-ratio').value) || 0)}`;
+    return;
+  }
+  let nativeTotal = amount;
+  if (TRADE_TYPES.has(type)) nativeTotal = qty * price + (type === 'buy' ? fee + tax : -fee - tax);
+  else if (TRANSFER_TYPES.has(type)) nativeTotal = Number.isFinite(externalValue) ? externalValue : qty * price;
+  $('#tx-total').textContent = 'Waarde in EUR: ' + fmtEUR2.format(nativeTotal * fx);
 }
 
 $('#tx-save').addEventListener('click', () => {
-  const qty = parseFloat($('#tx-qty').value);
-  const price = parseFloat($('#tx-price').value);
-  const asset = txAssetSelect.value;
-  if (!qty || qty <= 0 || !price || price <= 0) { toast('⚠️ Vul een geldig aantal en koers in'); return; }
+  try {
+    const type = txTypeSelect.value;
+    const date = new Date(`${$('#tx-date').value}T12:00:00`);
+    const currency = normalizeCurrency($('#tx-currency').value);
+    const fxRate = Number($('#tx-fx').value);
+    if (!Number.isFinite(date.getTime())) throw new Error('Kies een geldige boekingsdatum.');
+    if (!currency) throw new Error('Gebruik een geldige drieletterige valutacode, bijvoorbeeld EUR of USD.');
+    if (type !== 'split' && (!Number.isFinite(fxRate) || fxRate <= 0)) throw new Error('Vul een geldige wisselkoers naar EUR in.');
 
-  if (txType === 'sell') {
-    const pos = computePositions(state.txs).find(p => p.asset.id === asset);
-    const held = pos ? pos.qty : 0;
-    if (qty > held + 1e-9) { toast(`⚠️ Je hebt maar ${fmtNum.format(held)} ${asset}`); return; }
+    const tx = {
+      id: `tx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      date: date.toISOString(), type, currency, fxRate: type === 'split' ? 1 : fxRate,
+      note: $('#tx-note').value,
+    };
+    const asset = txAssetSelect.value;
+    if (asset) tx.asset = asset;
+    if (ASSET_REQUIRED_TYPES.has(type) && !asset) throw new Error('Kies voor dit type een asset.');
+
+    if (TRADE_TYPES.has(type)) {
+      const qty = Number($('#tx-qty').value), price = Number($('#tx-price').value);
+      const fee = Number($('#tx-fee').value || 0), tax = Number($('#tx-tax').value || 0);
+      if (!Number.isFinite(qty) || qty <= 0 || !Number.isFinite(price) || price < 0) throw new Error('Vul een geldig aantal en een niet-negatieve koers in.');
+      if (!Number.isFinite(fee) || fee < 0 || !Number.isFinite(tax) || tax < 0) throw new Error('Kosten en belasting mogen niet negatief zijn.');
+      Object.assign(tx, { qty, price, fee, tax, external: $('#tx-external').checked });
+    } else if (CASH_EVENT_TYPES.has(type)) {
+      const amount = Number($('#tx-amount').value);
+      if (!Number.isFinite(amount) || amount <= 0) throw new Error('Vul een positief bedrag in.');
+      tx.amount = amount;
+    } else if (type === 'split') {
+      const ratio = Number($('#tx-ratio').value);
+      if (!Number.isFinite(ratio) || ratio <= 0) throw new Error('Vul een positieve splitfactor in, bijvoorbeeld 2 voor een 2-op-1-split.');
+      tx.ratio = ratio;
+    } else if (TRANSFER_TYPES.has(type)) {
+      const qty = Number($('#tx-qty').value), price = Number($('#tx-price').value || 0);
+      if (!Number.isFinite(qty) || qty <= 0 || !Number.isFinite(price) || price < 0) throw new Error('Vul een geldig aantal en een niet-negatieve koers in.');
+      Object.assign(tx, { qty, price });
+      for (const [field, selector] of [['costBasis', '#tx-cost-basis'], ['externalValue', '#tx-external-value']]) {
+        if ($(selector).value === '') continue;
+        const value = Number($(selector).value);
+        if (!Number.isFinite(value) || value < 0) throw new Error('Kostbasis en transferwaarde mogen niet negatief zijn.');
+        tx[field] = value;
+      }
+    }
+
+    const normalized = normalizeStoredTransaction(tx);
+    if (!normalized) throw new Error('De boeking bevat een ongeldige combinatie van velden.');
+    const before = buildPortfolioLedger(state.txs);
+    const candidate = buildPortfolioLedger([...state.txs, normalized]);
+    const directIssue = candidate.issues.find(issue => issue.txId === normalized.id);
+    if (directIssue) throw new Error(directIssue.message);
+    if (candidate.minCash < Math.min(-0.005, before.minCash - 0.005)) {
+      throw new Error('Deze boeking maakt het cashsaldo historisch negatief. Boek eerst een storting of kies directe externe afrekening.');
+    }
+
+    state.txs.push(normalized);
+    saveTransactions(state.txs);
+    invalidateDerived();
+    closeTxModal();
+    toast(`✅ ${TX_TYPE_UI[type]?.label || 'Boeking'} opgeslagen`);
+    renderDashboard(true);
+    const activeView = document.querySelector('.view.active').id;
+    if (activeView === 'view-transactions') renderTransactions();
+    if (activeView === 'view-insights') renderInsights();
+  } catch (error) {
+    toast('⚠️ ' + error.message);
   }
-
-  state.txs.push({
-    id: 'tx-' + Date.now(),
-    date: new Date().toISOString(),
-    type: txType, asset, qty, price,
-  });
-  saveTransactions(state.txs);
-  invalidateDerived();
-  closeTxModal();
-  toast(`${txType === 'buy' ? '✅ Gekocht' : '✅ Verkocht'}: ${fmtNum.format(qty)} × ${asset}`);
-  renderDashboard(true);
-  const activeView = document.querySelector('.view.active').id;
-  if (activeView === 'view-transactions') renderTransactions();
-  if (activeView === 'view-insights') renderInsights();
 });
 
 /* ============================================================
