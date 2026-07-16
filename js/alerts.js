@@ -64,11 +64,12 @@ function alertMetricValue(rule, positions, total) {
  * Evalueert alle regels. Retourneert regels met {value, triggered}.
  * newlyTriggered = alerts die nu afgaan maar bij de vorige check niet.
  */
-function checkAlerts(txs) {
+function checkAlerts(txs, portfolio = null) {
   const alerts = loadAlerts();
   if (!alerts.length) return { alerts: [], newlyTriggered: [] };
-  const positions = computePositions(txs);
-  const total = positions.reduce((s, p) => s + p.value, 0);
+  const ledger = portfolio?.ledger || buildPortfolioLedger(txs);
+  const positions = computePositions(txs, ledger);
+  const total = portfolioAllocation(positions, ledger.cash).total;
   const newlyTriggered = [];
 
   for (const rule of alerts) {

@@ -30,7 +30,8 @@ De runtime-app zelf heeft geen npm-dependencies en geen buildstap.
 - Expliciete koerskwaliteit per kalenderdag: waargenomen, kort doorgetrokken of gereconstrueerd. Doorgetrokken data blijft maximaal één kalenderdag betrouwbaar voor crypto en vier voor aandelen/ETF’s. Analyses vereisen daarnaast minimaal 90% brondekking én een actuele eindwaarde.
 - Assetweergave, RSI/MACD, experimentele neurale projectie en een model-arena met vier expanding-window walk-forward-folds.
 - Backtests over 730 kalenderdagen, transactiekosten en aparte in-/out-of-sample auto-tune.
-- Cashflow-gecorrigeerde volatiliteit, Sharpe, drawdown, correlatie en Markowitz-verkenning.
+- Cashflow-gecorrigeerde volatiliteit, Sharpe en drawdown. Correlatie en Markowitz gebruiken minimaal 60 gezamenlijke werkelijk waargenomen koersintervallen, tonen hun steekproef en leiden de annualisatiefactor af uit de feitelijke observatiefrequentie.
+- Eén totale-portefeuilledefinitie voor asset- en cashwegingen, concentratie, wegingalerts en stressverlies. De frontier optimaliseert alleen het belegde deel en vermeldt expliciet dat cash erbuiten blijft.
 - DCA-plannen als lokale boekhoudautomatisering. Er worden geen echte brokerorders geplaatst; een termijn wordt pas geboekt op de eerste waargenomen koersdag vanaf de vervaldatum.
 - In-app alerts; geen achtergrondserver en dus geen push wanneer de app gesloten is.
 - Afzonderlijk opt-in automatisch verversen zolang de app open is: crypto maximaal elk uur in één batch en aandelen/ETF’s maximaal dagelijks in batches van tien.
@@ -87,7 +88,7 @@ De scripts zijn klassieke browserscripts en delen bewust één globale runtime. 
 
 ## Testen en deployment
 
-`npm run check` voert unit-/regressietests en een publieke-buildcontrole uit. De tests dekken onder meer boekhoudkundige invarianties, v2→v3/v3→v4-migraties, datumvaste marktdata, koersactualiteit, zomer-/wintertijdgrenzen, toekomstige boekingen, preview zonder mutatie, DEGIRO-FX, Bitvavo-funding/crypto-fees, transferkwaliteit, XIRR en reconciliatie. De controle faalt bij onder meer een syntaxfout, cacheversiemismatch, ontbrekend publiek bestand of gevolgd privépaddata. GitHub Actions draait dezelfde controle bij pushes en pull requests.
+`npm run check` voert unit-/regressietests en een publieke-buildcontrole uit. De tests dekken onder meer boekhoudkundige invarianties, v2→v3/v3→v4-migraties, datumvaste marktdata, koersactualiteit, zomer-/wintertijdgrenzen, toekomstige boekingen, preview zonder mutatie, DEGIRO-FX, Bitvavo-funding/crypto-fees, transferkwaliteit, XIRR, reconciliatie, gezamenlijke koerssampling, cashweging en expliciet ledgerhergebruik. De controle faalt bij onder meer een syntaxfout, cacheversiemismatch, ontbrekend publiek bestand of gevolgd privépaddata. GitHub Actions draait dezelfde controle bij pushes en pull requests.
 
 Deployment is een statische publicatie van de repository-root, bijvoorbeeld via GitHub Pages. Publiceer pas nadat `npm run check` slaagt. Stel daarnaast in de repository-instellingen branch protection in met de CI-job als verplichte statuscheck; dat kan niet vanuit deze lokale repository worden afgedwongen.
 

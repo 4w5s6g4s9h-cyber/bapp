@@ -13,6 +13,7 @@ const state = {
   training: null,
   mcTimer: null,
   portfolio: null,
+  positions: null,
   twr: null,
   backtest: { data: null, playing: null },
   ef: null,                 // efficient frontier cache
@@ -109,9 +110,21 @@ function setAIStatus(text) { $('#ai-status-text').textContent = text; }
 
 function invalidateDerived() {
   state.portfolio = null;
+  state.positions = null;
   state.twr = null;
   state.ef = null;
   state.backtest.data = null;
+}
+
+function currentPortfolio() {
+  if (!state.portfolio) state.portfolio = computePortfolioSeries(state.txs);
+  return state.portfolio;
+}
+
+function currentPositions() {
+  const portfolio = currentPortfolio();
+  if (!state.positions) state.positions = computePositions(state.txs, portfolio.ledger);
+  return state.positions;
 }
 
 /* ============================================================
@@ -171,10 +184,12 @@ function renderDashboard(animate = true) {
   ensureCurrentMarketGrid();
   state.portfolio = computePortfolioSeries(state.txs);
   const { values } = state.portfolio;
-  const positions = computePositions(state.txs);
+  const ledger = state.portfolio.ledger;
+  const positions = computePositions(state.txs, ledger);
+  state.positions = positions;
   const total = values[values.length - 1];
-  const invested = totalInvested(state.txs);
-  const todayResult = dailyPortfolioPnl(state.txs, values);
+  const invested = totalInvested(state.txs, ledger);
+  const todayResult = dailyPortfolioPnl(state.txs, values, HISTORY_DAYS - 1, ledger);
   const dayDelta = todayResult.pnl;
   const dayPct = todayResult.pct * 100;
   const currentReliable = positions.every(p => isFreshPrice(p.asset.id, HISTORY_DAYS - 1));
@@ -207,7 +222,7 @@ function renderDashboard(animate = true) {
 
   $('#kpi-return').textContent = currentReliable ? fmtSignedEUR(totReturn) : '—';
   const retEl = $('#kpi-return-pct');
-  state.twr = twrSeries(state.txs, values);
+  state.twr = twrSeries(state.txs, values, ledger);
   const twrStartBoundary = HISTORY_DAYS - 730;
   const twrStart = state.twr.findIndex((value, index) => index >= twrStartBoundary && value !== null);
   const twrTotal = twrStart >= 0 ? twrBetween(state.twr, twrStart, HISTORY_DAYS - 1) : null;
@@ -230,24 +245,24 @@ function renderDashboard(animate = true) {
   $('#kpi-invested').textContent = fmtEUR.format(invested);
   $('#kpi-positions').textContent = `${positions.length} posities · cash ${fmtEUR.format(state.portfolio.cash)}`;
 
-  renderPortfolioChart();
+  renderPortfolioChart(positions);
   renderDashboardBrush();
   renderAllocation(positions, total, state.portfolio.cash);
   renderHoldings(positions);
-  renderWatchlist();
+  renderWatchlist(positions);
 }
 
-function renderPortfolioChart() {
+function renderPortfolioChart(positions = state.positions || []) {
   const { values } = state.portfolio;
   const { start, end } = state.range;
   const slice = values.slice(start, end + 1);
   const labels = MARKET.dates.slice(start, end + 1);
   const up = slice[slice.length - 1] >= slice[0];
 
-  const reliable = portfolioAnalysisAvailable(computePositions(state.txs), Math.min(730, end - start + 1));
+  const reliable = portfolioAnalysisAvailable(positions, Math.min(730, end - start + 1));
   const series = [{ name: reliable ? 'Portefeuille' : 'Portefeuille (deels gereconstrueerd)', color: up ? '#34d399' : '#fb7185', values: slice, fill: true, width: 2.4 }];
   if (state.showBenchmark) {
-    const bench = benchmarkSeries(state.txs, 'VWCE');
+    const bench = benchmarkSeries(state.txs, 'VWCE', state.portfolio.ledger);
     if (bench && reliable && analysisAvailable('VWCE', Math.min(730, end - start + 1))) {
       series.push({ name: 'Alles-in-VWCE', color: '#fbbf24', values: bench.slice(start, end + 1), dash: '6 5', width: 1.8 });
     }
@@ -364,8 +379,7 @@ function loadWatchlist() {
 }
 function saveWatchlist() { localStorage.setItem(WATCH_KEY, JSON.stringify([...state.watchlist])); }
 
-function renderWatchlist() {
-  const positions = computePositions(state.txs);
+function renderWatchlist(positions = state.positions || computePositions(state.txs, state.portfolio?.ledger)) {
   const held = new Set(positions.map(p => p.asset.id));
 
   const tbody = $('#watch-table tbody');
@@ -444,7 +458,7 @@ async function searchCryptoAndWatch(query) {
 function buildWatchSuggestions(q) {
   const ql = q.trim().toLowerCase();
   if (!ql) return [];
-  const held = new Set(computePositions(state.txs).map(p => p.asset.id));
+  const held = new Set(currentPositions().map(p => p.asset.id));
   const out = [];
   for (const a of ASSETS) {
     if (state.watchlist.has(a.id)) continue;
@@ -876,10 +890,10 @@ function runMonteCarlo() {
   $('#mc-monthly-label').textContent = fmtEUR.format(monthly);
   $('#mc-sims-label').textContent = sims;
 
-  if (!state.portfolio) state.portfolio = computePortfolioSeries(state.txs);
-  const values = state.portfolio.values;
+  const portfolio = currentPortfolio();
+  const values = portfolio.values;
   const startValue = values[values.length - 1];
-  const positions = computePositions(state.txs);
+  const positions = currentPositions();
   if (startValue <= 0 || !portfolioAnalysisAvailable(positions, 730)) {
     $('#mc-meta').textContent = 'onvoldoende bron-gedekte historie';
     $('#mc-results').innerHTML = unavailableHTML(730);
@@ -888,7 +902,7 @@ function runMonteCarlo() {
     return;
   }
 
-  const adjusted = cashflowAdjustedReturns(state.txs, values).returns.slice(-731);
+  const adjusted = cashflowAdjustedReturns(state.txs, values, portfolio.ledger).returns.slice(-731);
   const rets = adjusted.filter(r => Number.isFinite(r) && r > -1).map(r => Math.log1p(r));
   const mean = rets.reduce((s, r) => s + r, 0) / (rets.length || 1);
   const std = Math.sqrt(rets.reduce((s, r) => s + (r - mean) ** 2, 0) / (rets.length || 1));
@@ -1011,22 +1025,26 @@ function runBacktest(animate) {
    INZICHTEN
    ============================================================ */
 function renderInsights() {
-  if (!state.portfolio) state.portfolio = computePortfolioSeries(state.txs);
-  const positions = computePositions(state.txs);
+  const portfolio = currentPortfolio();
+  const positions = currentPositions();
   if (!positions.length) return;
-  const total = state.portfolio.values[HISTORY_DAYS - 1];
+  const allocation = portfolioAllocation(positions, portfolio.cash);
+  const total = allocation.total;
 
-  const weights = positions.map(p => p.value / total);
+  const weights = allocation.concentrationWeights;
   const hhi = weights.reduce((s, w) => s + w * w, 0);
-  const nAssets = positions.length;
-  const divScore = nAssets > 1 ? Math.round((1 - (hhi - 1 / nAssets) / (1 - 1 / nAssets)) * 100) : 0;
+  const nBuckets = weights.length;
+  const divScore = nBuckets > 1
+    ? Math.max(0, Math.min(100, Math.round((1 - (hhi - 1 / nBuckets) / (1 - 1 / nBuckets)) * 100)))
+    : 0;
 
   $('#i-div').textContent = divScore + '/100';
   const divLabel = $('#i-div-label');
   divLabel.textContent = divScore > 70 ? 'goed gespreid' : divScore > 45 ? 'kan beter' : 'geconcentreerd';
   divLabel.className = 'kpi-delta ' + (divScore > 70 ? 'up' : divScore > 45 ? 'muted' : 'down');
+  divLabel.title = 'Assetwegingen en cash gebruiken dezelfde totale-portefeuillewaarde als noemer.';
 
-  renderStressButtons(positions);
+  renderStressButtons(positions, portfolio.cash);
   renderReturnBars($('#returns-bars'), positions.map(p => ({ name: p.asset.id, pct: p.gainPct })));
 
   if (!portfolioAnalysisAvailable(positions, 730)) {
@@ -1036,15 +1054,21 @@ function renderInsights() {
     $('#i-sharpe-label').textContent = 'onvoldoende bron-gedekte historie';
     $('#i-sharpe-label').className = 'kpi-delta muted';
     $('#ef-advice').innerHTML = unavailableHTML(730);
+    $('#ef-sampling').textContent = 'Geen steekproef: onvoldoende bron-gedekte historie.';
+    const frontierCanvas = $('#ef-canvas');
+    frontierCanvas.getContext('2d').clearRect(0, 0, frontierCanvas.width, frontierCanvas.height);
+    $('#btn-max-sharpe').disabled = true;
     $('#corr-heatmap').innerHTML = unavailableHTML(730);
+    $('#corr-sampling').textContent = 'Geen steekproef: onvoldoende bron-gedekte historie.';
     $('#twr-bars').innerHTML = unavailableHTML(730);
     $('#scatter-chart').innerHTML = unavailableHTML(730);
     $('#ai-insights').innerHTML = unavailableHTML(730);
     state.ef = null;
+    state._maxCorrPair = null;
     return;
   }
 
-  const adjusted = cashflowAdjustedReturns(state.txs, state.portfolio.values).returns.slice(-731);
+  const adjusted = cashflowAdjustedReturns(state.txs, portfolio.values, portfolio.ledger).returns.slice(-731);
   const rets = adjusted.filter(r => Number.isFinite(r));
   const mean = rets.reduce((s, r) => s + r, 0) / rets.length;
   const vol = Math.sqrt(rets.reduce((s, r) => s + (r - mean) ** 2, 0) / rets.length * CALENDAR_DAYS_PER_YEAR);
@@ -1061,7 +1085,7 @@ function renderInsights() {
   renderFrontierSection(positions);
   renderCorrelation(positions);
 
-  if (!state.twr) state.twr = twrSeries(state.txs, state.portfolio.values);
+  if (!state.twr) state.twr = twrSeries(state.txs, portfolio.values, portfolio.ledger);
   const years = twrPerYear(state.twr, HISTORY_DAYS - 730);
   if (years.length) renderReturnBars($('#twr-bars'), years.map(y => ({ name: String(y.year), pct: y.pct })));
 
@@ -1084,12 +1108,25 @@ function renderInsights() {
 function renderFrontierSection(positions) {
   const canvas = $('#ef-canvas');
   const advice = $('#ef-advice');
+  const samplingEl = $('#ef-sampling');
   if (positions.length < 2) {
+    const context = canvas.getContext('2d');
+    context.clearRect(0, 0, canvas.width, canvas.height);
     advice.innerHTML = '<div class="palette-empty">Minimaal 2 posities nodig voor portefeuille-optimalisatie.</div>';
+    samplingEl.textContent = 'Geen gezamenlijke steekproef berekend.';
+    $('#btn-max-sharpe').disabled = true;
     return;
   }
   if (!state.ef) state.ef = efficientFrontier(positions);
   const ef = state.ef;
+  samplingEl.textContent = jointSamplingDescription(ef.sampling);
+  $('#btn-max-sharpe').disabled = !ef.available;
+  if (!ef.available) {
+    const context = canvas.getContext('2d');
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    advice.innerHTML = `<div class="palette-empty">${escapeHTML(ef.reason)}</div>`;
+    return;
+  }
   renderFrontier(canvas, {
     points: ef.points, frontier: ef.frontier, current: ef.current, maxSharpe: ef.maxSharpe,
     onPick: (pt) => showRebalanceAdvice(ef, pt),
@@ -1097,8 +1134,17 @@ function renderFrontierSection(positions) {
 }
 
 $('#btn-max-sharpe').addEventListener('click', () => {
-  if (state.ef) showRebalanceAdvice(state.ef, state.ef.maxSharpe);
+  if (state.ef?.available) showRebalanceAdvice(state.ef, state.ef.maxSharpe);
 });
+
+function jointSamplingDescription(sampling) {
+  if (!sampling?.sampleCount || !sampling.firstDate || !sampling.lastDate) {
+    return 'Geen gezamenlijke waargenomen rendementsintervallen beschikbaar.';
+  }
+  const first = fmtDate.format(localDateFromKey(sampling.firstDate));
+  const last = fmtDate.format(localDateFromKey(sampling.lastDate));
+  return `${sampling.sampleCount} gezamenlijke waargenomen intervallen (${first}–${last}); doorgetrokken kalenderdagen uitgesloten · annualisatie ${sampling.periodsPerYear.toFixed(0)} periodes/jaar.`;
+}
 
 function showRebalanceAdvice(ef, target) {
   const rows = rebalanceAdvice(ef, target);
@@ -1118,20 +1164,28 @@ function showRebalanceAdvice(ef, target) {
       <tbody>${rows.map(r => `
         <tr>
           <td><span class="tx-badge ${r.action === 'Koop' ? 'tx-buy' : 'tx-sell'}">${r.action}</span></td>
-          <td><b>${r.asset.name}</b> <span style="color:var(--text-3)">(${r.asset.id})</span></td>
+          <td><b>${escapeHTML(r.asset.name)}</b> <span style="color:var(--text-3)">(${escapeHTML(r.asset.id)})</span></td>
           <td><b>${fmtEUR.format(r.amount)}</b></td>
           <td>${fmtNum.format(+r.qty.toFixed(4))}</td>
           <td>${r.fromPct.toFixed(0)}% → <b>${r.toPct.toFixed(0)}%</b></td>
         </tr>`).join('')}
       </tbody>
     </table>
-    <p class="explain">Gebaseerd op historische rendementen en covariantie (2 jaar) — de toekomst kan anders zijn. Geen beleggingsadvies.</p>`;
+    <p class="explain">Gebaseerd op gezamenlijke waargenomen koersintervallen; cash blijft buiten de optimizer. Historische rendementen kunnen afwijken van de toekomst. Geen beleggingsadvies.</p>`;
 }
 
 /* ---------- correlatie ---------- */
 function renderCorrelation(positions) {
   const ids = positions.map(p => p.asset.id);
-  const corr = correlationMatrix(ids);
+  const analysis = correlationAnalysis(ids);
+  $('#corr-sampling').textContent = jointSamplingDescription(analysis.sampling);
+  state._maxCorrPair = null;
+  if (ids.length < 2 || !analysis.available) {
+    const reason = ids.length < 2 ? 'Minimaal 2 posities nodig voor een correlatiematrix.' : analysis.reason;
+    $('#corr-heatmap').innerHTML = `<div class="palette-empty">${escapeHTML(reason)}</div>`;
+    return;
+  }
+  const corr = analysis.matrix;
   renderHeatmap($('#corr-heatmap'), ids, corr);
   // hoogste paar bewaren voor AI-observaties
   let maxPair = null;
@@ -1142,7 +1196,7 @@ function renderCorrelation(positions) {
 }
 
 /* ---------- stress-test ---------- */
-function renderStressButtons(positions) {
+function renderStressButtons(positions, cash = 0) {
   const holder = $('#stress-buttons');
   holder.innerHTML = '';
   for (const sc of STRESS_SCENARIOS) {
@@ -1152,21 +1206,25 @@ function renderStressButtons(positions) {
     btn.addEventListener('click', () => {
       $$('.stress-btn').forEach(b => b.classList.remove('on'));
       btn.classList.add('on');
-      runStress(positions, sc);
+      runStress(positions, sc, cash);
     });
     holder.appendChild(btn);
   }
   $('#stress-result').innerHTML = '<div class="palette-empty">Kies een scenario om de klap op je portefeuille te zien.</div>';
 }
 
-function runStress(positions, scenario) {
-  const res = applyStress(positions, scenario);
+function runStress(positions, scenario, cash = 0) {
+  const res = applyStress(positions, scenario, cash);
   const holder = $('#stress-result');
+  const recovery = Number.isFinite(res.recoveryYears)
+    ? `~${res.recoveryYears.toFixed(1).replace('.', ',')} jaar`
+    : 'niet berekenbaar';
   holder.innerHTML = `
     <div class="stress-summary">
       <span class="s-big">${fmtPct(res.lossPct, 1)}</span>
       <span class="s-sub">${fmtEUR.format(res.before)} → <b>${fmtEUR.format(res.after)}</b></span>
-      <span class="s-sub">geschat herstel: <b>~${res.recoveryYears.toFixed(1).replace('.', ',')} jaar</b> bij 6%/jr</span>
+      <span class="s-sub">cash ${fmtEUR.format(res.cash)} blijft ongewijzigd</span>
+      <span class="s-sub">geschat herstel: <b>${recovery}</b> bij 6%/jr</span>
     </div>
     <div class="bars-holder" id="stress-bars"></div>`;
   renderReturnBars($('#stress-bars'), res.rows.map(r => ({ name: r.asset.id, pct: r.shock * 100 })));
@@ -1177,11 +1235,12 @@ function renderAIInsights(positions, total, m) {
   const insights = [];
   const top = positions[0];
   const topW = (top.value / total) * 100;
+  const topName = escapeHTML(top.asset.name);
 
   if (topW > 35) {
-    insights.push({ icon: '⚠️', text: `<b>Concentratierisico:</b> ${top.asset.name} is <b>${topW.toFixed(0)}%</b> van je portefeuille. Eén slecht kwartaal van deze positie raakt je hele vermogen — overweeg af te romen richting je breedste positie.` });
+    insights.push({ icon: '⚠️', text: `<b>Concentratierisico:</b> ${topName} is <b>${topW.toFixed(0)}%</b> van je portefeuille. Eén slecht kwartaal van deze positie raakt je hele vermogen — overweeg af te romen richting je breedste positie.` });
   } else {
-    insights.push({ icon: '✅', text: `<b>Spreiding:</b> je grootste positie (${top.asset.name}) is ${topW.toFixed(0)}% van het geheel — geen enkele positie domineert.` });
+    insights.push({ icon: '✅', text: `<b>Spreiding:</b> je grootste positie (${topName}) is ${topW.toFixed(0)}% van het geheel — geen enkele positie domineert.` });
   }
 
   if (state._maxCorrPair && state._maxCorrPair.c > 0.65) {
@@ -1199,12 +1258,12 @@ function renderAIInsights(positions, total, m) {
 
   const best = [...positions].sort((a, b) => b.gainPct - a.gainPct)[0];
   const worst = [...positions].sort((a, b) => a.gainPct - b.gainPct)[0];
-  insights.push({ icon: '🏆', text: `<b>Beste positie:</b> ${best.asset.name} met ${fmtPct(best.gainPct, 1)} rendement (${fmtSignedEUR(best.gain)}).` });
+  insights.push({ icon: '🏆', text: `<b>Beste positie:</b> ${escapeHTML(best.asset.name)} met ${fmtPct(best.gainPct, 1)} rendement (${fmtSignedEUR(best.gain)}).` });
   if (worst.gainPct < 0) {
-    insights.push({ icon: '📉', text: `<b>Zwakste positie:</b> ${worst.asset.name} staat op ${fmtPct(worst.gainPct, 1)}. Het AI-signaal hiervoor is momenteel "<b>${computeSignal(MARKET.prices[worst.asset.id]).label}</b>".` });
+    insights.push({ icon: '📉', text: `<b>Zwakste positie:</b> ${escapeHTML(worst.asset.name)} staat op ${fmtPct(worst.gainPct, 1)}. Het AI-signaal hiervoor is momenteel "<b>${escapeHTML(computeSignal(MARKET.prices[worst.asset.id]).label)}</b>".` });
   }
 
-  if (state.ef && state.ef.maxSharpe.sharpe > state.ef.current.sharpe + 0.15) {
+  if (state.ef?.available && state.ef.maxSharpe.sharpe > state.ef.current.sharpe + 0.15) {
     insights.push({ icon: '🎯', text: `<b>Optimalisatie mogelijk:</b> de max-Sharpe portefeuille van jouw eigen assets haalt een Sharpe van ${state.ef.maxSharpe.sharpe.toFixed(2).replace('.', ',')} tegenover ${state.ef.current.sharpe.toFixed(2).replace('.', ',')} nu. Klik in de frontier-grafiek voor het herbalanceringsadvies.` });
   }
 
@@ -1252,6 +1311,7 @@ function transactionTableValues(tx) {
 
 function renderTransactions() {
   state.portfolio = computePortfolioSeries(state.txs);
+  state.positions = computePositions(state.txs, state.portfolio.ledger);
   const tbody = $('#tx-table tbody');
   tbody.innerHTML = '';
   const sorted = [...state.txs].sort((a, b) => new Date(b.date) - new Date(a.date));
@@ -1306,7 +1366,7 @@ function renderLedgerSummary() {
 
 function renderReconciliation() {
   const snapshot = loadReconciliation();
-  const report = reconcilePortfolio(state.txs, snapshot);
+  const report = reconcilePortfolio(state.txs, snapshot, state.portfolio?.ledger);
   const rows = report.rows.map(row => {
     const difference = row.difference === null ? '—' : fmtNum.format(row.difference);
     const differenceClass = row.difference === null ? 'muted' : row.balanced ? 'up' : 'down';
@@ -2209,7 +2269,7 @@ $('#set-fetch-hist').addEventListener('click', async () => {
 /* ---------- alerts ---------- */
 function runAlertCheck(notify) {
   if (!state.txs.length) return;
-  const { alerts, newlyTriggered } = checkAlerts(state.txs);
+  const { alerts, newlyTriggered } = checkAlerts(state.txs, state.portfolio);
   const fired = alerts.filter(a => a.triggered);
   $('#alert-dot').style.display = fired.length ? '' : 'none';
   const chip = $('#alert-chip');
@@ -2284,10 +2344,10 @@ try {
   const dcaBooked = executeDuePlans(state.txs);
   if (dcaBooked.length) setTimeout(() => toast(`⟳ ${dcaBooked.length} DCA-termijn${dcaBooked.length > 1 ? 'en' : ''} geboekt`), 1200);
   rebuildAssetSelects();
-  const positions = computePositions(state.txs);
+  renderDashboard(true);
+  const positions = currentPositions();
   if (positions.length) state.selectedAsset = positions[0].asset.id;
   else if (ASSETS.length) state.selectedAsset = ASSETS[0].id;
-  renderDashboard(true);
   updateEmptyOverlay();
   $('#mode-note').textContent = `Portfoliodata lokaal · netwerk ${networkConsentEnabled() ? 'aan' : 'uit'}`;
   initLivePrices()
@@ -2296,7 +2356,7 @@ try {
   runAlertCheck(false);
   // warm alvast een model op voor de grootste positie (achtergrond)
   setTimeout(() => {
-    const pos2 = computePositions(state.txs);
+    const pos2 = currentPositions();
     if (pos2.length && analysisAvailable(pos2[0].asset.id, 500)) trainAssetModel(pos2[0].asset);
   }, 800);
 } catch (e) {
@@ -2347,7 +2407,7 @@ $('#holdings-head').addEventListener('click', e => {
   const key = th.dataset.sort;
   if (state.holdingsSort.key === key) state.holdingsSort.dir *= -1;
   else state.holdingsSort = { key, dir: key === 'name' ? 1 : -1 };
-  renderHoldings(computePositions(state.txs));
+  renderHoldings(currentPositions());
 });
 
 /* ============================================================

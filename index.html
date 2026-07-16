@@ -8,7 +8,7 @@
 <meta name="theme-color" content="#0a0c14">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="css/style.css?v=19">
+<link rel="stylesheet" href="css/style.css?v=20">
 </head>
 <body>
 
@@ -352,7 +352,8 @@
           <button class="btn btn-ghost btn-xs" id="btn-max-sharpe">◆ Toon max-Sharpe advies</button>
         </div>
         <div class="chart-holder tall"><canvas id="ef-canvas"></canvas></div>
-        <p class="explain">Elke stip is een mogelijke verdeling van jouw huidige assets (3.500 gesimuleerde portefeuilles). De cyaan lijn is de efficient frontier: het maximale verwachte rendement per risiconiveau. <b>Klik op een punt</b> voor een concreet herbalanceringsadvies.</p>
+        <p class="explain">Elke stip is een mogelijke verdeling van het huidige belegde deel (3.500 gesimuleerde portefeuilles; cash blijft buiten de optimizer). De cyaan lijn is de efficient frontier: het maximale verwachte rendement per risiconiveau. <b>Klik op een punt</b> voor een concreet herbalanceringsadvies.</p>
+        <p class="explain" id="ef-sampling"></p>
         <div id="ef-advice"></div>
       </div>
 
@@ -361,6 +362,7 @@
           <div class="card-head"><h2>Correlatiematrix</h2></div>
           <div id="corr-heatmap"></div>
           <p class="explain">Paars = beweegt samen, cyaan = beweegt tegengesteld. Veel donkerpaars buiten de diagonaal betekent: je posities zijn in feite dezelfde gok.</p>
+          <p class="explain" id="corr-sampling"></p>
         </div>
         <div class="card">
           <div class="card-head"><h2>Stress-test</h2></div>
@@ -632,15 +634,15 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<script src="js/data.js?v=19"></script>
-<script src="js/ml.js?v=19"></script>
-<script src="js/charts.js?v=19"></script>
-<script src="js/quant.js?v=19"></script>
-<script src="js/backtest.js?v=19"></script>
-<script src="js/catalog.js?v=19"></script>
-<script src="js/dca.js?v=19"></script>
-<script src="js/importer.js?v=19"></script>
-<script src="js/alerts.js?v=19"></script>
-<script src="js/app.js?v=19"></script>
+<script src="js/data.js?v=20"></script>
+<script src="js/ml.js?v=20"></script>
+<script src="js/charts.js?v=20"></script>
+<script src="js/quant.js?v=20"></script>
+<script src="js/backtest.js?v=20"></script>
+<script src="js/catalog.js?v=20"></script>
+<script src="js/dca.js?v=20"></script>
+<script src="js/importer.js?v=20"></script>
+<script src="js/alerts.js?v=20"></script>
+<script src="js/app.js?v=20"></script>
 </body>
 </html>
