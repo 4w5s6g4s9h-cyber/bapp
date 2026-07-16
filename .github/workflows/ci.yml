@@ -13,8 +13,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
+          cache: npm
+      - run: npm ci
       - run: npm run check
+
+  browser-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Installeer Playwright-browsers
+        run: npx playwright install --with-deps chromium firefox webkit
+      - name: Browser-E2E
+        run: npm run test:e2e
+      - uses: actions/upload-artifact@v7
+        if: ${{ failure() }}
+        with:
+          name: playwright-diagnostiek
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 14

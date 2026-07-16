@@ -1438,6 +1438,7 @@ const importPreviewModal = $('#import-preview-modal');
 const importPreviewConfirm = $('#import-preview-confirm');
 const importPreviewApply = $('#import-preview-apply');
 let pendingImportAction = null;
+let importPickerReturnFocus = null;
 
 function importPreviewSection(title, items, warning = false) {
   const rows = (Array.isArray(items) ? items : []).filter(Boolean);
@@ -1450,8 +1451,8 @@ function importPreviewSection(title, items, warning = false) {
   </section>`;
 }
 
-function openImportPreview(preview, onConfirm) {
-  modalReturnFocus = document.activeElement;
+function openImportPreview(preview, onConfirm, returnFocus = document.activeElement) {
+  modalReturnFocus = returnFocus;
   pendingImportAction = onConfirm;
   const mode = preview.mode === 'merge' ? 'samenvoegen' : 'volledig vervangen/herstellen';
   $('#import-preview-intro').textContent = `${preview.source || 'Importbestand'} · ${mode}. Controleer vooral afgewezen regels en aannames.`;
@@ -1526,7 +1527,7 @@ function finishJSONImport(result) {
   setTimeout(() => location.reload(), 900);
 }
 
-function handleImportFile(file) {
+function handleImportFile(file, returnFocus = document.activeElement) {
   if (!file) return;
   if (file.size > MAX_IMPORT_BYTES) { toast('⚠️ Bestand is groter dan de veilige limiet van 8 MB'); return; }
   const reader = new FileReader();
@@ -1536,7 +1537,7 @@ function handleImportFile(file) {
       if (!state.txs.length) { toast('⚠️ CSV-import vult bestaande data aan — importeer eerst je portfolio-JSON'); return; }
       const result = importTransactionCSV(reader.result, state.txs);
       if (result.needsConfirmation) {
-        openImportPreview(result.preview, () => finishCSVImport(importTransactionCSV(reader.result, state.txs, { confirmed: true })));
+        openImportPreview(result.preview, () => finishCSVImport(importTransactionCSV(reader.result, state.txs, { confirmed: true })), returnFocus);
         return;
       }
       finishCSVImport(result);
@@ -1544,7 +1545,7 @@ function handleImportFile(file) {
     }
     const result = importPortfolioJSON(reader.result);
     if (result.needsConfirmation) {
-      openImportPreview(result.preview, () => finishJSONImport(importPortfolioJSON(reader.result, { confirmed: true })));
+      openImportPreview(result.preview, () => finishJSONImport(importPortfolioJSON(reader.result, { confirmed: true })), returnFocus);
       return;
     }
     finishJSONImport(result);
@@ -1553,8 +1554,18 @@ function handleImportFile(file) {
   reader.readAsText(file);
 }
 
-$('#btn-import').addEventListener('click', () => $('#import-file').click());
-$('#import-file').addEventListener('change', e => { handleImportFile(e.target.files[0]); e.target.value = ''; });
+function openImportPicker(trigger) {
+  importPickerReturnFocus = trigger;
+  $('#import-file').click();
+}
+
+$('#btn-import').addEventListener('click', event => openImportPicker(event.currentTarget));
+$('#import-file').addEventListener('change', event => {
+  const returnFocus = importPickerReturnFocus || document.activeElement;
+  importPickerReturnFocus = null;
+  handleImportFile(event.target.files[0], returnFocus);
+  event.target.value = '';
+});
 const dropCard = $('#tx-card');
 ['dragenter', 'dragover'].forEach(ev => dropCard.addEventListener(ev, e => {
   e.preventDefault(); dropCard.classList.add('dragover');
@@ -1624,15 +1635,15 @@ function resetTxForm() {
   updateTxFormVisibility();
 }
 
-function openTxModal() {
-  modalReturnFocus = document.activeElement;
+function openTxModal(returnFocus = document.activeElement) {
+  modalReturnFocus = returnFocus;
   resetTxForm();
   txModal.classList.add('open');
   txModal.setAttribute('aria-hidden', 'false');
   setTimeout(() => txTypeSelect.focus(), 0);
 }
-$('#btn-new-tx').addEventListener('click', openTxModal);
-$('#btn-new-tx2').addEventListener('click', openTxModal);
+$('#btn-new-tx').addEventListener('click', event => openTxModal(event.currentTarget));
+$('#btn-new-tx2').addEventListener('click', event => openTxModal(event.currentTarget));
 $('#tx-cancel').addEventListener('click', closeTxModal);
 txModal.addEventListener('click', e => { if (e.target === txModal) closeTxModal(); });
 txModal.addEventListener('keydown', e => {
@@ -1813,8 +1824,8 @@ function fuzzyScore(query, label) {
   return qi === q.length ? 10 : 0;
 }
 
-function openPalette() {
-  modalReturnFocus = document.activeElement;
+function openPalette(returnFocus = document.activeElement) {
+  modalReturnFocus = returnFocus;
   palette.classList.add('open');
   palette.setAttribute('aria-hidden', 'false');
   paletteInput.value = '';
@@ -1868,7 +1879,7 @@ palette.addEventListener('keydown', e => {
   if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
   else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
 });
-$('#palette-open').addEventListener('click', openPalette);
+$('#palette-open').addEventListener('click', event => openPalette(event.currentTarget));
 window.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault();
@@ -2093,7 +2104,7 @@ function updateEmptyOverlay() {
   $('#empty-overlay').style.display = (!state.txs.length && !allowed) ? '' : 'none';
 }
 
-$('#empty-import').addEventListener('click', () => $('#import-file').click());
+$('#empty-import').addEventListener('click', event => openImportPicker(event.currentTarget));
 {
   const card = document.querySelector('.empty-card');
   ['dragenter', 'dragover'].forEach(ev => card.addEventListener(ev, e => { e.preventDefault(); card.classList.add('dragover'); }));
