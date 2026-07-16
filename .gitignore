@@ -13,3 +13,6 @@ Uitdraai en huidige portfolio bitvavo:degiro/
 .claude/
 node_modules/
 .pnpm-store/
+dist/
+playwright-report/
+test-results/

@@ -15,10 +15,11 @@ Open daarna `http://localhost:8642`. Een HTTP-server is nodig voor betrouwbaar P
 Voor ontwikkeling en controle is Node.js 20 of nieuwer nodig:
 
 ```bash
+npm ci
 npm run check
 ```
 
-De runtime-app zelf heeft geen npm-dependencies en geen buildstap.
+De runtime-app zelf heeft geen npm-dependencies. De enige ontwikkeldependency is Playwright voor echte browsertests; de publicatiestap kopieert uitsluitend de goedgekeurde statische runtimebestanden.
 
 ## Belangrijkste functies
 
@@ -88,8 +89,19 @@ De scripts zijn klassieke browserscripts en delen bewust één globale runtime. 
 
 ## Testen en deployment
 
-`npm run check` voert unit-/regressietests en een publieke-buildcontrole uit. De tests dekken onder meer boekhoudkundige invarianties, v2→v3/v3→v4-migraties, datumvaste marktdata, koersactualiteit, zomer-/wintertijdgrenzen, toekomstige boekingen, preview zonder mutatie, DEGIRO-FX, Bitvavo-funding/crypto-fees, transferkwaliteit, XIRR, reconciliatie, gezamenlijke koerssampling, cashweging en expliciet ledgerhergebruik. De controle faalt bij onder meer een syntaxfout, cacheversiemismatch, ontbrekend publiek bestand of gevolgd privépaddata. GitHub Actions draait dezelfde controle bij pushes en pull requests.
+`npm run check` voert 59 unit-/regressietests en de publieke-buildcontrole uit. De tests dekken onder meer boekhoudkundige invarianties, v2→v3/v3→v4-migraties, datumvaste marktdata, koersactualiteit, zomer-/wintertijdgrenzen, toekomstige boekingen, preview zonder mutatie, DEGIRO-FX, Bitvavo-funding/crypto-fees, transferkwaliteit, XIRR, reconciliatie, gezamenlijke koerssampling, cashweging en expliciet ledgerhergebruik. De controle faalt bij onder meer een syntaxfout, cacheversiemismatch, ontbrekend publiek bestand, een Pages-publicatie buiten `dist/` of gevolgd privépaddata.
 
-Deployment is een statische publicatie van de repository-root, bijvoorbeeld via GitHub Pages. Publiceer pas nadat `npm run check` slaagt. Stel daarnaast in de repository-instellingen branch protection in met de CI-job als verplichte statuscheck; dat kan niet vanuit deze lokale repository worden afgedwongen.
+Installeer voor een lokale browsermatrix één keer de browsers en draai daarna alle gebruikersflows:
+
+```bash
+npx playwright install chromium firefox webkit
+npm run test:e2e
+```
+
+De vijf logische Playwright-scenario's testen de lege staat, niet-schrijvende importpreview, toetsenbordmodals, backuprestore van schema 2/3/4, analyseweergave, afwezigheid van ongewenste externe requests en een service-workerupdate. Die laatste check draait één keer in Chromium; over de drie browserprojecten zijn daardoor 13 tests actief en twee bewust overgeslagen.
+
+GitHub Actions voert bij iedere pull request en push twee afzonderlijke checks uit: `test` en `browser-e2e`. `main` vereist beide checks, een actuele branch en opgeloste reviewgesprekken; force-push en verwijderen zijn uitgeschakeld. De Pages-workflow valideert opnieuw, maakt met `npm run build:public` een fail-closed artifact van 15 expliciet goedgekeurde runtimebestanden en publiceert uitsluitend `dist/`.
+
+De live app staat op [4w5s6g4s9h-cyber.github.io/bapp](https://4w5s6g4s9h-cyber.github.io/bapp/). GitHub Pages kan geen projectspecifieke securityheaders configureren; eigen hosting blijft nodig voor volledige headerhardening.
 
 Zie [docs/PROJECT_REVIEW.md](docs/PROJECT_REVIEW.md) voor de kritische beoordeling, uitgevoerde verbeteringen en resterende risico's.
