@@ -107,6 +107,7 @@ function pointsToGrid(points) {
  */
 async function addWatchAsset(entry) {
   if (!networkConsentEnabled()) return { ok: false, error: 'Sta eerst externe koersdata toe bij Instellingen → Privacy en netwerk.' };
+  ensureCurrentMarketGrid();
   const id = normalizeAssetId(entry?.id);
   if (!id) return { ok: false, error: 'Ongeldige ticker.' };
   entry = {
@@ -169,24 +170,28 @@ async function addWatchAsset(entry) {
 
   const grid = pointsToGrid(points);
   if (!grid) return { ok: false, error: `Ongeldige koersdata voor ${entry.id}` };
-  const real = new Array(HISTORY_DAYS).fill(false);
-  const pointIndices = points.map(([ts]) => dateToIndex(new Date(Number(ts)).toISOString()));
-  const first = Math.min(...pointIndices), last = Math.max(...pointIndices);
-  for (let i = first; i <= last; i++) real[i] = true;
+  const pointRows = points.map(([ts, price]) => ({ idx: dateToIndex(new Date(Number(ts)).toISOString()), price }));
+  const quality = qualityFromPoints(pointRows);
   const color = CUSTOM_COLORS[(ASSETS.length + 3) % CUSTOM_COLORS.length];
-  registerAsset({ id: entry.id, name: entry.name, type: entry.type, yahoo: entry.yahoo, cg: entry.cg, color, custom: true, watchOnly: true, histSource: src, seed: 1, drift: 0, vol: 0.3, start: grid[0] }, grid, real);
+  const sourceAt = Math.max(...points.map(([ts]) => Number(ts)).filter(Number.isFinite));
+  const fetchedAt = Date.now();
+  registerAsset(
+    { id: entry.id, name: entry.name, type: entry.type, yahoo: entry.yahoo, cg: entry.cg, color, custom: true, watchOnly: true, histSource: src, seed: 1, drift: 0, vol: 0.3, start: grid[0] },
+    grid, quality.map(qualityIsReliable), quality,
+    { source: src, quoteAt: Number.isFinite(sourceAt) ? sourceAt : fetchedAt, fetchedAt },
+  );
 
   // persist: assetdefinitie + koersdata (zodat het na herladen terugkomt)
   const stored = loadStoredWatchAssets();
   stored.push({ id: entry.id, name: entry.name, type: entry.type, yahoo: entry.yahoo, cg: entry.cg, color, histSource: src });
   const hist = loadLiveHistory();
-  const compact = new Map(points.map(([ts, p]) => [dateToIndex(new Date(ts).toISOString()), +(+p).toPrecision(6)]));
-  const sourceAt = Math.max(...points.map(([ts]) => Number(ts)).filter(Number.isFinite));
+  const compact = new Map(points.map(([ts, p]) => [localDateKey(new Date(Number(ts))), +(+p).toPrecision(6)]));
   hist[entry.id] = {
-    at: Date.now(),
-    quoteAt: Number.isFinite(sourceAt) ? sourceAt : Date.now(),
+    at: fetchedAt,
+    quoteAt: Number.isFinite(sourceAt) ? sourceAt : fetchedAt,
     points: [...compact.entries()],
     src,
+    verified: true,
     ...(entry.cg ? { cg: entry.cg } : {}),
   };
   try { commitStorage({ [WATCH_ASSETS_KEY]: JSON.stringify(stored), [LIVEHIST_KEY]: JSON.stringify(hist) }); }
@@ -200,7 +205,13 @@ async function addWatchAsset(entry) {
 /** Verwijdert een watch-only asset volledig (definitie + historie). */
 function removeWatchAsset(id) {
   const idx = ASSETS.findIndex(a => a.id === id && a.watchOnly);
-  if (idx >= 0) { ASSETS.splice(idx, 1); delete MARKET.prices[id]; delete MARKET.provenance[id]; }
+  if (idx >= 0) {
+    ASSETS.splice(idx, 1);
+    delete MARKET.prices[id];
+    delete MARKET.quality[id];
+    delete MARKET.provenance[id];
+    delete MARKET.meta[id];
+  }
   const hist = loadLiveHistory();
   delete hist[id];
   try { commitStorage({

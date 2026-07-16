@@ -8,7 +8,7 @@
 <meta name="theme-color" content="#0a0c14">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="css/style.css?v=16">
+<link rel="stylesheet" href="css/style.css?v=17">
 </head>
 <body>
 
@@ -485,7 +485,7 @@
           <button class="btn btn-ghost" id="set-export">⬇ Exporteer backup</button>
           <button class="btn btn-ghost btn-danger" id="set-clear">🗑 Alles wissen</button>
         </div>
-        <p class="explain">JSON-import vervangt portfoliodata; CSV-import (DEGIRO/Bitvavo) vult aan. Een versie-3-backup bevat de volledige cashledger, assets, koershistorie en herkomst, watchlist, alerts, DCA-plannen en brokerreconciliatie; versie 2 blijft importeerbaar. <b>Let op:</b> localStorage is gekoppeld aan de website-origin en is niet versleuteld; gebruik een privéapparaat en commit of deel je backup niet.</p>
+        <p class="explain">JSON-import vervangt portfoliodata; CSV-import (DEGIRO/Bitvavo) vult aan. Een versie-4-backup bevat de volledige cashledger, assets, gedateerde koershistorie met kwaliteitsstatus, watchlist, alerts, DCA-plannen en brokerreconciliatie. Versies 2 en 3 blijven importeerbaar; hun ongedateerde koersreeksen worden uit voorzorg als gereconstrueerd gemarkeerd. <b>Let op:</b> localStorage is gekoppeld aan de website-origin en is niet versleuteld; gebruik een privéapparaat en commit of deel je backup niet.</p>
         <div id="set-data-info"></div>
       </div>
 
@@ -517,9 +517,9 @@
       <div class="card">
         <div class="card-head">
           <h2>📈 Koershistorie</h2>
-          <button class="btn btn-primary" id="set-fetch-hist">📡 Haal echte historie op</button>
+          <button class="btn btn-primary" id="set-fetch-hist">📡 Haal bronhistorie op</button>
         </div>
-        <p class="explain">Na expliciete toestemming haalt deze knop maximaal circa drie jaar op via CoinGecko en Yahoo Finance. Met een ingestelde Alpha Vantage-sleutel gebruikt de app voor aandelen/ETF’s eerst die browservriendelijke route (maximaal 100 recente handelsdagen) en blijft Yahoo beste-effort. Vreemde valuta worden via Frankfurter naar EUR omgerekend. Dit zijn dagkoersen, geen gegarandeerde intraday-koersen. Gereconstrueerde reeksen worden duidelijk gemarkeerd en niet gebruikt voor ML, backtests of risicoadvies.</p>
+        <p class="explain">Na expliciete toestemming haalt deze knop maximaal circa drie jaar op via CoinGecko en Yahoo Finance. Met een ingestelde Alpha Vantage-sleutel gebruikt de app voor aandelen/ETF’s eerst die browservriendelijke route (maximaal 100 recente handelsdagen) en blijft Yahoo beste-effort. Vreemde valuta worden via Frankfurter naar EUR omgerekend. Dit zijn dagkoersen, geen gegarandeerde intraday-koersen. De app onderscheidt waargenomen handelsdagen, doorgetrokken kalenderdagen en gereconstrueerde waarden. Gereconstrueerde reeksen worden niet gebruikt voor ML, backtests of risicoadvies.</p>
         <div id="hist-progress"></div>
         <div class="table-wrap">
           <table class="holdings-table" id="hist-table">
@@ -613,15 +613,15 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<script src="js/data.js?v=16"></script>
-<script src="js/ml.js?v=16"></script>
-<script src="js/charts.js?v=16"></script>
-<script src="js/quant.js?v=16"></script>
-<script src="js/backtest.js?v=16"></script>
-<script src="js/catalog.js?v=16"></script>
-<script src="js/dca.js?v=16"></script>
-<script src="js/importer.js?v=16"></script>
-<script src="js/alerts.js?v=16"></script>
-<script src="js/app.js?v=16"></script>
+<script src="js/data.js?v=17"></script>
+<script src="js/ml.js?v=17"></script>
+<script src="js/charts.js?v=17"></script>
+<script src="js/quant.js?v=17"></script>
+<script src="js/backtest.js?v=17"></script>
+<script src="js/catalog.js?v=17"></script>
+<script src="js/dca.js?v=17"></script>
+<script src="js/importer.js?v=17"></script>
+<script src="js/alerts.js?v=17"></script>
+<script src="js/app.js?v=17"></script>
 </body>
 </html>

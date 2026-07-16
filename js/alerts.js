@@ -43,8 +43,8 @@ function alertMetricValue(rule, positions, total) {
   if (!prices) return null;
   const last = prices[HISTORY_DAYS - 1];
   switch (rule.metric) {
-    case 'price': return MARKET.provenance[rule.asset]?.[HISTORY_DAYS - 1] ? last : null;
-    case 'change24': return MARKET.provenance[rule.asset]?.[HISTORY_DAYS - 1] && MARKET.provenance[rule.asset]?.[HISTORY_DAYS - 2]
+    case 'price': return isObservedPrice(rule.asset, HISTORY_DAYS - 1) ? last : null;
+    case 'change24': return isObservedPrice(rule.asset, HISTORY_DAYS - 1) && isObservedPrice(rule.asset, HISTORY_DAYS - 2)
       ? (last / prices[HISTORY_DAYS - 2] - 1) * 100 : null;
     case 'rsi': {
       if (!hasReliableHistory(rule.asset, 365)) return null;
@@ -52,7 +52,7 @@ function alertMetricValue(rule, positions, total) {
       return r[r.length - 1];
     }
     case 'weight': {
-      if (!MARKET.provenance[rule.asset]?.[HISTORY_DAYS - 1]) return null;
+      if (!isReliablePrice(rule.asset, HISTORY_DAYS - 1)) return null;
       const pos = positions.find(p => p.asset.id === rule.asset);
       return pos && total > 0 ? (pos.value / total) * 100 : 0;
     }

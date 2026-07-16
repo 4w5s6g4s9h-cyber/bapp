@@ -77,15 +77,20 @@ function executeDuePlans(txs) {
     while (guard++ < 60) {
       const due = nextDcaDate(plan, cursor);
       if (due > now) break;
-      const idx = dateToIndex(due.toISOString());
-      const isReal = MARKET.provenance[plan.asset]?.[idx] === true;
-      const price = isReal && MARKET.prices[plan.asset] ? MARKET.prices[plan.asset][idx] : null;
+      const dueIdx = Math.max(0, dateToIndexUnclamped(due));
+      const nowIdx = Math.min(HISTORY_DAYS - 1, dateToIndexUnclamped(now));
+      let idx = -1;
+      for (let candidate = dueIdx; candidate <= nowIdx; candidate++) {
+        if (isObservedPrice(plan.asset, candidate)) { idx = candidate; break; }
+      }
+      const price = idx >= 0 && MARKET.prices[plan.asset] ? MARKET.prices[plan.asset][idx] : null;
       if (price && price > 0) {
         const mult = plan.mode === 'ai' ? dcaAiMultiplier(plan.asset, idx) : 1;
         const amount = plan.amount * mult;
+        const executionDate = MARKET.dates[idx];
         created.push({
           id: `dca-${plan.id}-${due.getFullYear()}${String(due.getMonth() + 1).padStart(2, '0')}`,
-          date: due.toISOString(),
+          date: executionDate.toISOString(),
           type: 'buy',
           asset: plan.asset,
           qty: amount / price,
@@ -95,9 +100,9 @@ function executeDuePlans(txs) {
         });
         delete plan.blockedAt;
       } else {
-        // Geen fictieve transactie boeken op een gereconstrueerde koers.
-        // Laat de termijn openstaan zodat deze na een echte historie-import
-        // alsnog verwerkt kan worden.
+        // Geen fictieve transactie boeken op carried/gereconstrueerde data.
+        // Laat de termijn openstaan tot de eerste waargenomen koers op of na
+        // de plandatum beschikbaar is (bij een weekend doorgaans maandag).
         plan.blockedAt = due.toISOString();
         break;
       }

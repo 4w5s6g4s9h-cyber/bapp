@@ -1,19 +1,19 @@
 /* Service worker — network-first met cache-fallback (offline-support) */
-const CACHE = 'vermogen-v16';
+const CACHE = 'vermogen-v17';
 const ASSETS = [
   '.',
   'index.html',
-  'css/style.css?v=16',
-  'js/data.js?v=16',
-  'js/ml.js?v=16',
-  'js/charts.js?v=16',
-  'js/quant.js?v=16',
-  'js/backtest.js?v=16',
-  'js/catalog.js?v=16',
-  'js/dca.js?v=16',
-  'js/importer.js?v=16',
-  'js/alerts.js?v=16',
-  'js/app.js?v=16',
+  'css/style.css?v=17',
+  'js/data.js?v=17',
+  'js/ml.js?v=17',
+  'js/charts.js?v=17',
+  'js/quant.js?v=17',
+  'js/backtest.js?v=17',
+  'js/catalog.js?v=17',
+  'js/dca.js?v=17',
+  'js/importer.js?v=17',
+  'js/alerts.js?v=17',
+  'js/app.js?v=17',
   'manifest.webmanifest',
   'icon.svg',
 ];
