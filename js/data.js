@@ -548,7 +548,7 @@ function loadReconciliation() {
       }
     }
     const cash = parsed.cash === '' || parsed.cash === null || parsed.cash === undefined ? null : Number(parsed.cash);
-    const date = Number.isFinite(new Date(parsed.date).getTime()) ? new Date(parsed.date).toISOString() : null;
+    const date = parsed.date && Number.isFinite(new Date(parsed.date).getTime()) ? new Date(parsed.date).toISOString() : null;
     return { assets, cash: Number.isFinite(cash) && Math.abs(cash) < 1e15 ? cash : null, date };
   } catch (e) { return { assets: {}, cash: null, date: null }; }
 }

@@ -22,9 +22,11 @@ De runtime-app zelf heeft geen npm-dependencies en geen buildstap.
 
 ## Belangrijkste functies
 
-- Dashboard met posities, allocatie, cashflow-gecorrigeerd dagresultaat, TWR en watchlist.
-- JSON-import en aanvullende DEGIRO/Bitvavo-CSV-import met strikte validatie, transactiededupe en rollback bij opslagfouten.
-- Volledige versie-2-backup en restore van transacties, assets, koersen, herkomst, watchlist, alerts en DCA-plannen.
+- Dashboard met effecten én cash, cashflow-gecorrigeerd dagresultaat, TWR, jaarlijks geldgewogen rendement (XIRR) en watchlist.
+- Cashledger voor koop/verkoop, storting/opname, dividend/rente, fees/belasting, splits en assettransfers. Interne trades veranderen de externe inleg niet.
+- Gemiddelde kostbasis, gerealiseerd resultaat, ledgerwaarschuwingen en brokerreconciliatie op aantallen en cash.
+- JSON-import en aanvullende DEGIRO/Bitvavo-CSV-import met strikte validatie, fees, cash-/assettransfers, transactiededupe en rollback bij opslagfouten.
+- Volledige versie-3-backup en restore van ledger, reconciliatie, assets, koersen, herkomst, watchlist, alerts en DCA-plannen; versie 2 migreert automatisch.
 - Expliciete koersherkomst per dag. Analyses vereisen minimaal 90% echte dekking in hun analysevenster.
 - Assetweergave, RSI/MACD, experimentele neurale projectie en een model-arena met vier expanding-window walk-forward-folds.
 - Backtests over 730 kalenderdagen, transactiekosten en aparte in-/out-of-sample auto-tune.
@@ -52,20 +54,22 @@ Automatisch verversen heeft een eigen schakelaar en wordt nooit stilzwijgend doo
 ## Data-integriteit
 
 - Asset-id's, datums, getallen, reekslengtes, kleuren en externe antwoorden worden gevalideerd.
-- Een restore accepteert alleen backup-schema 2 en schakelt netwerktoestemming opnieuw uit.
+- Een restore accepteert backup-schema 2 en 3, migreert oude trades waarderingsneutraal naar schema v4 en schakelt netwerktoestemming opnieuw uit.
 - Een restore schakelt ook automatisch verversen uit en herstelt geen provider- of refreshsessievoorkeuren.
 - Een generieke import kan ontbrekende historie reconstrueren om een grafiek te tonen. De provenance-array blijft dan `false`, zodat die waarden niet teruglekken in financiële analyses.
-- Stortingen en opnames worden uit dagrendement en TWR gefilterd. Bitvavo asset-transfers zonder kostprijs worden bij CSV-import gewaardeerd op de beschikbare dagkoers en expliciet als transfer bewaard.
+- Alleen externe stortingen, opnames en transfers worden uit dagrendement en TWR gefilterd; interne trades, dividend en fees blijven terecht onderdeel van het resultaat.
+- Een ongeldige verkoop/transfer of split zonder positie wordt fail-closed genegeerd en als ledgerprobleem getoond; een nieuwe handmatige boeking mag het historische cashsaldo niet verder negatief maken.
+- Bitvavo-EUR-funding wordt als cash geboekt, trades daartegen als intern; assettransfers zonder koers worden op de beschikbare dagkoers gewaardeerd en stakingrewards krijgen nul kostbasis zonder fictieve externe inleg.
 - Aandelen in een vreemde valuta worden alleen geregistreerd als ook een geldige EUR-reeks beschikbaar is; anders faalt de import veilig.
 
 ## Architectuur
 
 | Bestand | Verantwoordelijkheid |
 |---|---|
-| `js/data.js` | Datumgrid, assets, provenance, gevalideerde transacties, holdings, cashflows en portefeuillewaarden |
+| `js/data.js` | Datumgrid, assets, provenance, schema-v4-gebeurtenissen, cashledger, kostbasis, reconciliatie en portefeuillewaarden |
 | `js/importer.js` | JSON/CSV-import, backup/restore, atomaire opslag en opt-in koersbronnen |
 | `js/ml.js` | Indicatoren, neuraal netwerk, walk-forward model-arena en Monte Carlo |
-| `js/quant.js` | TWR, correlatie, efficient frontier, benchmark en stressscenario's |
+| `js/quant.js` | TWR, XIRR/XNPV, correlatie, efficient frontier, benchmark en stressscenario's |
 | `js/backtest.js` | Signaalstrategieën, kosten, playback en auto-tune |
 | `js/catalog.js` | Watchlistcatalogus en gevalideerde watch-only assets |
 | `js/dca.js` | DCA-plannen, historische simulatie en lokale termijnboeking |
@@ -78,7 +82,7 @@ De scripts zijn klassieke browserscripts en delen bewust één globale runtime. 
 
 ## Testen en deployment
 
-`npm run check` voert unit-/regressietests en een publieke-buildcontrole uit. De controle faalt bij onder meer een syntaxfout, cacheversiemismatch, ontbrekend publiek bestand of gevolgd privépaddata. GitHub Actions draait dezelfde controle bij pushes en pull requests.
+`npm run check` voert unit-/regressietests en een publieke-buildcontrole uit. De tests dekken onder meer boekhoudkundige invarianties, v2→v3/v3→v4-migraties, XIRR, brokerimports en reconciliatie. De controle faalt bij onder meer een syntaxfout, cacheversiemismatch, ontbrekend publiek bestand of gevolgd privépaddata. GitHub Actions draait dezelfde controle bij pushes en pull requests.
 
 Deployment is een statische publicatie van de repository-root, bijvoorbeeld via GitHub Pages. Publiceer pas nadat `npm run check` slaagt. Stel daarnaast in de repository-instellingen branch protection in met de CI-job als verplichte statuscheck; dat kan niet vanuit deze lokale repository worden afgedwongen.
 

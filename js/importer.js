@@ -11,7 +11,8 @@
 
 const CUSTOM_KEY = 'vermogen_custom_v1';
 const MODE_KEY = 'vermogen_mode';
-const BACKUP_SCHEMA_VERSION = 2;
+const BACKUP_SCHEMA_VERSION = 3;
+const SUPPORTED_BACKUP_SCHEMA_VERSIONS = new Set([2, BACKUP_SCHEMA_VERSION]);
 const NETWORK_CONSENT_KEY = 'vermogen_network_consent_v1';
 const AUTO_REFRESH_KEY = 'vermogen_auto_refresh_v1';
 const PRICE_REFRESH_META_KEY = 'vermogen_price_refresh_meta_v1';
@@ -179,6 +180,8 @@ const F_CURRENCY = ['currency', 'valuta', 'quotecurrency', 'koersvaluta'];
 const F_VENUE = ['venue', 'exchange', 'beurs', 'market'];
 const F_QUOTE_SYMBOL = ['quotesymbol', 'yahoo', 'yahoosymbol', 'marketsymbol'];
 const F_SOURCE_ID = ['id', 'transactionid', 'transaction_id', 'orderid', 'order_id'];
+const F_FEE = ['fee', 'fees', 'kosten', 'commission', 'commissie', 'transactionfee', 'transactiekosten'];
+const F_TAX = ['tax', 'taxes', 'belasting', 'withholdingtax', 'bronbelasting'];
 
 /** Herkent buy/sell in een tekstwaarde; null als het geen order-richting is. */
 function parseSide(v) {
@@ -202,6 +205,29 @@ function parseAssetClass(v) {
 function normalizeTxCandidate(o) {
   if (typeof o !== 'object' || o === null || Array.isArray(o)) return null;
   const date = parseDateFlexible(getField(o, F_DATE));
+
+  // Exact schema-v4-object: hiermee kunnen ook cash, dividend, splits en
+  // transfers uit een generieke JSON-import worden herkend.
+  const exactType = cleanDisplayText(o.type || '', 20).toLowerCase();
+  if (date && TRANSACTION_TYPES.includes(exactType)) {
+    const legacyTrade = TRADE_TYPES.has(exactType) && !Object.prototype.hasOwnProperty.call(o, 'external');
+    const exact = normalizeStoredTransaction({ ...o, date: date.toISOString() }, { legacy: legacyTrade });
+    if (exact) {
+      const rawName = getField(o, F_NAME);
+      return {
+        ...exact,
+        assetName: cleanDisplayText(rawName || exact.asset || 'Cashrekening', 80),
+        assetClass: parseAssetClass(getField(o, F_ASSETCLASS)),
+        currentPrice: parseNum(getField(o, ['currentprice', 'huidigekoers', 'lastprice', 'laatstekoers'])),
+        isin: cleanDisplayText(getField(o, F_ISIN) || '', 16).toUpperCase(),
+        assetCurrency: normalizeCurrency(getField(o, F_CURRENCY) || exact.currency) || 'EUR',
+        venue: cleanDisplayText(getField(o, F_VENUE) || '', 16).toUpperCase(),
+        quoteSymbol: cleanDisplayText(getField(o, F_QUOTE_SYMBOL) || '', 32),
+        sourceId: cleanDisplayText(getField(o, F_SOURCE_ID) || '', 80),
+      };
+    }
+  }
+
   let qty = parseNum(getField(o, F_QTY));
   let price = parseNum(getField(o, F_PRICE));
   const total = parseNum(getField(o, F_TOTAL));
@@ -209,7 +235,8 @@ function normalizeTxCandidate(o) {
   const rawName = getField(o, F_NAME);
 
   if (!date || !rawSymbol || qty === null || qty === 0) return null;
-  if (price === null && total !== null && qty !== 0) price = Math.abs(total) / Math.abs(qty);
+  const derivedPrice = price === null;
+  if (derivedPrice && total !== null && qty !== 0) price = Math.abs(total) / Math.abs(qty);
   // price 0 is legitiem (staking rewards, airdrops, bonussen): aantal telt
   // mee, kostprijs is nul. Alleen ontbrekend/negatief afwijzen.
   if (price === null || price < 0) return null;
@@ -235,14 +262,17 @@ function normalizeTxCandidate(o) {
   const symbol = normalizeAssetId(rawSymbol);
   if (!symbol) return null;
   const sourceId = cleanDisplayText(getField(o, F_SOURCE_ID) || '', 80);
+  const fee = derivedPrice ? 0 : Math.abs(parseNum(getField(o, F_FEE)) || 0);
+  const tax = derivedPrice ? 0 : Math.abs(parseNum(getField(o, F_TAX)) || 0);
   return {
-    date: date.toISOString(), type, qty, price,
+    date: date.toISOString(), type, qty, price, fee, tax,
+    currency: 'EUR', fxRate: 1, external: true, source: 'json',
     asset: symbol,
     assetName: cleanDisplayText(rawName || symbol, 80) || symbol,
     assetClass,
     currentPrice: parseNum(getField(o, ['currentprice', 'huidigekoers', 'lastprice', 'laatstekoers'])),
     isin: cleanDisplayText(getField(o, F_ISIN) || '', 16).toUpperCase(),
-    currency: cleanDisplayText(getField(o, F_CURRENCY) || 'EUR', 8).toUpperCase(),
+    assetCurrency: cleanDisplayText(getField(o, F_CURRENCY) || 'EUR', 8).toUpperCase(),
     venue: cleanDisplayText(getField(o, F_VENUE) || '', 16).toUpperCase(),
     quoteSymbol: cleanDisplayText(getField(o, F_QUOTE_SYMBOL) || '', 32),
     sourceId,
@@ -325,10 +355,11 @@ function scanJSON(root) {
             const d = parseDateFlexible(getField(o, ['purchasedate', 'aankoopdatum', 'since', 'firstbuy'])) || new Date(Date.now() - 365 * 86400000);
             txs.push({
               date: d.toISOString(), type: 'buy', qty, price: avg,
+              fee: 0, tax: 0, currency: 'EUR', fxRate: 1, external: true, source: 'position-import',
               asset,
               assetName: cleanDisplayText(getField(o, F_NAME) || sym, 80),
               isin: cleanDisplayText(getField(o, F_ISIN) || '', 16).toUpperCase(),
-              currency: cleanDisplayText(getField(o, F_CURRENCY) || 'EUR', 8).toUpperCase(),
+              assetCurrency: cleanDisplayText(getField(o, F_CURRENCY) || 'EUR', 8).toUpperCase(),
               venue: cleanDisplayText(getField(o, F_VENUE) || '', 16).toUpperCase(),
             });
           }
@@ -369,7 +400,11 @@ function provenanceFromPoints(points) {
 
 function stableTransactionId(tx, index = 0) {
   if (tx.sourceId) return `src-${cleanDisplayText(tx.sourceId, 72).replace(/[^A-Za-z0-9._-]/g, '-')}`;
-  const raw = [tx.date, tx.type, tx.asset, Number(tx.qty).toPrecision(12), Number(tx.price).toPrecision(12)].join('|');
+  const numeric = value => Number.isFinite(Number(value)) ? Number(value).toPrecision(12) : '';
+  const raw = [
+    tx.date, tx.type, tx.asset || '', numeric(tx.qty), numeric(tx.price), numeric(tx.amount),
+    numeric(tx.ratio), numeric(tx.fee), numeric(tx.tax), numeric(tx.externalValue), tx.external === true ? 'external' : '',
+  ].join('|');
   let hash = 2166136261;
   for (let i = 0; i < raw.length; i++) {
     hash ^= raw.charCodeAt(i);
@@ -430,27 +465,51 @@ function guessType(symbol, name) {
 
 function volForType(type) { return type === 'Crypto' ? 0.6 : type === 'ETF' ? 0.15 : 0.3; }
 
-function normalizeBackupTransaction(tx, index) {
-  if (!tx || typeof tx !== 'object') throw new Error(`Ongeldige transactie op positie ${index + 1}.`);
+function normalizeBackupTransaction(tx, index, { legacy = false } = {}) {
+  if (!tx || typeof tx !== 'object' || Array.isArray(tx)) throw new Error(`Ongeldige transactie op positie ${index + 1}.`);
   const date = parseDateFlexible(tx.date);
-  const asset = normalizeAssetId(tx.asset);
-  const qty = Number(tx.qty), price = Number(tx.price);
-  if (!date || !asset || !['buy', 'sell'].includes(tx.type) || !Number.isFinite(qty) || qty <= 0 || !Number.isFinite(price) || price < 0) {
-    throw new Error(`Ongeldige transactie op positie ${index + 1}.`);
-  }
-  const normalized = {
-    id: cleanDisplayText(tx.id || stableTransactionId({ ...tx, asset }, index), 100),
-    date: date.toISOString(), type: tx.type, asset, qty, price,
+  if (!date) throw new Error(`Ongeldige transactie op positie ${index + 1}.`);
+  const candidate = {
+    ...tx,
+    id: cleanDisplayText(tx.id || stableTransactionId({ ...tx, date: date.toISOString() }, index), 100),
+    date: date.toISOString(),
   };
-  if (tx.dca && typeof tx.dca === 'object') {
-    normalized.dca = { plan: cleanDisplayText(tx.dca.plan || '', 80), mult: Number(tx.dca.mult) || 1 };
-  }
-  if (tx.transfer === true) normalized.transfer = true;
+  const normalized = normalizeStoredTransaction(candidate, { legacy });
+  if (!normalized) throw new Error(`Ongeldige transactie op positie ${index + 1}.`);
   return normalized;
 }
 
+function normalizeBackupReconciliation(snapshot, assetIds) {
+  if (snapshot === null || snapshot === undefined) return null;
+  if (typeof snapshot !== 'object' || Array.isArray(snapshot)) throw new Error('Backup bevat een ongeldige brokerreconciliatie.');
+  const clean = { assets: {}, cash: null, date: null };
+  if (snapshot.assets !== undefined && (typeof snapshot.assets !== 'object' || Array.isArray(snapshot.assets))) {
+    throw new Error('Backup bevat ongeldige reconciliatieposities.');
+  }
+  for (const [rawId, rawQty] of Object.entries(snapshot.assets || {})) {
+    const id = normalizeAssetId(rawId), qty = Number(rawQty);
+    if (!id || !assetIds.has(id) || !Number.isFinite(qty) || qty < 0 || qty >= 1e15) {
+      throw new Error(`Backup bevat een ongeldige brokerstand voor ${rawId}.`);
+    }
+    clean.assets[id] = qty;
+  }
+  if (snapshot.cash !== '' && snapshot.cash !== null && snapshot.cash !== undefined) {
+    const cash = Number(snapshot.cash);
+    if (!Number.isFinite(cash) || Math.abs(cash) >= 1e15) throw new Error('Backup bevat een ongeldig broker-cashsaldo.');
+    clean.cash = cash;
+  }
+  if (snapshot.date) {
+    const date = parseDateFlexible(snapshot.date);
+    if (!date) throw new Error('Backup bevat een ongeldige reconciliatiedatum.');
+    clean.date = date.toISOString();
+  }
+  return clean;
+}
+
 function restoreBackup(root) {
-  if (root?.schemaVersion !== BACKUP_SCHEMA_VERSION || root?.meta?.kind !== 'vermogen-backup' || !root.state) return null;
+  if (root?.meta?.kind !== 'vermogen-backup') return null;
+  if (!SUPPORTED_BACKUP_SCHEMA_VERSIONS.has(root?.schemaVersion)) throw new Error(`Backupversie ${root?.schemaVersion ?? 'onbekend'} wordt niet ondersteund.`);
+  if (!root.state) throw new Error('Backupstructuur is incompleet.');
   const state = root.state;
   if (!Array.isArray(state.transactions) || !Array.isArray(state.assets) || typeof state.prices !== 'object') {
     throw new Error('Backupstructuur is incompleet.');
@@ -472,10 +531,12 @@ function restoreBackup(root) {
   });
   const assetIds = new Set(assets.map(a => a.id));
   if (assetIds.size !== assets.length) throw new Error('Backup bevat dubbele asset-id’s.');
-  const transactions = state.transactions.map(normalizeBackupTransaction);
-  if (transactions.some(tx => !assetIds.has(tx.asset))) throw new Error('Backup bevat transacties zonder assetdefinitie.');
+  const legacy = root.schemaVersion === 2;
+  const transactions = state.transactions.map((tx, index) => normalizeBackupTransaction(tx, index, { legacy }));
+  if (transactions.some(tx => tx.asset && !assetIds.has(tx.asset))) throw new Error('Backup bevat transacties zonder assetdefinitie.');
   const transactionIds = new Set(transactions.map(tx => tx.id));
   if (transactionIds.size !== transactions.length) throw new Error('Backup bevat dubbele transactie-id’s.');
+  const reconciliation = normalizeBackupReconciliation(state.reconciliation, assetIds);
 
   const prices = {}, provenance = {};
   for (const asset of assets) {
@@ -505,6 +566,7 @@ function restoreBackup(root) {
     vermogen_watchassets_v1: JSON.stringify(Array.isArray(state.watchAssets) ? state.watchAssets : []),
     vermogen_livehist_v1: JSON.stringify(state.liveHistory && typeof state.liveHistory === 'object' ? state.liveHistory : {}),
     vermogen_yahoo_v1: JSON.stringify(state.yahooMap && typeof state.yahooMap === 'object' ? state.yahooMap : {}),
+    [RECONCILIATION_KEY]: reconciliation ? JSON.stringify(reconciliation) : null,
     [NETWORK_CONSENT_KEY]: 'no',
   };
   commitStorage(updates, { clearNamespace: true });
@@ -577,7 +639,7 @@ function importPortfolioJSON(jsonText) {
     const asset = {
       ...(existing || {}), id: sym, name, type, start: grid[0], drift: 0.08,
       vol: volForType(type), seed: existing?.seed || 1, color, custom: true, histSource,
-      isin: metadata.isin || existing?.isin || '', currency: metadata.currency || existing?.currency || 'EUR',
+      isin: metadata.isin || existing?.isin || '', currency: metadata.assetCurrency || existing?.currency || 'EUR',
       venue: metadata.venue || existing?.venue || '', yahoo: metadata.quoteSymbol || existing?.yahoo || '',
     };
     registerAsset(asset, grid, provenance);
@@ -587,13 +649,20 @@ function importPortfolioJSON(jsonText) {
   }
 
   const usedTransactionIds = new Set();
-  const cleanTxs = txs.map((t, i) => {
-    const baseId = stableTransactionId(t, i);
-    let id = baseId, suffix = 1;
-    while (usedTransactionIds.has(id)) id = `${baseId}-${suffix++}`;
-    usedTransactionIds.add(id);
-    return { id, date: t.date, type: t.type, asset: t.asset, qty: t.qty, price: t.price };
-  }).sort((a, b) => new Date(a.date) - new Date(b.date));
+  let cleanTxs;
+  try {
+    cleanTxs = txs.map((t, i) => {
+      const baseId = stableTransactionId(t, i);
+      let id = baseId, suffix = 1;
+      while (usedTransactionIds.has(id)) id = `${baseId}-${suffix++}`;
+      usedTransactionIds.add(id);
+      const normalized = normalizeStoredTransaction({ ...t, id });
+      if (!normalized) throw new Error(`Ongeldige herkende boeking op positie ${i + 1}.`);
+      return normalized;
+    }).sort((a, b) => new Date(a.date) - new Date(b.date));
+  } catch (error) {
+    return { ok: false, error: 'Herkende transacties konden niet veilig worden genormaliseerd: ' + error.message };
+  }
   const report = {
     txCount: cleanTxs.length, assetCount: symbols.length, symbols,
     histMatched, synthesized, restoredBackup: false, date: new Date().toISOString(),
@@ -603,6 +672,8 @@ function importPortfolioJSON(jsonText) {
       [CUSTOM_KEY]: JSON.stringify({ schemaVersion: BACKUP_SCHEMA_VERSION, assets: customAssets, prices: customPrices, provenance: customProvenance, report }),
       [MODE_KEY]: 'import',
       [TX_KEY]: JSON.stringify(cleanTxs),
+      [LEGACY_TX_KEY]: null,
+      [RECONCILIATION_KEY]: null,
     });
   } catch (e) {
     return { ok: false, error: 'Opslaan mislukt; de vorige data is hersteld. ' + e.message };
@@ -898,6 +969,7 @@ function exportBackup(txs) {
       watchAssets: JSON.parse(localStorage.getItem('vermogen_watchassets_v1') || '[]'),
       liveHistory: loadLiveHistory(),
       yahooMap: JSON.parse(localStorage.getItem('vermogen_yahoo_v1') || '{}'),
+      reconciliation: loadReconciliation(),
     },
   };
   const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
@@ -1201,9 +1273,14 @@ function parseDegiroCSV(objs) {
     const parsedDate = parseDateFlexible(o['Datum']);
     if (!parsedDate) continue;
     const dag = `${parsedDate.getFullYear()}-${String(parsedDate.getMonth() + 1).padStart(2, '0')}-${String(parsedDate.getDate()).padStart(2, '0')}`;
-    const waardeEur = Math.abs(parseNum(o['Waarde EUR']) ?? 0);
+    const waardeEur = Math.abs(parseNum(getField(o, ['waardeeur', 'waarde', 'totalvalueeur'])) ?? 0);
+    const fee = Math.abs(parseNum(getField(o, ['transactiekosteneur', 'transactiekosten', 'kosteneur', 'kosten', 'commissioneur'])) || 0);
+    const tax = Math.abs(parseNum(getField(o, ['belastingeur', 'belasting', 'taxeur', 'tax'])) || 0);
     const asset = ISIN_TICKERS[o['ISIN']] || o['ISIN'];
     const orderId = (o['Order ID'] || o[''] || o._raw[o._raw.length - 1] || '').trim();
+    const fallbackPrice = Math.abs(parseNum(o['Koers']) || 0);
+    const price = waardeEur > 0 ? waardeEur / Math.abs(aantal) : fallbackPrice;
+    if (!price) continue;
     txs.push({
       id: orderId ? `dg-${orderId}` : `dg-${dag}-${asset}-${aantal}`,
       day: dag,
@@ -1212,7 +1289,7 @@ function parseDegiroCSV(objs) {
       asset,
       assetName: (o['Product'] || asset).slice(0, 40),
       qty: Math.abs(aantal),
-      price: waardeEur / Math.abs(aantal),
+      price, fee, tax, currency: 'EUR', fxRate: 1, external: true, source: 'degiro',
     });
   }
   return { txs, transfers: 0 };
@@ -1222,29 +1299,57 @@ function parseDegiroCSV(objs) {
 function parseBitvavoCSV(objs) {
   const txs = [];
   let transfers = 0;
+  const hasCashFunding = objs.some(o => {
+    const type = String(o['Type'] || '').toLowerCase();
+    return String(o['Currency'] || '').toUpperCase() === 'EUR'
+      && ['deposit', 'withdrawal'].includes(type) && Math.abs(parseNum(o['Amount']) || 0) > 0;
+  });
   for (const o of objs) {
     const type = (o['Type'] || '').toLowerCase();
-    const cur = o['Currency'];
-    if (!cur || cur === 'EUR') continue;
+    const cur = String(o['Currency'] || '').toUpperCase();
+    if (!cur) continue;
     const parsedDate = parseDateFlexible(o['Date']);
     if (!parsedDate) continue;
-    const isTransfer = type === 'deposit' || type === 'withdrawal';
-    if (!isTransfer && !['buy', 'sell', 'staking', 'fixed_staking', 'manually_assigned'].includes(type)) continue;
     const amt = parseNum(o['Amount']);
     if (!amt) continue;
+    const day = `${parsedDate.getFullYear()}-${String(parsedDate.getMonth() + 1).padStart(2, '0')}-${String(parsedDate.getDate()).padStart(2, '0')}`;
+    const id = o['Transaction ID'] ? `bv-${o['Transaction ID']}` : `bv-${o['Date']}-${cur}-${amt}`;
+
+    if (cur === 'EUR') {
+      if (!['deposit', 'withdrawal'].includes(type)) continue;
+      transfers++;
+      txs.push({
+        id, day, date: parsedDate.toISOString(), type: type === 'withdrawal' ? 'withdrawal' : 'deposit',
+        amount: Math.abs(amt), currency: 'EUR', fxRate: 1, source: 'bitvavo',
+      });
+      continue;
+    }
+
+    const isAssetTransfer = type === 'deposit' || type === 'withdrawal';
+    const isReward = ['staking', 'fixed_staking', 'manually_assigned'].includes(type);
+    if (!isAssetTransfer && !isReward && !['buy', 'sell'].includes(type)) continue;
     const price = parseNum(o['Quote Price']) || 0;
-    if (isTransfer) transfers++;
-    txs.push({
-      id: o['Transaction ID'] ? `bv-${o['Transaction ID']}` : `bv-${o['Date']}-${cur}-${amt}`,
-      day: `${parsedDate.getFullYear()}-${String(parsedDate.getMonth() + 1).padStart(2, '0')}-${String(parsedDate.getDate()).padStart(2, '0')}`,
-      date: parsedDate.toISOString(),
-      type: isTransfer ? (type === 'withdrawal' ? 'sell' : 'buy') : (amt < 0 ? 'sell' : 'buy'),
-      asset: normalizeAssetId(cur),
-      assetName: cleanDisplayText(cur, 12).toUpperCase(),
-      qty: Math.abs(amt),
-      price, // staking/rewards hebben prijs 0: aantal telt, kostprijs nul
-      transfer: isTransfer,
-    });
+    const feeCurrency = String(o['Fee Currency'] || o['Fee currency'] || '').toUpperCase();
+    const fee = !feeCurrency || feeCurrency === 'EUR' ? Math.abs(parseNum(o['Fee']) || 0) : 0;
+    const base = {
+      id, day, date: parsedDate.toISOString(), asset: normalizeAssetId(cur),
+      assetName: cleanDisplayText(cur, 12).toUpperCase(), qty: Math.abs(amt), price,
+      currency: 'EUR', fxRate: 1, source: 'bitvavo',
+    };
+    if (isAssetTransfer) {
+      transfers++;
+      txs.push({ ...base, type: type === 'withdrawal' ? 'transfer_out' : 'transfer_in' });
+    } else if (isReward) {
+      txs.push({
+        ...base, type: amt < 0 ? 'transfer_out' : 'transfer_in',
+        costBasis: 0, externalValue: 0, source: 'bitvavo-reward',
+      });
+    } else {
+      txs.push({
+        ...base, type: type === 'sell' || amt < 0 ? 'sell' : 'buy',
+        fee, tax: 0, external: !hasCashFunding,
+      });
+    }
   }
   return { txs, transfers };
 }
@@ -1271,9 +1376,11 @@ function importTransactionCSV(text, existingTxs) {
   // economische rij. Twee orders met hetzelfde aantal op dezelfde dag
   // blijven zo bestaan wanneer prijs of richting verschilt.
   const keys = new Set(), ids = new Set();
+  const numericKey = value => Number.isFinite(Number(value)) ? Number(value).toFixed(8) : '';
   const txKey = t => [
-    t.asset, String(t.date || t.day).slice(0, 10), t.type,
-    Math.abs(Number(t.qty)).toFixed(8), Number(t.price).toFixed(8), t.transfer ? 'transfer' : 'trade',
+    t.asset || 'CASH', String(t.date || t.day).slice(0, 10), t.type,
+    numericKey(t.qty), numericKey(t.price), numericKey(t.amount), numericKey(t.fee), numericKey(t.tax),
+    numericKey(t.externalValue), TRANSFER_TYPES.has(t.type) || t.transfer ? 'transfer' : 'event',
   ].join('|');
   for (const t of existingTxs) {
     keys.add(txKey(t));
@@ -1282,30 +1389,36 @@ function importTransactionCSV(text, existingTxs) {
   const known = new Set(ASSETS.map(a => a.id));
 
   const added = [], skippedAssets = new Set();
-  let dedupe = 0;
+  let dedupe = 0, estimatedTransfers = 0;
   for (const t of parsed.txs) {
-    if (!known.has(t.asset)) { skippedAssets.add(t.asset); continue; }
-    if (t.transfer && t.price === 0 && MARKET.prices[t.asset]) {
+    if (t.asset && !known.has(t.asset)) { skippedAssets.add(t.asset); continue; }
+    let estimatedTransfer = false;
+    if (TRANSFER_TYPES.has(t.type) && t.price === 0 && t.externalValue === undefined && MARKET.prices[t.asset]) {
       t.price = MARKET.prices[t.asset][dateToIndex(t.date)];
-      t.estimatedTransferPrice = true;
+      estimatedTransfer = true;
     }
     const key = txKey(t);
     if ((t.id && ids.has(t.id)) || keys.has(key)) { dedupe++; continue; }
     keys.add(key); if (t.id) ids.add(t.id);
     delete t.day;
-    added.push(t);
+    const normalized = normalizeStoredTransaction(t);
+    if (!normalized) return { ok: false, error: `Ongeldige ${bron}-boeking aangetroffen (${t.id || t.type}).` };
+    added.push(normalized);
+    if (estimatedTransfer) estimatedTransfers++;
   }
-  existingTxs.push(...added);
-  existingTxs.sort((a, b) => new Date(a.date) - new Date(b.date));
-  saveTransactions(existingTxs);
+  const beforeInvested = totalInvested(existingTxs);
+  const merged = [...existingTxs, ...added].sort((a, b) => new Date(a.date) - new Date(b.date));
+  try { saveTransactions(merged); }
+  catch (error) { return { ok: false, error: 'CSV kon niet veilig worden opgeslagen: ' + error.message }; }
+  existingTxs.splice(0, existingTxs.length, ...merged.map(tx => normalizeStoredTransaction(tx)));
 
   return {
     ok: true, bron,
     added: added.length,
     dedupe,
     transfers: parsed.transfers,
-    estimatedTransfers: added.filter(t => t.estimatedTransferPrice).length,
+    estimatedTransfers,
     skippedAssets: [...skippedAssets],
-    addedValue: added.reduce((s, t) => s + (t.type === 'buy' ? 1 : -1) * t.qty * t.price, 0),
+    addedValue: totalInvested(merged) - beforeInvested,
   };
 }

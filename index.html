@@ -8,7 +8,7 @@
 <meta name="theme-color" content="#0a0c14">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="css/style.css?v=15">
+<link rel="stylesheet" href="css/style.css?v=16">
 </head>
 <body>
 
@@ -485,7 +485,7 @@
           <button class="btn btn-ghost" id="set-export">⬇ Exporteer backup</button>
           <button class="btn btn-ghost btn-danger" id="set-clear">🗑 Alles wissen</button>
         </div>
-        <p class="explain">JSON-import vervangt portfoliodata; CSV-import (DEGIRO/Bitvavo) vult aan. Een versie-2-backup bevat transacties, assets, koershistorie en herkomst, watchlist, alerts en DCA-plannen. <b>Let op:</b> localStorage is gekoppeld aan de website-origin en is niet versleuteld; gebruik een privéapparaat en commit of deel je backup niet.</p>
+        <p class="explain">JSON-import vervangt portfoliodata; CSV-import (DEGIRO/Bitvavo) vult aan. Een versie-3-backup bevat de volledige cashledger, assets, koershistorie en herkomst, watchlist, alerts, DCA-plannen en brokerreconciliatie; versie 2 blijft importeerbaar. <b>Let op:</b> localStorage is gekoppeld aan de website-origin en is niet versleuteld; gebruik een privéapparaat en commit of deel je backup niet.</p>
         <div id="set-data-info"></div>
       </div>
 
@@ -613,15 +613,15 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<script src="js/data.js?v=15"></script>
-<script src="js/ml.js?v=15"></script>
-<script src="js/charts.js?v=15"></script>
-<script src="js/quant.js?v=15"></script>
-<script src="js/backtest.js?v=15"></script>
-<script src="js/catalog.js?v=15"></script>
-<script src="js/dca.js?v=15"></script>
-<script src="js/importer.js?v=15"></script>
-<script src="js/alerts.js?v=15"></script>
-<script src="js/app.js?v=15"></script>
+<script src="js/data.js?v=16"></script>
+<script src="js/ml.js?v=16"></script>
+<script src="js/charts.js?v=16"></script>
+<script src="js/quant.js?v=16"></script>
+<script src="js/backtest.js?v=16"></script>
+<script src="js/catalog.js?v=16"></script>
+<script src="js/dca.js?v=16"></script>
+<script src="js/importer.js?v=16"></script>
+<script src="js/alerts.js?v=16"></script>
+<script src="js/app.js?v=16"></script>
 </body>
 </html>

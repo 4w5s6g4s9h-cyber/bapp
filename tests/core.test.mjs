@@ -140,6 +140,7 @@ test('assettransfers gebruiken afzonderlijke kostbasis en externe waarde', () =>
 test('brokerreconciliatie vergelijkt aantallen en cash met expliciete toleranties', () => {
   const rt = createRuntime(['js/data.js']);
   const result = rt.evaluate(`(() => {
+    const empty = loadReconciliation();
     registerAsset({ id: 'REC', name: 'Recon', type: 'ETF' }, new Array(HISTORY_DAYS).fill(120), new Array(HISTORY_DAYS).fill(true));
     const date = MARKET.dates[HISTORY_DAYS - 1].toISOString();
     const txs = [
@@ -150,9 +151,10 @@ test('brokerreconciliatie vergelijkt aantallen en cash met expliciete tolerantie
     const mismatch = reconcilePortfolio(txs, { assets: { REC: 4.5 }, cash: 499, date });
     const saved = saveReconciliation({ assets: { REC: 5 }, cash: 500 });
     const loaded = loadReconciliation();
-    return { exact, mismatch, saved, loaded };
+    return { empty, exact, mismatch, saved, loaded };
   })()`);
   const resultPlain = JSON.parse(JSON.stringify(result));
+  assert.equal(resultPlain.empty.date, null);
   assert.equal(resultPlain.exact.complete, true);
   assert.equal(resultPlain.exact.balanced, true);
   assert.equal(resultPlain.mismatch.balanced, false);

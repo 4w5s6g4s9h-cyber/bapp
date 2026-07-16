@@ -1321,7 +1321,7 @@ function handleImportFile(file) {
       const skipped = result.skippedAssets.length
         ? ` · ${result.skippedAssets.length} onbekende assets overgeslagen (${result.skippedAssets.slice(0, 5).join(', ')}${result.skippedAssets.length > 5 ? '…' : ''})`
         : '';
-      const transfers = result.transfers ? ` · ${result.transfers} storting/opname verwerkt${result.estimatedTransfers ? ` (${result.estimatedTransfers} gewaardeerd op de beschikbare dagkoers)` : ''}` : '';
+      const transfers = result.transfers ? ` · ${result.transfers} cash- of assettransfer verwerkt${result.estimatedTransfers ? ` (${result.estimatedTransfers} gewaardeerd op de beschikbare dagkoers)` : ''}` : '';
       toast(`📥 ${result.bron}: ${result.added} nieuwe transacties toegevoegd, ${result.dedupe} al bekend${skipped}${transfers}`);
       if (result.added) setTimeout(() => location.reload(), 1600);
       return;
